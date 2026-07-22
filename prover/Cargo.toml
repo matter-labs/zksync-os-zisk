@@ -1,0 +1,38 @@
+[package]
+name = "zksync-os-zisk-prover-service"
+version = "0.1.0"
+edition = "2024"
+description = "ZiSK proof generation service for ZKsync OS multi-proof system"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full", "signal"] }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+base64 = "0.22"
+bincode = { version = "2", features = ["serde"] }
+url = "2"
+vise = "0.2"
+vise-exporter = "0.3"
+# Shared aggregator-guest parsing/constants: the input assembler validates
+# streams with the guest's own parser (host build pulls only tiny-keccak).
+zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator" }
+
+[dev-dependencies]
+# Pin cross-check only: asserts VADCOP_FINAL_BODY_WORDS against the real
+# pil2-proofman verifier at the pinned tag (see prover.rs tests).
+proofman-verifier = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.18.0", default-features = false, features = ["verify"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(zisk_hints)',
+    'cfg(zisk_hints_debug)',
+    'cfg(target_vendor, values("zisk"))',
+    'cfg(target_os, values("zkvm"))',
+] }
