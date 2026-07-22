@@ -1,0 +1,8 @@
+# Waived corpus failures — the ONLY acceptable non-OK results at steady
+# state. Format (tab-separated): chunk <TAB> max_count <TAB> detail_regex
+# <TAB> defect+reason. A chunk's failures matching detail_regex up to
+# max_count are reported as WAIVED; anything else is UNEXPECTED and makes
+# the runner exit non-zero. Case names (dump-NNNNNN-B) are run-order
+# dependent, so waivers key on chunk + failure signature, never case name.
+prague_eip7702_set_code_tx	6	after-preimage code fields mismatch	fixture-loaded delegation designators carry code_version 0 (three fixture addresses); unreachable on real chains (runtime always writes 1)
+paris_eip7610_create_collision	20	write count mismatch	create-collision onto storage-laden codeless nonce-0 accounts; native and guest both non-EIP-7610, divergently; state shape unreachable on real chains
