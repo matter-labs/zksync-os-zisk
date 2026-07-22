@@ -1,0 +1,33 @@
+[package]
+name = "zksync-os-zisk-guest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+zksync-os-zisk-lib = { path = "../lib", default-features = false }
+revm = { version = "=38.0.0", default-features = false, features = ["std"] }
+alloy-primitives = { version = "1", default-features = false, features = ["native-keccak"] }
+# REVM relies on deallocation to keep its live heap bounded. ZiSK's default
+# bump allocator never frees, so allocation-heavy batches eventually exhaust
+# the guest heap even after their temporary values are dropped.
+# (Table syntax: the pinned container's cargo 1.87 rejects multi-line
+# inline tables.)
+[dependencies.ziskos]
+git = "https://github.com/0xPolygonHermez/zisk.git"
+tag = "v0.18.0"
+features = ["zisk-embedded-dlmalloc-alloc"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# getrandom has no entropy source on the ZiSK target; the active dependency
+# graph resolves only the 0.2 line, stubbed here. (Newer getrandom majors in
+# the lockfile belong to platform branches that never build for this target.)
+[patch.crates-io]
+getrandom = { path = "getrandom-stub" }
+# Route all keccak-f permutations through ZiSK hardware-accelerated syscall.
+# Every crate using tiny-keccak (revm, alloy, zksync-os-revm) gets this for free.
+tiny-keccak = { path = "tiny-keccak-patch" }
