@@ -109,7 +109,10 @@ impl core::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             VerifyError::ProofLength { got } => {
-                write!(f, "PLONK proof must be {PLONK_PROOF_BYTES} bytes, got {got}")
+                write!(
+                    f,
+                    "PLONK proof must be {PLONK_PROOF_BYTES} bytes, got {got}"
+                )
             }
             VerifyError::PublicValuesLength { got } => write!(
                 f,
@@ -273,8 +276,7 @@ mod tests {
         "8c524538f5d736a2885f95bbf173d23a72712a9929767c44bcedd358adcf1fd8";
     const REAL_COMMITMENT: &str =
         "b35685d5f5511ec665bc7918003b3fa0bc156b12b7421791f3cffdc3c1bb622c";
-    const REAL_VADCOP_VK: &str =
-        "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
+    const REAL_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
     #[test]
     fn verify_plonk_accepts_well_shaped_artifact() {

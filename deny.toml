@@ -1,0 +1,44 @@
+# cargo-deny configuration shared by lib/, prover/ and guest-aggregator/
+# (run as `cargo deny --config ../deny.toml check` from each crate).
+
+[graph]
+all-features = false
+
+[advisories]
+# The lib, guest and guest-aggregator lockfiles are byte-frozen inputs of
+# the reproducible guest builds (the recorded ELF hashes and programVKs
+# derive from them), so yanked entries there surface as warnings and are
+# resolved at the next intentional VK rotation.
+yanked = "warn"
+unmaintained = "workspace"
+ignore = [
+    # bincode 1.x is the frozen BatchInput wire format shared between the
+    # server's input generator and the guest; it is pinned, not floating,
+    # and migrating the wire format is tracked separately.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",
+    "0BSD",
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+]
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "allow"

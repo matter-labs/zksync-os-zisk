@@ -1,0 +1,166 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  ZKSYNC_USE_CUDA_STUBS: "1"
+
+# The lib/, guest/ and guest-aggregator/ sources are byte-frozen inputs of
+# the reproducible guest builds: the recorded ELF hashes and the programVKs
+# pinned on L1 derive from those exact bytes. Formatting and lint fixes in
+# those trees land together with an intentional VK rotation; until then CI
+# checks them with the known lint set allowed. The prover crate and the
+# zisk-verifier crate are not part of any guest ELF. CI holds them to the
+# strict bar. Proving itself (GPU keys, ~41 GB setup) and the full EEST
+# corpus run outside CI.
+jobs:
+  prover:
+    name: prover (fmt, clippy, tests, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: prover
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - run: cargo fmt --check
+        working-directory: prover
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: prover
+      - run: cargo test
+        working-directory: prover
+      - run: cargo deny --log-level error check --config ../deny.toml licenses advisories sources
+        working-directory: prover
+
+  lib:
+    name: lib (clippy, tests, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lib
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      # int_plus_one and iter_cloned_collect are new clippy nits. int_plus_one
+      # is in the byte-frozen production source (executor block-hash window);
+      # its suggested rewrite is not equivalent at last_block_number 0, so the
+      # code stays as is until the next VK rotation. Both join the allowed set.
+      - run: >
+          cargo clippy --all-targets -- -D warnings
+          -A unexpected_cfgs
+          -A clippy::doc_lazy_continuation
+          -A clippy::int_plus_one
+          -A clippy::iter_cloned_collect
+          -A clippy::manual_div_ceil
+          -A clippy::manual_is_multiple_of
+          -A clippy::manual_repeat_n
+          -A clippy::needless_borrow
+          -A clippy::needless_range_loop
+          -A clippy::type_complexity
+          -A clippy::unnecessary_sort_by
+        working-directory: lib
+      - run: cargo test
+        working-directory: lib
+      - run: cargo deny --log-level error check --config ../deny.toml licenses advisories sources
+        working-directory: lib
+
+  guest-aggregator:
+    name: guest-aggregator (clippy, tests, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: guest-aggregator
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - run: cargo clippy --all-targets -- -D warnings -A unexpected_cfgs
+        working-directory: guest-aggregator
+      - run: cargo test
+        working-directory: guest-aggregator
+      - run: cargo deny --log-level error check --config ../deny.toml licenses advisories sources
+        working-directory: guest-aggregator
+
+  zisk-verifier:
+    name: zisk-verifier (fmt, clippy, tests, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: zisk-verifier
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      # The zisk-verifier crate is a host-side server crate. It is not an input
+      # of the reproducible guest builds, so CI holds it to the strict bar. The
+      # --all-features run also builds the stark-native path (proofman-verifier)
+      # and runs the real-fixture vadcop_final STARK test.
+      - run: cargo fmt --check
+        working-directory: zisk-verifier
+      - run: cargo clippy --all-targets --all-features -- -D warnings -A unexpected_cfgs
+        working-directory: zisk-verifier
+      - run: cargo test --all-features
+        working-directory: zisk-verifier
+      - run: cargo deny --log-level error check --config ../deny.toml licenses advisories sources
+        working-directory: zisk-verifier
+
+  test-utils:
+    name: test-utils (fmt, clippy, tests, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/test-utils
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.19.9
+      - run: cargo fmt --check
+        working-directory: tools/test-utils
+      - run: cargo clippy --all-targets -- -D warnings -A unexpected_cfgs
+        working-directory: tools/test-utils
+      - run: cargo test
+        working-directory: tools/test-utils
+      - run: cargo deny --log-level error check --config ../../deny.toml licenses advisories sources
+        working-directory: tools/test-utils
+
+  guest-elf-integrity:
+    name: guest ELFs reproduce the recorded hashes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Rebuild both guest ELFs from source in the pinned container and
+      # compare each fresh sha256 to the recorded hash. This builds the ELFs
+      # only; it does not prove, so it needs no GPU and no proving-key setup.
+      # The job goes red whenever the source no longer matches the recorded
+      # hash, which catches drift in the byte-frozen lib/, guest/ and
+      # guest-aggregator/ trees.
+      - name: rebuild the guest ELFs and compare to recorded hashes
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
