@@ -1,0 +1,28 @@
+[package]
+name = "zisk-verifier"
+version = "0.1.0"
+edition = "2021"
+description = "Off-chain verification helpers for ZKsync OS ZiSK proofs (server pre-submit checks)"
+license = "MIT OR Apache-2.0"
+
+# Keep the base crate dependency-light so the server can depend on it without
+# pulling the whole prover stack. The base build needs only a SHA-256 backend
+# and a 256-bit integer for the on-chain public-signal reduction.
+[dependencies]
+sha2 = { version = "0.10", default-features = false }
+ruint = { version = "1", default-features = false }
+proofman-verifier = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.18.0", default-features = false, features = ["verify"], optional = true }
+zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator", optional = true }
+
+[features]
+default = []
+# Enable the native (pure-Rust) vadcop_final STARK verifier via pil2-proofman.
+# Off by default: it adds the pil2-proofman verifier and the aggregator parser.
+# The base PLONK wire checks stay dependency-light without it.
+stark-native = ["dep:proofman-verifier", "dep:zksync-os-zisk-guest-aggregator"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(target_vendor, values("zisk"))',
+    'cfg(target_os, values("zkvm"))',
+] }
