@@ -1,0 +1,29 @@
+[package]
+name = "zksync-os-zisk-lib"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+zksync-os-revm = { git = "https://github.com/antoniolocascio-bot/zksync-os-revm", branch = "dev", default-features = false }
+revm = { version = "=38.0.0", default-features = false, features = ["std", "optional_balance_check", "serde"] }
+serde = { version = "1", features = ["derive"] }
+bincode = { version = "2", features = ["serde"] }
+alloy-primitives = { version = "1", default-features = false }
+alloy-consensus = { version = "1", default-features = false, features = ["k256", "crypto-backend"] }
+k256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+alloy-eips = { version = "1", default-features = false }
+blake2 = "0.10"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+default = ["c-libs"]
+# Enable C-based crypto (secp256k1, blst, c-kzg) — for native builds
+c-libs = ["revm/secp256k1", "revm/blst", "revm/c-kzg", "zksync-os-revm/c-libs"]
+# Expose the two-pass reference `BatchTreeUpdate::apply_reference` (the A/B
+# oracle) to out-of-crate benchmarks (`tools/mem-bench`). Off by default, so it
+# is never compiled into the guest, prover, or server builds.
+bench-internals = []

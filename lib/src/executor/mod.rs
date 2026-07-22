@@ -1,0 +1,528 @@
+//! REVM-based block executor for ZKsync OS with merkle proof verification.
+//!
+//! Every storage and account read is verified against a merkle proof that
+//! recovers the expected state root. Values come FROM the proofs, not from
+//! a separate data path.
+
+mod evm;
+mod interop;
+mod proven_db;
+mod stream;
+pub mod tx;
+mod verify;
+
+use std::collections::HashMap;
+
+use revm::database::CacheDB;
+use revm::primitives::B256;
+use zksync_os_revm::ZkSpecId;
+
+use crate::commitment;
+use crate::types::*;
+
+/// Execute a batch with full merkle proof verification and compute the
+/// BatchPublicInput hash matching the server/L1 format.
+pub fn execute_and_commit(input: &BatchInput) -> (BatchOutput, B256) {
+    let (output, commitment, _, _, _) = execute_and_commit_inner(input);
+    (output, commitment)
+}
+
+/// Same as `execute_and_commit` but also returns the three commitment
+/// sub-components for debugging.
+pub fn execute_and_commit_debug(input: &BatchInput) -> (BatchOutput, B256, B256, B256, B256) {
+    execute_and_commit_inner(input)
+}
+
+fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B256, B256) {
+    let spec_id = resolve_spec_and_validate(input);
+    // Build the proof-verified DB by collecting every proof at once (this holds
+    // all merkle siblings resident). The streaming entry point below builds the
+    // same DB proof-by-proof; both share the execution/commitment core.
+    let proven_db = proven_db::build_proven_db(input);
+    run_execution_and_commit(input, spec_id, proven_db)
+}
+
+/// Assert the wire-format version, resolve the spec id, and validate the block
+/// sequence. Shared by the collecting and streaming entry points.
+fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
+    assert_eq!(
+        input.version,
+        crate::types::BATCH_INPUT_VERSION,
+        "unsupported BatchInput wire-format version {} (this guest understands {})",
+        input.version,
+        crate::types::BATCH_INPUT_VERSION,
+    );
+    let spec_id = match input.spec_id {
+        0 => ZkSpecId::AtlasV1,
+        1 => ZkSpecId::AtlasV2,
+        2 => ZkSpecId::AtlasV3,
+        _ => panic!("unknown spec_id: {}", input.spec_id),
+    };
+    // `spec_id` (EVM spec + tx-rolling-hash seed) and `protocol_version_minor`
+    // (batch-output layout + multichain-root gate) are two independent witness
+    // knobs; native never emits an inconsistent pair. Cross-check them so an
+    // operator cannot combine, say, an AtlasV2 seed with the v31 output layout.
+    // AtlasV3 is the v31 line; AtlasV1/V2 are v30.
+    let is_v3 = matches!(spec_id, ZkSpecId::AtlasV3);
+    assert_eq!(
+        is_v3,
+        input.protocol_version_minor >= 31,
+        "inconsistent spec_id/protocol_version_minor: spec_id={} (AtlasV3={is_v3}), minor={}",
+        input.spec_id,
+        input.protocol_version_minor,
+    );
+    validate_block_sequence(input);
+    spec_id
+}
+
+/// Execute every block against the proof-verified `proven_db` and compute the
+/// batch commitment. This is the shared core: `execute_and_commit_inner`
+/// (collecting path) and `execute_and_commit_streaming` (streaming path) both funnel a
+/// fully built `ProvenDB` plus the (possibly proof-stripped) `BatchInput`
+/// through here, so the two paths produce a byte-identical commitment.
+///
+/// `input.blocks[].storage_proofs` is NEVER read here — only
+/// `build_proven_db`/streaming consume it — so the streaming path may pass
+/// blocks whose proofs have already been verified and dropped.
+fn run_execution_and_commit(
+    input: &BatchInput,
+    spec_id: ZkSpecId,
+    proven_db: proven_db::ProvenDB,
+) -> (BatchOutput, B256, B256, B256, B256) {
+    let meta = &input.batch_meta;
+    let mut cache_db = CacheDB::new(proven_db);
+
+    // Authenticate the pre-state block-hash ring against the L1-pinned
+    // `block_hashes_blake_before` before execution begins. The returned
+    // `before_ring` is the authenticated 256-entry history: any slot forgery
+    // changes its Blake2s commitment away from the pinned value, so passing this
+    // check pins every slot. It anchors both the BLOCKHASH map (seeded next) and
+    // the after-ring (rebuilt below).
+    let first_block = input.blocks.first().unwrap();
+    let before_ring = verify_block_hashes_blake_before(meta, first_block);
+
+    // Seed the BLOCKHASH map from that authenticated ring. Pre-batch numbers
+    // resolve to the L1-pinned history; intra-batch numbers are added inside the
+    // loop as each block's header hash is computed in-guest. A raw witness
+    // `block_hashes` entry never reaches the map, so a later block cannot inject
+    // a forged historical hash for a pre-batch slot.
+    cache_db
+        .db
+        .set_block_hashes(proven_db::pre_batch_block_hashes(&before_ring, first_block.number));
+
+    let mut block_results = Vec::with_capacity(input.blocks.len());
+    let mut computed_block_hashes: HashMap<u64, B256> = HashMap::new();
+
+    // Batch write set: union of the per-block net storage changes, each key
+    // carrying the value of its last change (matches the native tree update,
+    // which merges per-block diffs — including writes that net to zero
+    // against the batch pre-state).
+    let mut storage_writes: std::collections::HashMap<(revm::primitives::Address, revm::primitives::U256), revm::primitives::U256> =
+        std::collections::HashMap::new();
+    for block in &input.blocks {
+        verify_intra_batch_hashes(block, &computed_block_hashes);
+
+        let (result, net_changes) = evm::execute_block_proven(
+            input.chain_id, spec_id, block, &mut cache_db,
+        );
+        // Feed the block's own computed header hash back into the BLOCKHASH map
+        // so a later block's BLOCKHASH read resolves to this authenticated value.
+        cache_db
+            .db
+            .insert_block_hash(block.number, result.computed_block_header_hash);
+        computed_block_hashes.insert(block.number, result.computed_block_header_hash);
+        block_results.push(result);
+        storage_writes.extend(net_changes);
+    }
+
+    let output = BatchOutput { chain_id: input.chain_id, block_results };
+
+    // Build complete write map (storage + 0x8003 account properties) and verify.
+    // Non-executed account-property writes (system force-deploys) are accepted
+    // only in upgrade batches; `upgrade_tx_hash` is authenticated below to be
+    // nonzero iff an Upgrade tx is present, so this gate cannot be forged on.
+    let revm_writes = verify::build_revm_write_map(
+        &storage_writes,
+        &cache_db,
+        &meta.account_preimages_after,
+        !meta.upgrade_tx_hash.is_zero(),
+    );
+    let (tree_root_after, new_leaf_count) = verify::verify_tree_update(meta, &revm_writes);
+
+    // `before_ring` (authenticated above, before execution) anchors both the
+    // BLOCKHASH map and the after-ring.
+
+    // State before.
+    let state_before = commitment::state_commitment_hash(
+        &meta.tree_root_before, meta.leaf_count_before,
+        meta.block_number_before, &meta.block_hashes_blake_before,
+        meta.last_block_timestamp_before,
+    );
+
+    // State after.
+    //
+    // `block_hashes_blake_after` is reconstructed from AUTHENTICATED data only,
+    // never from the witness `meta.previous_block_hashes` (which the operator
+    // could forge; the pre-refactor code folded it verbatim and it was checked
+    // only by a cross-check with two escape hatches). The after-ring's pre-batch
+    // slots come from the L1-anchored `before_ring`; its intra-batch slots come
+    // from the guest's own `computed_block_hashes`. So `state_after` is a
+    // deterministic function of authenticated inputs, exactly like the before-ring.
+    let last_block = input.blocks.last().unwrap();
+    let last_block_result = output.block_results.last().unwrap();
+    let block_hashes_blake_after = reconstruct_block_hashes_blake_after(
+        first_block.number,
+        last_block.number,
+        &before_ring,
+        &computed_block_hashes,
+        &last_block_result.computed_block_header_hash,
+    );
+    let state_after = commitment::state_commitment_hash(
+        &tree_root_after, new_leaf_count,
+        last_block.number, &block_hashes_blake_after, last_block.timestamp,
+    );
+
+    // Batch output hash
+    let mut l1_tx_hashes = Vec::new();
+    let mut l2_to_l1_encoded_logs = Vec::new();
+    let mut num_l1_txs: u64 = 0;
+    let mut num_l2_txs: u64 = 0;
+    let mut num_upgrade_txs: u64 = 0;
+    let mut interop_roots_rolling_hash = B256::ZERO;
+
+    for block in &input.blocks {
+        for tx in &block.transactions {
+            match &tx.auth {
+                TxAuth::L1 { tx_hash, .. } => {
+                    l1_tx_hashes.push(*tx_hash);
+                    num_l1_txs += 1;
+                }
+                TxAuth::Upgrade { tx_hash, .. } => {
+                    assert_eq!(
+                        *tx_hash, meta.upgrade_tx_hash,
+                        "upgrade tx hash {tx_hash} != batch_meta.upgrade_tx_hash {}",
+                        meta.upgrade_tx_hash
+                    );
+                    num_upgrade_txs += 1;
+                }
+                TxAuth::L2 { .. } => {
+                    num_l2_txs += 1;
+                }
+                TxAuth::System { tx_hash, encoded_2718 } => {
+                    // System txs count as L2 txs in the batch commitment;
+                    // interop-root imports additionally fold every imported
+                    // root into the dependency-roots rolling hash. Both facts
+                    // are derived from the hash-authenticated encoding.
+                    num_l2_txs += 1;
+                    tx::fold_system_tx_interop_roots(
+                        tx_hash,
+                        encoded_2718,
+                        &mut interop_roots_rolling_hash,
+                    );
+                }
+            }
+        }
+    }
+    // Authenticate `upgrade_tx_hash` bidirectionally: it is folded into
+    // `batch_output_hash`, so an operator must not be able to set it on a
+    // non-upgrade batch (or drop the Upgrade tx while it stays nonzero). The
+    // loop above already pins any Upgrade tx's hash to it; here we close the
+    // other direction: it is nonzero iff exactly one Upgrade tx is present.
+    // (This also authenticates the force-deploy gate in `build_revm_write_map`.)
+    assert!(
+        num_upgrade_txs <= 1,
+        "at most one Upgrade tx per batch, found {num_upgrade_txs}"
+    );
+    assert_eq!(
+        num_upgrade_txs == 1,
+        !meta.upgrade_tx_hash.is_zero(),
+        "upgrade_tx_hash must be nonzero iff an Upgrade tx is present \
+         (upgrade txs: {num_upgrade_txs}, upgrade_tx_hash: {})",
+        meta.upgrade_tx_hash,
+    );
+
+    for br in &output.block_results {
+        for log in &br.l2_to_l1_logs {
+            l2_to_l1_encoded_logs.push(log.encode());
+        }
+    }
+
+    // Authenticate the two interop scalars instead of trusting the witness.
+    // Native reads both as storage reads of fixed system-contract slots at batch
+    // boundaries (block_flow/zk/post_tx_op::read_batch_context_inputs); the guest
+    // reproduces those reads against the server-supplied slot proofs (`interop`),
+    // so `multichain_root`/`sl_chain_id` are DERIVED, not inherited. A proof
+    // inconsistent with the pinned root fails there, rejecting a forged scalar.
+    let is_v31 = input.protocol_version_minor >= 31;
+    let (derived_multichain_root, derived_sl_chain_id) = if is_v31 {
+        let proofs = meta.interop_proofs.as_ref().expect(
+            "v31 batch is missing interop_proofs: the server must supply the \
+             sl_chain_id / multichain_root slot proofs",
+        );
+        // multichain_root: post-state read of MessageRoot 0x10005 against the
+        // in-guest-computed tree_root_after (zero unless a settlement layer).
+        let multichain_root = interop::derive_multichain_root(proofs, &tree_root_after);
+        // sl_chain_id: SystemContext 0x800b slot 0, read at post-state against the
+        // in-guest-computed tree_root_after. Post-state is used for every batch,
+        // including upgrades that write the slot this batch, so the value is
+        // always derived from an authenticated proof rather than inherited from
+        // the witness scalar.
+        let sl_chain_id = interop::derive_sl_chain_id(&proofs.sl_chain_id, &tree_root_after);
+        (multichain_root, sl_chain_id)
+    } else {
+        // v30 commits neither value: multichain folds in as zero below, and
+        // sl_chain_id is absent from the v30 batch-output layout.
+        (B256::ZERO, meta.sl_chain_id)
+    };
+
+    let priority_ops_hash = commitment::priority_ops_rolling_hash(&l1_tx_hashes);
+    let l2_logs_local_root = commitment::l2_to_l1_logs_root(&l2_to_l1_encoded_logs);
+    // For protocol v30, multichain_root folds in as zero (derived above); for
+    // v31+ it is the authenticated MessageRoot aggregation root.
+    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &derived_multichain_root);
+
+    let da_commitment = match meta.da_commitment_scheme {
+        0 | 1 => B256::ZERO,                                          // None / EmptyNoDA
+        2 | 3 => commitment::da_commitment_calldata(&meta.pubdata),       // PubdataKeccak / BlobsAndPubdataKeccak
+        4 => commitment::da_commitment_blobs(&meta.blob_versioned_hashes), // BlobsZKsyncOS
+        _ => panic!("unsupported DA commitment scheme: {}", meta.da_commitment_scheme),
+    };
+
+    // Batch output hash — released-line layouts, gated on the protocol minor
+    // exactly like the native `public_input_hash`: v31 packs the layer-2 tx
+    // count and the settlement-layer chain id, v30 does not. Both are
+    // chain_id-prefixed; the draft-0.4.0 chain_id-less layout returns at the
+    // AtlasV4 bump.
+    let batch_hash = commitment::batch_output_hash_native(
+        input.protocol_version_minor >= 31,
+        input.chain_id,
+        input.blocks.first().unwrap().timestamp,
+        last_block.timestamp,
+        meta.da_commitment_scheme,
+        &da_commitment,
+        num_l1_txs,
+        num_l2_txs,
+        &priority_ops_hash,
+        &l2_logs_root_hash,
+        &meta.upgrade_tx_hash,
+        &interop_roots_rolling_hash,
+        derived_sl_chain_id,
+    );
+
+    // Top-level PI commits to the chain config (draft-0.4.0 `BatchPublicInput::hash`).
+    let chain_config_hash = commitment::chain_config_hash(
+        input.chain_id,
+        meta.fri_proof_verification_enabled,
+        meta.max_tx_gas_limit,
+    );
+    let commitment = commitment::batch_public_input_hash(
+        &state_before,
+        &state_after,
+        &chain_config_hash,
+        &batch_hash,
+    );
+    (output, commitment, state_before, state_after, batch_hash)
+}
+
+fn validate_block_sequence(input: &BatchInput) {
+    let meta = &input.batch_meta;
+    assert!(!input.blocks.is_empty(), "batch must contain at least one block");
+    assert!(
+        input.blocks[0].number == meta.block_number_before + 1,
+        "first block number {} must follow block_number_before {}",
+        input.blocks[0].number, meta.block_number_before,
+    );
+    for w in input.blocks.windows(2) {
+        assert!(w[1].number == w[0].number + 1, "block numbers must be consecutive");
+        assert!(w[1].timestamp >= w[0].timestamp, "block timestamps must be non-decreasing");
+    }
+    validate_expected_tree_roots(input);
+}
+
+/// SOUNDNESS: every storage/account read is authenticated against the
+/// single L1-pinned pre-state root `meta.tree_root_before`. The witness scalar
+/// `block.expected_tree_root` is NOT trusted as a read-authentication root
+/// (`proven_db::expected_root_for_block` ignores it); it is retained on the wire
+/// only for version compatibility and must therefore be zero or exactly equal to
+/// `tree_root_before`. Reject anything else up front so a forged per-block read
+/// root fails with a named error on BOTH the collecting and streaming paths —
+/// including for a proofless block, where the per-proof root check would never
+/// fire.
+fn validate_expected_tree_roots(input: &BatchInput) {
+    let pinned = input.batch_meta.tree_root_before;
+    for block in &input.blocks {
+        assert!(
+            block.expected_tree_root.is_zero() || block.expected_tree_root == pinned,
+            "block {} expected_tree_root {} is neither zero nor the L1-pinned \
+             tree_root_before {}: storage reads must authenticate against the \
+             pinned pre-state root, never a witness-chosen per-block root",
+            block.number,
+            block.expected_tree_root,
+            pinned,
+        );
+    }
+}
+
+fn verify_intra_batch_hashes(block: &BlockInput, computed: &HashMap<u64, B256>) {
+    for &(num, hash) in &block.block_hashes {
+        if let Some(&expected) = computed.get(&num) {
+            assert_eq!(hash, expected,
+                "intra-batch block hash mismatch for block {num}: \
+                 server={hash}, computed={expected}");
+        }
+    }
+}
+
+/// Authenticate the pre-batch historical block-hash ring against the L1-pinned
+/// `block_hashes_blake_before` and return the authenticated 256-entry ring.
+///
+/// `block_hashes_blake_before` is part of `state_before`, which L1 chains to the
+/// previous batch's `state_after`, so it is trustworthy. The ring the guest
+/// actually uses is the separate witness field `first_block.block_hashes`: it
+/// feeds the `BLOCKHASH` opcode (via `ProvenDB::block_hash_ref`), supplies the
+/// first block's parent hash (`evm.rs`), and (via the returned ring) anchors the
+/// pre-batch slots of `block_hashes_blake_after`. `verify_intra_batch_hashes`
+/// covers only blocks computed within the batch.
+///
+/// A malicious sequencer could otherwise supply a forged-but-internally-
+/// consistent historical ring, making `BLOCKHASH(old_block)` return arbitrary
+/// values. Rebuilding the ring from the witnessed history and asserting its
+/// Blake2s commitment equals the pinned value anchors every slot: any single
+/// forged slot changes the commitment. The reconstructed ring is returned so the
+/// caller can reuse those authenticated slots when building the after-ring.
+pub(crate) fn verify_block_hashes_blake_before(
+    meta: &BatchMeta,
+    first_block: &BlockInput,
+) -> [B256; 256] {
+    let ring = reconstruct_ring(first_block.number, &first_block.block_hashes);
+    let reconstructed = commitment::block_hashes_blake(&ring[..255], &ring[255]);
+    assert_eq!(
+        reconstructed, meta.block_hashes_blake_before,
+        "pre-state block-hash ring is not authenticated by the L1-pinned \
+         block_hashes_blake_before: reconstructed={reconstructed}, \
+         pinned={}",
+        meta.block_hashes_blake_before,
+    );
+    ring
+}
+
+/// Rebuild the 256-entry block-hash context ring owned by `owner_block_number`
+/// from a witnessed `(block_number, hash)` history.
+///
+/// The ring covers blocks `[owner-256, owner-1]`, placed at
+/// `index = block_number + 256 - owner` (oldest at 0, the owner's parent at 255).
+/// Out-of-window entries are ignored and empty slots stay zero (genesis padding).
+/// This is the same layout the server hashes for `block_hashes_blake_before`.
+fn reconstruct_ring(owner_block_number: u64, hashes: &[(u64, B256)]) -> [B256; 256] {
+    let mut ring = [B256::ZERO; 256];
+    for &(num, hash) in hashes {
+        if num < owner_block_number && owner_block_number - num <= 256 {
+            let idx = (num + 256 - owner_block_number) as usize;
+            ring[idx] = hash;
+        }
+    }
+    ring
+}
+
+/// Canonical Blake2s commitment of the pre-state block-hash ring. Kept as a
+/// crate-visible helper for the block-hash authentication tests.
+#[cfg(test)]
+pub(crate) fn reconstruct_block_hashes_blake_before(
+    first_block_number: u64,
+    first_block_hashes: &[(u64, B256)],
+) -> B256 {
+    let ring = reconstruct_ring(first_block_number, first_block_hashes);
+    commitment::block_hashes_blake(&ring[..255], &ring[255])
+}
+
+/// Rebuild `block_hashes_blake_after` from authenticated data only, so the after
+/// block-hash ring folded into `state_after` never depends on the untrusted
+/// witness `meta.previous_block_hashes`.
+///
+/// The after-ring is the 256-entry BLOCKHASH context for the last block `L`,
+/// covering blocks `[L-255, L]`. Position `p` holds the hash of block
+/// `n = L - 255 + p`:
+/// - `p == 255` is block `L` itself: the guest's `computed_last_header`.
+/// - intra-batch (`F <= n <= L-1`): the guest's own `computed_block_hashes[n]`,
+///   unconditionally (never gated on a witness `block_hashes` listing, which was
+///   the multi-block "windowing" seam).
+/// - pre-batch (`0 <= n < F`): the corresponding slot of the L1-authenticated
+///   `before_ring` (the pre-batch portion `[L-255, F-1]` of the after-window is
+///   always inside the before-window `[F-256, F-1]`, so every such slot exists).
+///   Block 0 (genesis) is a real block. It falls in this branch, so the guest
+///   reads its authenticated hash from `before_ring[255]` and does not zero it.
+/// - pre-genesis padding (`n < 0`): zero.
+///
+/// For an honest batch this equals `block_hashes_blake(&meta.previous_block_hashes,
+/// &computed_last_header)`, so the committed value is unchanged; it only stops
+/// depending on the forgeable witness (closing both the zero-guard and the
+/// windowing seams, and the `L < 255` early-chain branch).
+pub(crate) fn reconstruct_block_hashes_blake_after(
+    first_block_number: u64,
+    last_block_number: u64,
+    before_ring: &[B256; 256],
+    computed_block_hashes: &HashMap<u64, B256>,
+    computed_last_header: &B256,
+) -> B256 {
+    let f = first_block_number;
+    let l = last_block_number;
+    let mut after = [B256::ZERO; 256];
+    after[255] = *computed_last_header;
+    for (p, slot) in after.iter_mut().enumerate().take(255) {
+        // Block number represented at position p (signed to handle early chain).
+        let n = l as i128 - 255 + p as i128;
+        if n < 0 {
+            continue; // Pre-genesis padding stays zero. Block 0 (genesis) is real.
+        }
+        let n = n as u64;
+        if n >= f && n <= l - 1 {
+            // Intra-batch: use the guest's own computed header hash.
+            *slot = *computed_block_hashes
+                .get(&n)
+                .expect("intra-batch block hash must be computed in-guest");
+        } else if n < f {
+            // Pre-batch: read from the L1-authenticated before-ring.
+            let before_idx = n as i128 + 256 - f as i128;
+            if (0..256).contains(&before_idx) {
+                *slot = before_ring[before_idx as usize];
+            }
+        }
+    }
+    commitment::block_hashes_blake(&after[..255], &after[255])
+}
+
+/// Execute a batch from bincode-serialized BatchInput bytes.
+/// Returns the output and batch commitment hash.
+/// Used by the server to compute ZiSK commitments in-process.
+pub fn execute_and_commit_from_bincode(
+    bincode_data: &[u8],
+) -> Result<(BatchOutput, B256), String> {
+    let batch_input: BatchInput =
+        crate::wire::decode(bincode_data).map_err(|e| format!("deserialize: {e}"))?;
+    Ok(execute_and_commit(&batch_input))
+}
+
+/// Streaming execution from bincode-serialized `BatchInput` bytes.
+///
+/// This is the memory-lean entry point the ZiSK guest uses. Instead of
+/// `bincode::deserialize::<BatchInput>` (which materialises EVERY merkle
+/// sibling on the heap before verification — the read-spam OOM floor), it
+/// parses the wire format with a `DeserializeSeed` tower that consumes the
+/// `storage_proofs` sequence element-by-element: each proof is deserialized,
+/// verified against the block's pre-state root, its value extracted into the
+/// `ProvenDB` under construction, and then DROPPED before the next proof is
+/// read. The siblings are therefore never all resident at once — the resident
+/// set holds only the small verified value map.
+///
+/// The wire format is unchanged: the server still `bincode`-serialises
+/// `BatchInput` exactly as before. Only the guest's *parsing* differs, and the
+/// resulting `ProvenDB` + commitment are byte-identical to the collecting path
+/// (`execute_and_commit_from_bincode`). See `stream.rs`.
+pub fn execute_and_commit_streaming(
+    bincode_data: &[u8],
+) -> Result<(BatchOutput, B256), String> {
+    let (input, proven_db) = stream::stream_deserialize_and_build_db(bincode_data)?;
+    let spec_id = resolve_spec_and_validate(&input);
+    let (output, commitment, _, _, _) = run_execution_and_commit(&input, spec_id, proven_db);
+    Ok((output, commitment))
+}

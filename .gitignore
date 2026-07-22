@@ -1,0 +1,17 @@
+# Rust build artifacts
+/target/
+/host/target/
+/guest/target/
+
+# Reproducible guest-build output. The ELFs are built by build-guest.sh /
+# build-aggregator.sh and verified against the recorded GUEST_ELF_SHA256
+# hashes; they are not committed.
+/out/
+
+# Foundry build artifacts
+/contracts/cache/
+/contracts/out/
+lib/target/
+lib/Cargo.lock
+guest/build/
+**/target/
