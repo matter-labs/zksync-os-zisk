@@ -1,0 +1,22 @@
+[package]
+name = "zksync-os-zisk-guest-aggregator"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+# The package has two targets: the pure parsing/validation/commitment
+# library (`src/lib.rs`, host-testable, also consumed by the prover-side
+# input assembler) and the zkVM guest binary (`src/main.rs`).
+#
+# zkVM-only dependencies (ziskos I/O + in-guest verification, the
+# ZiSK-accelerated native keccak) are target-gated so host builds compile
+# only the pure logic against tiny-keccak.
+[target.'cfg(all(target_os = "zkvm", target_vendor = "zisk"))'.dependencies]
+alloy-primitives = { version = "1", default-features = false, features = ["native-keccak"] }
+ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+
+[target.'cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))'.dependencies]
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+
+[profile.release]
+opt-level = 3
