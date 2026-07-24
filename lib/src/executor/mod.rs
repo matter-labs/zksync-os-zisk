@@ -332,6 +332,20 @@ fn validate_block_sequence(input: &BatchInput) {
         "first block number {} must follow block_number_before {}",
         input.blocks[0].number, meta.block_number_before,
     );
+    // Cross-batch timestamp monotonicity. `state_before` commits
+    // `meta.last_block_timestamp_before` (the previous batch's last block
+    // timestamp). The first block must not go before that value. Native applies
+    // the same rule per block in `post_tx_op` (`block_timestamp() >=
+    // last_block_timestamp`): the first block compares against this committed
+    // pre-batch value, and each later block compares against the block before
+    // it. The window loop below covers the later blocks; this assertion covers
+    // the batch boundary that the loop cannot see. Both use the same
+    // non-decreasing relation (`>=`), so equal timestamps stay valid.
+    assert!(
+        input.blocks[0].timestamp >= meta.last_block_timestamp_before,
+        "first block timestamp {} goes before the previous batch's last block timestamp {}",
+        input.blocks[0].timestamp, meta.last_block_timestamp_before,
+    );
     for w in input.blocks.windows(2) {
         assert!(w[1].number == w[0].number + 1, "block numbers must be consecutive");
         assert!(w[1].timestamp >= w[0].timestamp, "block timestamps must be non-decreasing");
@@ -525,4 +539,85 @@ pub fn execute_and_commit_streaming(
     let spec_id = resolve_spec_and_validate(&input);
     let (output, commitment, _, _, _) = run_execution_and_commit(&input, spec_id, proven_db);
     Ok((output, commitment))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{BatchInput, BatchMeta, BlockInput};
+
+    /// A block that carries the fields `validate_block_sequence` reads
+    /// (`number`, `timestamp`, `expected_tree_root`). The rest hold neutral
+    /// values.
+    fn block_at(number: u64, timestamp: u64) -> BlockInput {
+        BlockInput {
+            number,
+            timestamp,
+            base_fee: 0,
+            gas_limit: 0,
+            coinbase: revm::primitives::Address::ZERO,
+            prev_randao: B256::ZERO,
+            transactions: vec![],
+            account_preimages: vec![],
+            block_hashes: vec![],
+            storage_proofs: vec![],
+            block_header_hash: B256::ZERO,
+            l2_to_l1_logs: vec![],
+            expected_tree_root: B256::ZERO,
+        }
+    }
+
+    /// A batch whose sequence-relevant `batch_meta` fields are set. Only
+    /// `validate_block_sequence` reads them; every other field is neutral.
+    fn batch(
+        block_number_before: u64,
+        last_block_timestamp_before: u64,
+        blocks: Vec<BlockInput>,
+    ) -> BatchInput {
+        BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 1,
+            spec_id: 2,
+            protocol_version_minor: 31,
+            blocks,
+            bytecodes: vec![],
+            batch_meta: BatchMeta {
+                tree_root_before: B256::ZERO,
+                leaf_count_before: 0,
+                block_number_before,
+                last_block_timestamp_before,
+                block_hashes_blake_before: B256::ZERO,
+                previous_block_hashes: vec![],
+                upgrade_tx_hash: B256::ZERO,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 0,
+                blob_versioned_hashes: vec![],
+                tree_update: None,
+                account_preimages_after: vec![],
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+                interop_proofs: None,
+            },
+        }
+    }
+
+    /// A batch whose first block goes before the previous batch's last block
+    /// timestamp must be rejected. The previous batch ended at 100; the first
+    /// block claims 99.
+    #[test]
+    #[should_panic(expected = "goes before the previous batch")]
+    fn rejects_first_block_before_previous_batch() {
+        validate_block_sequence(&batch(0, 100, vec![block_at(1, 99)]));
+    }
+
+    /// A compliant batch still passes: the first block timestamp equals the
+    /// previous batch's last timestamp (non-decreasing allows equality), and a
+    /// later block keeps the timestamp non-decreasing across the boundary.
+    #[test]
+    fn accepts_first_block_at_or_after_previous_batch() {
+        validate_block_sequence(&batch(0, 100, vec![block_at(1, 100)]));
+        validate_block_sequence(&batch(0, 100, vec![block_at(1, 101), block_at(2, 101)]));
+    }
 }
