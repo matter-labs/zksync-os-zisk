@@ -57,16 +57,27 @@ mod abi_layout {
 ///
 /// Only `gas_used_override` and `force_fail` are taken from TxInput.
 /// `block_gas_limit` caps system transactions, whose own gas limit is zero.
+/// `max_tx_gas_limit` is the chain-config per-tx cap; with `block_gas_limit`
+/// it bounds every L2 transaction's gas limit (see `build_l2_tx`).
 ///
 /// Public so host-side witness builders (the dump-to-BatchInput reader) can
 /// run their read-discovery pass through the exact same tx construction the
 /// guest uses, instead of maintaining a drifting replica.
-pub fn build_proven_tx(input: &TxInput, block_gas_limit: u64) -> (ZKsyncTx<TxEnv>, B256, u8) {
+pub fn build_proven_tx(
+    input: &TxInput,
+    block_gas_limit: u64,
+    max_tx_gas_limit: u64,
+) -> (ZKsyncTx<TxEnv>, B256, u8) {
     match &input.auth {
         TxAuth::L1 { tx_hash, abi_encoded } | TxAuth::Upgrade { tx_hash, abi_encoded } => {
             build_l1_upgrade_tx(input, tx_hash, abi_encoded)
         }
-        TxAuth::L2 { signed_bytes } => build_l2_tx(input, signed_bytes),
+        // The effective per-tx cap native enforces for L2 transactions is the
+        // smaller of the block gas limit and the chain-config `max_tx_gas_limit`
+        // (`System::get_individual_tx_gas_limit`).
+        TxAuth::L2 { signed_bytes } => {
+            build_l2_tx(input, signed_bytes, block_gas_limit.min(max_tx_gas_limit))
+        }
         TxAuth::System { tx_hash, encoded_2718 } => {
             build_system_tx(input, tx_hash, encoded_2718, block_gas_limit)
         }
@@ -139,7 +150,11 @@ fn build_l1_upgrade_tx(
 /// Build a transaction from EIP-2718 RLP-encoded signed bytes.
 /// All execution fields are decoded from the signed envelope. The signature
 /// is verified via ecrecover to authenticate the caller.
-fn build_l2_tx(input: &TxInput, signed_bytes: &[u8]) -> (ZKsyncTx<TxEnv>, B256, u8) {
+fn build_l2_tx(
+    input: &TxInput,
+    signed_bytes: &[u8],
+    individual_tx_gas_limit: u64,
+) -> (ZKsyncTx<TxEnv>, B256, u8) {
     use alloy_consensus::transaction::SignerRecoverable;
     use alloy_consensus::TxEnvelope;
     use alloy_eips::Decodable2718;
@@ -163,6 +178,20 @@ fn build_l2_tx(input: &TxInput, signed_bytes: &[u8]) -> (ZKsyncTx<TxEnv>, B256, 
     let data = envelope.input().clone();
     let nonce = envelope.nonce();
     let gas_limit = envelope.gas_limit();
+
+    // Reject a transaction whose gas limit exceeds the effective per-tx cap.
+    // Native runs this check for every L2 transaction in `process_l2_transaction`
+    // (`validate_and_compute_fee_for_transaction`): it rejects the transaction
+    // with `CallerGasLimitMoreThanTxLimit` when `gas_limit > min(block_gas_limit,
+    // max_tx_gas_limit)`. L1, upgrade and system transactions take other paths
+    // that do not apply this cap, so only the L2 path enforces it here.
+    // `max_tx_gas_limit` is committed into `chain_config_hash`; without this
+    // check the guest would execute a transaction that native rejects.
+    assert!(
+        gas_limit <= individual_tx_gas_limit,
+        "L2 tx gas limit {gas_limit} exceeds the per-tx cap {individual_tx_gas_limit} \
+         (the smaller of the block gas limit and the chain max_tx_gas_limit)"
+    );
     let gas_price = envelope.max_fee_per_gas();
     let gas_priority_fee = envelope.max_priority_fee_per_gas();
     let chain_id = envelope.chain_id().or(input.chain_id);
@@ -429,4 +458,85 @@ fn decode_interop_roots(abi: &[u8]) -> Vec<([u8; 32], [u8; 32], Vec<B256>)> {
         roots.push((chain_id, block_or_batch, sides));
     }
     roots
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The chain-config per-tx cap default (`1 << 24`), matching native's
+    /// `DEFAULT_MAX_TX_GAS_LIMIT` and the server's `max_tx_gas_limit` default.
+    const MAX_TX_GAS_LIMIT: u64 = 1 << 24;
+
+    /// Sign a legacy L2 transaction with the given gas limit and return its
+    /// EIP-2718 encoding, ready for `TxAuth::L2`.
+    fn signed_l2_tx(gas_limit: u64) -> Vec<u8> {
+        use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
+        use alloy_eips::eip2718::Encodable2718;
+        use k256::ecdsa::SigningKey;
+
+        let sk = SigningKey::from_bytes((&[0x11u8; 32]).into()).unwrap();
+        let to = revm::primitives::Address::from([0x22u8; 20]);
+        let tx = TxLegacy {
+            chain_id: Some(1),
+            nonce: 0,
+            gas_price: 10,
+            gas_limit,
+            to: revm::primitives::TxKind::Call(to),
+            value: U256::ZERO,
+            input: Default::default(),
+        };
+        let sighash = tx.signature_hash();
+        let (sig, recid) = sk.sign_prehash_recoverable(sighash.as_slice()).unwrap();
+        let sig_bytes = sig.to_bytes();
+        let signature = alloy_primitives::Signature::new(
+            U256::from_be_slice(&sig_bytes[..32]),
+            U256::from_be_slice(&sig_bytes[32..]),
+            recid.is_y_odd(),
+        );
+        let envelope = TxEnvelope::Legacy(tx.into_signed(signature));
+        let mut signed = Vec::new();
+        envelope.encode_2718(&mut signed);
+        signed
+    }
+
+    fn l2_input(signed_bytes: Vec<u8>) -> TxInput {
+        TxInput {
+            chain_id: Some(1),
+            gas_used_override: None,
+            force_fail: false,
+            auth: TxAuth::L2 { signed_bytes },
+        }
+    }
+
+    /// An L2 transaction whose gas limit exceeds `max_tx_gas_limit` must be
+    /// rejected when the block gas limit is not the smaller bound.
+    #[test]
+    #[should_panic(expected = "exceeds the per-tx cap")]
+    fn rejects_l2_gas_limit_over_max_tx_cap() {
+        let input = l2_input(signed_l2_tx(MAX_TX_GAS_LIMIT + 1));
+        // Block gas limit is huge, so the chain cap is the binding bound.
+        build_proven_tx(&input, u64::MAX, MAX_TX_GAS_LIMIT);
+    }
+
+    /// The effective cap is the SMALLER of the block gas limit and the chain
+    /// cap: a transaction under `max_tx_gas_limit` but over the block gas limit
+    /// is still rejected.
+    #[test]
+    #[should_panic(expected = "exceeds the per-tx cap")]
+    fn rejects_l2_gas_limit_over_block_gas_limit() {
+        let input = l2_input(signed_l2_tx(2_000_000));
+        // Block gas limit is the binding bound here.
+        build_proven_tx(&input, 1_000_000, MAX_TX_GAS_LIMIT);
+    }
+
+    /// A transaction whose gas limit equals the cap is accepted: the relation
+    /// is `<=`, matching native's `tx_gas_limit <= individual_tx_gas_limit`.
+    #[test]
+    fn accepts_l2_gas_limit_at_cap() {
+        let input = l2_input(signed_l2_tx(MAX_TX_GAS_LIMIT));
+        // Building must not panic: the tx sits exactly at the cap.
+        let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, MAX_TX_GAS_LIMIT);
+        assert_eq!(tx_type, 0, "legacy L2 tx is type 0");
+    }
 }

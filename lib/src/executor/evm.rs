@@ -21,9 +21,10 @@ pub(super) fn execute_block_proven(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<ProvenDB>,
+    max_tx_gas_limit: u64,
 ) -> (BlockResult, Vec<((Address, U256), U256)>) {
     let (tx_results, tx_hashes, computed_l2_to_l1_logs, net_storage_changes) =
-        run_evm_block(chain_id, spec_id, block, cache_db);
+        run_evm_block(chain_id, spec_id, block, cache_db, max_tx_gas_limit);
 
     let total_gas_used: u64 = tx_results.iter().map(|t| t.gas_used).sum();
     // Native commits transactions as a keccak rolling hash over the tx hashes
@@ -108,6 +109,7 @@ fn run_evm_block<DB: DatabaseRef>(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<DB>,
+    max_tx_gas_limit: u64,
 ) -> (
     Vec<TxOutput>,
     Vec<B256>,
@@ -148,7 +150,7 @@ where
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
         evm.0.ctx.chain.set_tx_number(tx_idx as u16);
 
-        let (tx, tx_hash, _tx_type) = build_proven_tx(tx_input, block.gas_limit);
+        let (tx, tx_hash, _tx_type) = build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         tx_hashes.push(tx_hash);
 
         match evm.transact(tx) {

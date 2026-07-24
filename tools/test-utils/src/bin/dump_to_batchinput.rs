@@ -315,6 +315,7 @@ fn tracking_run(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut revm::database::CacheDB<RecordingDb>,
+    max_tx_gas_limit: u64,
 ) {
     use revm::ExecuteCommitEvm;
     use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext};
@@ -337,7 +338,8 @@ fn tracking_run(
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
         evm.0.ctx.chain.set_tx_number(tx_idx as u16);
-        let (tx, _tx_hash, _tx_type) = executor::tx::build_proven_tx(tx_input, block.gas_limit);
+        let (tx, _tx_hash, _tx_type) =
+            executor::tx::build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         match evm.transact_commit(tx) {
             Ok(_result) => {
                 let _ = evm.0.ctx.chain.take_logs();
@@ -658,8 +660,16 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
         read_accounts: RefCell::new(BTreeSet::new()),
     };
     let mut cache = revm::database::CacheDB::new(rec);
+    // Resolve the per-tx gas cap the same way `build_batch_input` does below:
+    // v0.3.0-line bundles carry 0 (no ChainConfig), which would reject every
+    // tx, so fall back to the v31 default.
+    let max_tx_gas_limit = if d.chain_config_max_tx_gas_limit == 0 {
+        1 << 24
+    } else {
+        d.chain_config_max_tx_gas_limit
+    };
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tracking_run(d.chain_id, spec, &block_env, &mut cache);
+        tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
     }));
     if tracked.is_err() {
         eprintln!(

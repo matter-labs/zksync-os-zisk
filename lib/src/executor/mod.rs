@@ -123,7 +123,7 @@ fn run_execution_and_commit(
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
         let (result, net_changes) = evm::execute_block_proven(
-            input.chain_id, spec_id, block, &mut cache_db,
+            input.chain_id, spec_id, block, &mut cache_db, meta.max_tx_gas_limit,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
         // so a later block's BLOCKHASH read resolves to this authenticated value.

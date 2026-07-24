@@ -2001,7 +2001,9 @@ mod tests {
         let c_code: Vec<u8> = vec![0x60, P as u8, 0x40, 0x60, 0x00, 0x55, 0x00];
         let c_addr: Address = "0x00000000000000000000000000000000c0de0001".parse().unwrap();
         let coinbase: Address = "0x00000000000000000000000000000000c01badde".parse().unwrap();
-        let (sender, signed) = sign_legacy([0x42u8; 32], 0, c_addr, vec![], 30_000_000);
+        // Gas limit stays under the chain `max_tx_gas_limit` (1 << 24); the
+        // tx only runs BLOCKHASH+SSTORE, so a modest limit is enough.
+        let (sender, signed) = sign_legacy([0x42u8; 32], 0, c_addr, vec![], 10_000_000);
 
         const GAS_USED: u64 = 100_000;
         let fee = U256::from(GAS_USED) * U256::from(10u64);
