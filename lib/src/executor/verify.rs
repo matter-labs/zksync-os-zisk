@@ -222,11 +222,159 @@ pub(super) fn verify_tree_update(
                 assert_eq!(tree_val, computed_val,
                     "tree_update value mismatch for {key}: tree={tree_val}, computed={computed_val}");
             }
+            // Bind the leaf count that drives `apply` to the count committed in
+            // `state_before`. `apply` uses `tree_update.leaf_count_before` as the
+            // insert start index and as the empty-subtree boundary, and it
+            // returns this count as the committed `new_leaf_count`. The batch
+            // also commits `meta.leaf_count_before` in `state_before`. Nothing
+            // else ties the two. If they differ, an inflated count forges
+            // `new_leaf_count`, and it forges `tree_root_after` on a batch that
+            // inserts. The old-root check does not catch this: the phantom gap
+            // holds only empty subtrees, so their empty-subtree anchors still
+            // recover the pinned old root. Reject a count that does not match.
+            assert_eq!(
+                tree_update.leaf_count_before, meta.leaf_count_before,
+                "tree_update.leaf_count_before ({}) must equal the committed state leaf count ({})",
+                tree_update.leaf_count_before, meta.leaf_count_before
+            );
             tree_update.apply(&meta.tree_root_before)
         }
         None => {
             assert!(revm_writes.is_empty(), "writes exist but no tree_update provided");
             (meta.tree_root_before, meta.leaf_count_before)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::merkle::{BatchTreeUpdate, TreeLeaf, WriteOp};
+    use crate::types::BatchMeta;
+
+    /// Compress two child hashes, exactly like `merkle::blake2s_compress`
+    /// (a single Blake2s over the two 32-byte slices).
+    fn compress(lhs: &B256, rhs: &B256) -> B256 {
+        let mut buf = [0u8; 64];
+        buf[..32].copy_from_slice(lhs.as_slice());
+        buf[32..].copy_from_slice(rhs.as_slice());
+        merkle::blake2s(&buf)
+    }
+
+    /// Dense reference root over `leaves` (by index) for a tree of `leaf_count`
+    /// leaves. Mirrors the private `merkle::tests::dense_root` oracle: hash every
+    /// position up from the leaves and pad each level with empty subtrees.
+    fn dense_root(leaves: &[(u64, TreeLeaf)], leaf_count: u64) -> B256 {
+        let empty = merkle::empty_subtree_hashes_vec();
+        let mut level: HashMap<u64, B256> = leaves
+            .iter()
+            .map(|(i, l)| (*i, merkle::hash_leaf(&l.key, &l.value, l.next_index)))
+            .collect();
+        let mut width = leaf_count;
+        for depth in 0..merkle::TREE_DEPTH {
+            let mut next: HashMap<u64, B256> = HashMap::new();
+            let next_width = width.div_ceil(2);
+            for i in 0..next_width {
+                let l = level.get(&(2 * i)).copied().unwrap_or(empty[depth as usize]);
+                let r = level.get(&(2 * i + 1)).copied().unwrap_or(empty[depth as usize]);
+                next.insert(i, compress(&l, &r));
+            }
+            level = next;
+            width = next_width;
+        }
+        level[&0]
+    }
+
+    /// A `BatchMeta` that carries the given root, committed leaf count, and
+    /// tree update. Only these three fields drive `verify_tree_update`; the rest
+    /// hold neutral values.
+    fn meta_with(
+        tree_root_before: B256,
+        leaf_count_before: u64,
+        tree_update: Option<BatchTreeUpdate>,
+    ) -> BatchMeta {
+        BatchMeta {
+            tree_root_before,
+            leaf_count_before,
+            block_number_before: 0,
+            last_block_timestamp_before: 0,
+            block_hashes_blake_before: B256::ZERO,
+            previous_block_hashes: vec![],
+            upgrade_tx_hash: B256::ZERO,
+            da_commitment_scheme: 2,
+            pubdata: vec![],
+            multichain_root: B256::ZERO,
+            sl_chain_id: 0,
+            blob_versioned_hashes: vec![],
+            tree_update,
+            account_preimages_after: vec![],
+            fri_proof_verification_enabled: false,
+            max_tx_gas_limit: 1 << 24,
+            interop_proofs: None,
+        }
+    }
+
+    /// Dense pre-state: MIN guard (idx 0), MAX guard (idx 1), one data leaf
+    /// (idx 2). Returns (old_root, leaves-by-index). `leaf_count_before == 3`.
+    fn build_three_leaf_tree(data_key: B256, data_value: B256) -> (B256, Vec<(u64, TreeLeaf)>) {
+        let leaves = vec![
+            (0u64, TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: 2 }),
+            (1u64, TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 }),
+            (2u64, TreeLeaf { key: data_key, value: data_value, next_index: 1 }),
+        ];
+        (dense_root(&leaves, 3), leaves)
+    }
+
+    /// The inflation exploit is rejected: a `tree_update` whose
+    /// `leaf_count_before` differs from the committed `meta.leaf_count_before`
+    /// must panic before `apply`. Empty operations/entries and empty
+    /// `revm_writes` pass every earlier check, so the run reaches the new
+    /// binding assertion directly, with no tree fixture.
+    #[test]
+    #[should_panic(expected = "must equal the committed state leaf count")]
+    fn rejects_leaf_count_mismatch() {
+        let tree_update = BatchTreeUpdate {
+            operations: vec![],
+            entries: vec![],
+            sorted_leaves: vec![],
+            intermediate_hashes: vec![],
+            // Inflated: the real committed count is 3.
+            leaf_count_before: 3 + 7,
+        };
+        let meta = meta_with(B256::ZERO, 3, Some(tree_update));
+        let revm_writes: HashMap<B256, B256> = HashMap::new();
+        verify_tree_update(&meta, &revm_writes);
+    }
+
+    /// The happy path still works: with matching counts, a single-update
+    /// `tree_update` passes `verify_tree_update` and returns the correct
+    /// `(tree_root_after, new_leaf_count)`. The old-root check inside `apply`
+    /// also guards the fixture — a wrong pre-state root would panic there.
+    #[test]
+    fn accepts_matching_leaf_count() {
+        let data_key = B256::repeat_byte(0x20);
+        let old_value = B256::repeat_byte(0xa1);
+        let new_value = B256::repeat_byte(0xb2);
+
+        let (old_root, mut leaves) = build_three_leaf_tree(data_key, old_value);
+
+        // Independent reference for the post-state root: leaf 2 gets new_value.
+        let mut after = leaves.clone();
+        after[2].1.value = new_value;
+        let expected_root_after = dense_root(&after, 3);
+
+        let tree_update = BatchTreeUpdate {
+            operations: vec![WriteOp::Update { index: 2 }],
+            entries: vec![(data_key, new_value)],
+            sorted_leaves: std::mem::take(&mut leaves),
+            intermediate_hashes: vec![],
+            leaf_count_before: 3,
+        };
+        let meta = meta_with(old_root, 3, Some(tree_update));
+        let revm_writes: HashMap<B256, B256> = [(data_key, new_value)].into_iter().collect();
+
+        let (root_after, new_leaf_count) = verify_tree_update(&meta, &revm_writes);
+        assert_eq!(new_leaf_count, 3, "update-only batch keeps the leaf count");
+        assert_eq!(root_after, expected_root_after, "post-state root must match the dense reference");
     }
 }
