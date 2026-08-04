@@ -39,20 +39,27 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ chainedPI)
   (`PUBLIC_INPUT_SHIFT = 32`), carried as a 32-byte big-endian word with
   the top 4 bytes zero.
 
-## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, 2026-07-15)
+## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, 2026-08-04)
+
+Session data: guest ELF sha256
+`32911f12d4ed76827d29bd04884972e865f188a5d2d03bcbf776f5dc0351f079`,
+aggregator ELF sha256
+`f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae`,
+server `multiprover-upstream` @ `44dd3113`, guest repo @ `f6065882`,
+4 sealed v31 batches of a `NEXT_TO_L1` test chain.
 
 ```text
-innerProgramVK   = 0x481748830df5c3b7aa5522333ace2c4b533352637b92fd3c83ecc506c5104ead
+innerProgramVK   = 0x1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468
 rootCVadcopFinal = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
 ```
 
 Batch commitments, in order:
 
 ```text
-commitment_1 = 0x95693fd871251f2a04f558f94852d31d4f7b0cd38b0ee2c746bd2851dc701dca
-commitment_2 = 0x4962160e4e0addc72fe2178dbbf3c5882ca1033790bb968d4fa451485987f99b
-commitment_3 = 0xe697864dd72ddded6f1818db6618efff8e695714db8492ac50abc9f5d8b6221e
-commitment_4 = 0x3cbda79d374329af945a0b1d2d73c87b2cd2cadb69ab3d6c03166a690dfff898
+commitment_1 = 0x6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea
+commitment_2 = 0x1f56fcbd24636dc0a635bc51808d7db9eabf3914f66611c93cf37ea440a5fe27
+commitment_3 = 0x9d909d7416f29633c361bfc00073a9004423f0e1cc46105cdd24550543c0e41c
+commitment_4 = 0x6ca5ada4916397cfb1b07a2f115f21fedf7e4a14a827995b3c5b392966532ad6
 ```
 
 ## Chain trace
@@ -60,24 +67,30 @@ commitment_4 = 0x3cbda79d374329af945a0b1d2d73c87b2cd2cadb69ab3d6c03166a690dfff89
 Per-batch public inputs (`commitment >> 32`):
 
 ```text
-PI[0] = 0x0000000095693fd871251f2a04f558f94852d31d4f7b0cd38b0ee2c746bd2851
-PI[1] = 0x000000004962160e4e0addc72fe2178dbbf3c5882ca1033790bb968d4fa45148
-PI[2] = 0x00000000e697864dd72ddded6f1818db6618efff8e695714db8492ac50abc9f5
-PI[3] = 0x000000003cbda79d374329af945a0b1d2d73c87b2cd2cadb69ab3d6c03166a69
+PI[0] = 0x000000006c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d692
+PI[1] = 0x000000001f56fcbd24636dc0a635bc51808d7db9eabf3914f66611c93cf37ea4
+PI[2] = 0x000000009d909d7416f29633c361bfc00073a9004423f0e1cc46105cdd245505
+PI[3] = 0x000000006ca5ada4916397cfb1b07a2f115f21fedf7e4a14a827995b3c5b3929
 ```
 
 Accumulator after each step:
 
 ```text
-seed (= PI[0]) = 0x0000000095693fd871251f2a04f558f94852d31d4f7b0cd38b0ee2c746bd2851
-after PI[1]    = 0x00000000143345f6cd45d8a2c6c11eb56b78f126e1e70063e1e1960b0b10b160
-after PI[2]    = 0x000000005168669ca2b6cfcd32f9570fe3e5210369b3e2ad7e035f86373be216
-after PI[3]    = 0x000000004e755bc20431285db82f02b677f0fa43b0b4ae7298e2f489e1a45b78
+seed (= PI[0]) = 0x000000006c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d692
+after PI[1]    = 0x00000000e5c55d4eb838c2759f4e4ca50ae9329ac3c72252168f069bd795a276
+after PI[2]    = 0x00000000276b0aa43c96c688be7b817c0e94ef3a91e8141eca61bed9209b2de0
+after PI[3]    = 0x00000000aef7dc22681088617d4cefece2e7afcc23e776dd7694c967ad5e5603
 ```
 
 ## Pinned outputs
 
 ```text
-chainedPI = 0x000000004e755bc20431285db82f02b677f0fa43b0b4ae7298e2f489e1a45b78
-digest    = 0x5f47db9b336cf84b7b7fc49ca77eadb5160e373dc8f12057d719f45d3b2fbd84
+chainedPI = 0x00000000aef7dc22681088617d4cefece2e7afcc23e776dd7694c967ad5e5603
+digest    = 0x7eabba6c7a68150706e10101195be54eaf3b39f699bc8da5f34c8033eedec13e
 ```
+
+The real aggregated proof of this range commits the same digest: the
+PLONK-wrapped aggregate has wire public-values bytes `[32..64]` equal to
+`digest`, bytes `[0..32]` equal to the aggregator programVK
+`0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254`, and
+bytes `[288..320]` equal to `rootCVadcopFinal`.

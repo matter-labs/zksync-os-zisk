@@ -19,16 +19,16 @@
 use zksync_os_zisk_guest_aggregator as agg;
 use zksync_os_zisk_prover_service::aggregator_input::load_proof_stream;
 
-const INNER_PROGRAM_VK: &str = "481748830df5c3b7aa5522333ace2c4b533352637b92fd3c83ecc506c5104ead";
+const INNER_PROGRAM_VK: &str = "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
 const ROOT_C_VADCOP_FINAL: &str =
     "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 const COMMITMENTS: [&str; 4] = [
-    "95693fd871251f2a04f558f94852d31d4f7b0cd38b0ee2c746bd2851dc701dca",
-    "4962160e4e0addc72fe2178dbbf3c5882ca1033790bb968d4fa451485987f99b",
-    "e697864dd72ddded6f1818db6618efff8e695714db8492ac50abc9f5d8b6221e",
-    "3cbda79d374329af945a0b1d2d73c87b2cd2cadb69ab3d6c03166a690dfff898",
+    "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea",
+    "1f56fcbd24636dc0a635bc51808d7db9eabf3914f66611c93cf37ea440a5fe27",
+    "9d909d7416f29633c361bfc00073a9004423f0e1cc46105cdd24550543c0e41c",
+    "6ca5ada4916397cfb1b07a2f115f21fedf7e4a14a827995b3c5b392966532ad6",
 ];
-const DIGEST: &str = "5f47db9b336cf84b7b7fc49ca77eadb5160e373dc8f12057d719f45d3b2fbd84";
+const DIGEST: &str = "7eabba6c7a68150706e10101195be54eaf3b39f699bc8da5f34c8033eedec13e";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

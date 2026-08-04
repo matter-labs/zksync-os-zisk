@@ -1,10 +1,11 @@
 # programVK (ZiSK ROM merkle root) of the aggregator guest ELF with the
 # L1-aligned binding fold (digest = keccak(innerVK ‖ rootC ‖ chainedPI),
 # chainedPI = the contract's _computeZKsyncOSHash chain).
-# Derived 2026-07-16 via `cargo-zisk program-setup` (ZiSK v0.18.0) on a
-# NATIVE cargo-zisk build, ELF sha256 bc2233cc53b5b183… — native builds
-# are NOT machine-deterministic; establish the containerized reproducible
-# build (as the STF guest has) and re-derive before any L1 pinning.
+# Derived 2026-08-04 via `cargo-zisk program-setup` (ZiSK v0.18.0) from the
+# reproducible container ELF with sha256
+# f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae
+# (see GUEST_ELF_SHA256). The value covers the ROM image only, so two ELFs
+# that differ outside the ROM image share it.
 # Root hash limbs: [5493673665871439133, 9312219928218982884,
 #                   6821400927643281845, 2102916816364401236]
 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254

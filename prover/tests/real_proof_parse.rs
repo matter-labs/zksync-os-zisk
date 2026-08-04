@@ -1,8 +1,7 @@
-//! Regression test against a REAL `cargo-zisk prove --plonk` (ZiSK v0.18.0)
-//! proof file — the artifact that settled plan item 2.1. Produced 2026-07-09
-//! on an RTX 5090 for a v30 batch of the integrated validation run (guest
-//! ELF c7d8e7dd…, batch commitment cross-checked against the guest
-//! executor's re-execution of the same `BatchInput`).
+//! Regression test against a REAL PLONK proof file (ZiSK v0.18.0): batch 1
+//! of the binding-vector range, wrapped by `cargo-zisk wrap-proof --plonk`
+//! on an RTX 5090 on 2026-08-04 from the same `vadcop_final` stream that
+//! `real_aggregation_vector.rs` checks. Guest ELF sha256 32911f12….
 //!
 //! Guards the wire-layout facts the round-trip tests cannot see:
 //! the publics region is ziskos's full 64-word (256-byte) output block.
@@ -10,9 +9,9 @@
 use zksync_os_zisk_prover_service::prover::parse_proof_file;
 
 const EXPECTED_PROGRAM_VK: &str =
-    "8c524538f5d736a2885f95bbf173d23a72712a9929767c44bcedd358adcf1fd8";
+    "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
 const EXPECTED_COMMITMENT: &str =
-    "b35685d5f5511ec665bc7918003b3fa0bc156b12b7421791f3cffdc3c1bb622c";
+    "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea";
 const EXPECTED_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
 fn hex(b: &[u8]) -> String {

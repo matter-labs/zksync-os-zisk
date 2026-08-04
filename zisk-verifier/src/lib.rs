@@ -273,9 +273,9 @@ mod tests {
     // (`prover/tests/data/real_proof_zisk_v0.18.0.bin`), also asserted by
     // `prover/tests/real_proof_parse.rs`.
     const REAL_PROGRAM_VK: &str =
-        "8c524538f5d736a2885f95bbf173d23a72712a9929767c44bcedd358adcf1fd8";
+        "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
     const REAL_COMMITMENT: &str =
-        "b35685d5f5511ec665bc7918003b3fa0bc156b12b7421791f3cffdc3c1bb622c";
+        "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea";
     const REAL_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
     #[test]
