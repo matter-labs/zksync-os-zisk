@@ -258,7 +258,11 @@ pub(super) fn build_verified_accounts(
                          proven={proven_hash}, computed={preimage_hash}"
                     );
 
-                    let props = merkle::AccountProperties::decode(preimage);
+                    // In-guest rejection: a preimage whose length is not the
+                    // 124-byte account-properties layout is invalid witness
+                    // data and must fail the proof.
+                    let props = merkle::AccountProperties::decode(preimage)
+                        .expect("account preimage must decode as account properties");
                     let code_hash = if props.observable_bytecode_hash.is_zero() {
                         if props.nonce == 0 && props.balance == [0u8; 32] {
                             B256::ZERO

@@ -328,7 +328,7 @@ mod tests {
         };
 
         // Serialize in ZiSK stdin format
-        let data = crate::wire::encode(&batch_input);
+        let data = crate::wire::encode(&batch_input).unwrap();
         let len = data.len() as u64;
         let mut buf = Vec::new();
         buf.extend_from_slice(&len.to_le_bytes());
@@ -2785,13 +2785,13 @@ mod tests {
     /// entry point (`execute_and_commit_from_bincode`, server path), from the
     /// same server-serialized bytes. This is the A/B commitment-equality check.
     fn assert_ab_streaming_matches(input: &BatchInput) {
-        let bytes = crate::wire::encode(input);
+        let bytes = crate::wire::encode(input).unwrap();
         let (out_a, c_a) = executor::execute_and_commit_from_bincode(&bytes).unwrap();
         let (out_b, c_b) = executor::execute_and_commit_streaming(&bytes).unwrap();
         assert_eq!(c_a, c_b, "streaming commitment != collecting commitment");
         assert_eq!(
-            crate::wire::encode(&out_a),
-            crate::wire::encode(&out_b),
+            crate::wire::encode(&out_a).unwrap(),
+            crate::wire::encode(&out_b).unwrap(),
             "streaming BatchOutput != collecting BatchOutput"
         );
     }
@@ -3069,7 +3069,7 @@ mod tests {
         );
 
         // Streaming/ELF path must reject too (Ok(Ok(_)) would mean it committed).
-        let forged_bytes = crate::wire::encode(&forged);
+        let forged_bytes = crate::wire::encode(&forged).unwrap();
         let rejected_stream =
             std::panic::catch_unwind(|| executor::execute_and_commit_streaming(&forged_bytes));
         assert!(
@@ -3217,7 +3217,7 @@ mod tests {
         );
 
         // ...and on the streaming/ELF path.
-        let forged_bytes = crate::wire::encode(&forged);
+        let forged_bytes = crate::wire::encode(&forged).unwrap();
         let rejected_stream =
             std::panic::catch_unwind(|| executor::execute_and_commit_streaming(&forged_bytes));
         assert!(

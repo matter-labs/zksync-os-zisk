@@ -613,37 +613,67 @@ pub struct AccountProperties {
     pub observable_bytecode_len: u32,
 }
 
+/// Reason an account-properties blob failed to decode.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AccountPropertiesDecodeError {
+    /// The blob length differs from [`AccountProperties::ENCODED_SIZE`].
+    WrongLength { expected: usize, actual: usize },
+}
+
+impl core::fmt::Display for AccountPropertiesDecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WrongLength { expected, actual } => write!(
+                f,
+                "account properties blob must be exactly {expected} bytes, got {actual}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AccountPropertiesDecodeError {}
+
+/// Read the `N` bytes at `offset` from an account-properties blob. A read past
+/// the end of the blob returns an error, so the decoder holds no index that
+/// can panic on a short blob.
+fn read_account_properties_field<const N: usize>(
+    data: &[u8],
+    offset: usize,
+) -> Result<[u8; N], AccountPropertiesDecodeError> {
+    data.get(offset..offset.saturating_add(N))
+        .and_then(|field| <[u8; N]>::try_from(field).ok())
+        .ok_or(AccountPropertiesDecodeError::WrongLength {
+            expected: AccountProperties::ENCODED_SIZE,
+            actual: data.len(),
+        })
+}
+
 impl AccountProperties {
     pub const ENCODED_SIZE: usize = 124;
 
-    pub fn decode(data: &[u8]) -> Self {
-        assert_eq!(
-            data.len(),
-            Self::ENCODED_SIZE,
-            "account properties blob must be exactly {} bytes, got {}",
-            Self::ENCODED_SIZE,
-            data.len(),
-        );
-        let versioning = u64::from_be_bytes(data[0..8].try_into().unwrap());
-        let nonce = u64::from_be_bytes(data[8..16].try_into().unwrap());
-        let mut balance = [0u8; 32];
-        balance.copy_from_slice(&data[16..48]);
-        let bytecode_hash = B256::from_slice(&data[48..80]);
-        let unpadded_code_len = u32::from_be_bytes(data[80..84].try_into().unwrap());
-        let artifacts_len = u32::from_be_bytes(data[84..88].try_into().unwrap());
-        let observable_bytecode_hash = B256::from_slice(&data[88..120]);
-        let observable_bytecode_len = u32::from_be_bytes(data[120..124].try_into().unwrap());
-
-        Self {
-            versioning,
-            nonce,
-            balance,
-            bytecode_hash,
-            unpadded_code_len,
-            artifacts_len,
-            observable_bytecode_hash,
-            observable_bytecode_len,
+    /// Decode a 124-byte account-properties blob.
+    ///
+    /// The host reads these blobs out of the state store, so a wrong length
+    /// reaches the caller as an error. Guest-side callers unwrap the result:
+    /// inside the zkVM a malformed blob rejects the proof.
+    pub fn decode(data: &[u8]) -> Result<Self, AccountPropertiesDecodeError> {
+        if data.len() != Self::ENCODED_SIZE {
+            return Err(AccountPropertiesDecodeError::WrongLength {
+                expected: Self::ENCODED_SIZE,
+                actual: data.len(),
+            });
         }
+
+        Ok(Self {
+            versioning: u64::from_be_bytes(read_account_properties_field(data, 0)?),
+            nonce: u64::from_be_bytes(read_account_properties_field(data, 8)?),
+            balance: read_account_properties_field(data, 16)?,
+            bytecode_hash: B256::from(read_account_properties_field::<32>(data, 48)?),
+            unpadded_code_len: u32::from_be_bytes(read_account_properties_field(data, 80)?),
+            artifacts_len: u32::from_be_bytes(read_account_properties_field(data, 84)?),
+            observable_bytecode_hash: B256::from(read_account_properties_field::<32>(data, 88)?),
+            observable_bytecode_len: u32::from_be_bytes(read_account_properties_field(data, 120)?),
+        })
     }
 
     /// Compute the Blake2s hash of the encoded account properties.
@@ -683,6 +713,45 @@ pub fn derive_account_properties_key(account: &[u8; 20]) -> B256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The host build path feeds untrusted state blobs to the decoder, so a
+    /// blob of the wrong length must come back as an error. A well-formed blob
+    /// must decode every field at its documented offset.
+    #[test]
+    fn account_properties_decode_reports_wrong_length() {
+        for length in [0usize, 1, 123, 125, 256] {
+            let error = AccountProperties::decode(&vec![0u8; length])
+                .err()
+                .unwrap_or_else(|| panic!("a {length}-byte blob must be rejected"));
+            assert_eq!(
+                error,
+                AccountPropertiesDecodeError::WrongLength {
+                    expected: AccountProperties::ENCODED_SIZE,
+                    actual: length,
+                }
+            );
+        }
+
+        let mut blob = [0u8; AccountProperties::ENCODED_SIZE];
+        blob[0..8].copy_from_slice(&0x0101_0100_0000_0000u64.to_be_bytes());
+        blob[8..16].copy_from_slice(&7u64.to_be_bytes());
+        blob[16..48].copy_from_slice(B256::repeat_byte(0x11).as_slice());
+        blob[48..80].copy_from_slice(B256::repeat_byte(0x22).as_slice());
+        blob[80..84].copy_from_slice(&23u32.to_be_bytes());
+        blob[84..88].copy_from_slice(&8u32.to_be_bytes());
+        blob[88..120].copy_from_slice(B256::repeat_byte(0x33).as_slice());
+        blob[120..124].copy_from_slice(&23u32.to_be_bytes());
+
+        let props = AccountProperties::decode(&blob).expect("a 124-byte blob must decode");
+        assert_eq!(props.versioning, 0x0101_0100_0000_0000);
+        assert_eq!(props.nonce, 7);
+        assert_eq!(props.balance, [0x11u8; 32]);
+        assert_eq!(props.bytecode_hash, B256::repeat_byte(0x22));
+        assert_eq!(props.unpadded_code_len, 23);
+        assert_eq!(props.artifacts_len, 8);
+        assert_eq!(props.observable_bytecode_hash, B256::repeat_byte(0x33));
+        assert_eq!(props.observable_bytecode_len, 23);
+    }
 
     #[test]
     fn empty_leaf_hash_matches_server() {

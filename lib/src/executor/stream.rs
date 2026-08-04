@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn streaming_provendb_matches_collecting() {
         let input = build_fixture();
-        let bytes = crate::wire::encode(&input);
+        let bytes = crate::wire::encode(&input).unwrap();
 
         // Collecting path.
         let full: BatchInput = crate::wire::decode(&bytes).unwrap();
@@ -631,8 +631,8 @@ mod tests {
             b.storage_proofs.clear();
         }
         assert_eq!(
-            crate::wire::encode(&stripped),
-            crate::wire::encode(&full_cleared),
+            crate::wire::encode(&stripped).unwrap(),
+            crate::wire::encode(&full_cleared).unwrap(),
             "stripped BatchInput diverges from the full parse (minus proofs)"
         );
 

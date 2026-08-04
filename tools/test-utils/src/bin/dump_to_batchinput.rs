@@ -251,7 +251,8 @@ impl revm::DatabaseRef for RecordingDb {
                         "no preimage for account {address} props hash {hash}"
                     ))
                 })?;
-                let props = AccountProperties::decode(preimage);
+                let props = AccountProperties::decode(preimage)
+                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))?;
                 let code_hash = if props.observable_bytecode_hash.is_zero() {
                     if props.nonce == 0 && props.balance == [0u8; 32] {
                         B256::ZERO
@@ -361,10 +362,11 @@ fn tracking_run(
 fn derive_codes(preimages: &HashMap<B256, Vec<u8>>) -> BTreeMap<B256, Vec<u8>> {
     let mut codes = BTreeMap::new();
     for blob in preimages.values() {
-        if blob.len() != AccountProperties::ENCODED_SIZE {
+        // The preimage store mixes account blobs with code blobs; only the
+        // ones that decode as account properties name a bytecode.
+        let Ok(props) = AccountProperties::decode(blob) else {
             continue;
-        }
-        let props = AccountProperties::decode(blob);
+        };
         let obs = props.observable_bytecode_hash;
         if obs.is_zero() || obs == KECCAK_EMPTY || codes.contains_key(&obs) {
             continue;

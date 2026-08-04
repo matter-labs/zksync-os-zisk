@@ -24,10 +24,11 @@ pub fn config() -> bincode::config::Configuration {
     bincode::config::standard()
 }
 
-/// Encode a value to wire bytes. The shared types are plain data, so encoding
-/// never fails; a failure is a programming error and panics.
-pub fn encode<T: Serialize>(value: &T) -> Vec<u8> {
-    bincode::serde::encode_to_vec(value, config()).expect("bincode encode must not fail")
+/// Encode a value to wire bytes. The host assembles the guest input with this
+/// function, so an encode failure reaches the caller as an error and degrades
+/// that one batch.
+pub fn encode<T: Serialize>(value: &T) -> Result<Vec<u8>, bincode::error::EncodeError> {
+    bincode::serde::encode_to_vec(value, config())
 }
 
 /// Decode a value from wire bytes. Trailing bytes are allowed: the ZiSK guest
@@ -55,7 +56,7 @@ mod tests {
             b: vec![1, 2, 3, 4, 5],
             c: Some(42),
         };
-        let bytes = encode(&value);
+        let bytes = encode(&value).unwrap();
         let back: Sample = decode(&bytes).unwrap();
         assert_eq!(value, back);
     }
@@ -67,7 +68,7 @@ mod tests {
             b: vec![9, 9],
             c: None,
         };
-        let mut bytes = encode(&value);
+        let mut bytes = encode(&value).unwrap();
         // Zero-pad to an 8-byte boundary, mirroring the ZiSK stdin framing.
         let pad = (8 - (bytes.len() % 8)) % 8;
         bytes.extend(std::iter::repeat_n(0u8, pad));

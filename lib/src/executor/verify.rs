@@ -49,7 +49,10 @@ pub(super) fn build_revm_write_map(
     // self-consistency check below. For accounts REVM executed we also pin
     // nonce/balance to REVM's output.
     for (&addr, &after_preimage) in &after_map {
-        let props = merkle::AccountProperties::decode(after_preimage);
+        // In-guest rejection: an after-preimage that is not the 124-byte
+        // account-properties layout is invalid witness data.
+        let props = merkle::AccountProperties::decode(after_preimage)
+            .expect("after-preimage must decode as account properties");
 
         let executed = cache_db.cache.accounts.get(addr).filter(|a| {
             !matches!(
