@@ -1,11 +1,14 @@
 //! ZiSK Prover Service for ZKsync OS
 //!
 //! External prover that polls the ZKsync OS server for ZiSK batch data,
-//! drives proof generation on a resident ZiSK prover service via `cargo-zisk
-//! remote`, and submits the results back to the server for multi-proof
-//! composition. A long-lived `zisk-coordinator` and its `zisk-worker` hold
-//! the proving keys and the GPU. The daemon is a thin client and points at
-//! the coordinator.
+//! generates STARK + SNARK proofs with `cargo-zisk`, and submits the results
+//! back to the server for multi-proof composition.
+//!
+//! By default it runs one `cargo-zisk` process per proof, which the pinned
+//! ZiSK v0.18.0 toolchain supports. `--coordinator-url` instead drives a
+//! resident `zisk-coordinator` whose worker keeps the proving keys and the
+//! GPU loaded; that path needs a toolchain with the `cargo-zisk remote`
+//! subcommand (ZiSK v1.0.0-alpha and later).
 //!
 //! Two modes, matching the server's `zisk_aggregation` setting:
 //! - Per-batch (default): each batch is proven with the PLONK wrap and the
@@ -41,15 +44,33 @@ struct Args {
     #[arg(long)]
     elf_path: PathBuf,
 
-    /// gRPC URL of the resident `zisk-coordinator`. The daemon uploads the
-    /// ELF and proves against this service; the proving keys and GPU live on
-    /// its worker.
+    /// Path to the ZiSK STARK proving key directory. Required unless
+    /// `--coordinator-url` moves the keys to a resident worker.
+    #[arg(long, required_unless_present = "coordinator_url")]
+    proving_key: Option<PathBuf>,
+
+    /// Path to the ZiSK PLONK proving key directory (cargo-zisk `-w`).
+    /// Required unless `--coordinator-url` moves the keys to a resident
+    /// worker.
+    #[arg(
+        long,
+        alias = "proving-key-snark",
+        required_unless_present = "coordinator_url"
+    )]
+    proving_key_plonk: Option<PathBuf>,
+
+    /// gRPC URL of a resident `zisk-coordinator`. The daemon uploads the ELF
+    /// and proves against that service; the proving keys and GPU live on its
+    /// worker, so they load once instead of once per proof. Needs a
+    /// `cargo-zisk` with the `remote` subcommand (ZiSK v1.0.0-alpha and
+    /// later). Without this flag the daemon runs one `cargo-zisk` process per
+    /// proof.
     #[arg(
         long,
         env = "ZISK_COORDINATOR_URL",
-        default_value = "http://localhost:7000"
+        conflicts_with_all = ["proving_key", "proving_key_plonk", "no_gpu", "asm_emulator"]
     )]
-    coordinator_url: String,
+    coordinator_url: Option<String>,
 
     /// Aggregated mode: prove batches WITHOUT the PLONK wrap and submit
     /// their vadcop_final streams; poll /ZiSK-AGG for range jobs and prove
@@ -61,6 +82,16 @@ struct Args {
     /// Path to the ZiSK aggregator guest ELF (required with --aggregation).
     #[arg(long, requires = "aggregation")]
     aggregator_elf: Option<PathBuf>,
+
+    /// Disable GPU proving (cargo-zisk runs CPU-only).
+    #[arg(long)]
+    no_gpu: bool,
+
+    /// Use the ASM emulator for witness generation instead of the standard
+    /// emulator (`--emulator`). Faster, but requires a high memlock ulimit
+    /// that is often unavailable in containers.
+    #[arg(long)]
+    asm_emulator: bool,
 
     /// Directory for intermediate proof files.
     #[arg(long, default_value = "/tmp/zisk_proofs")]
@@ -178,13 +209,31 @@ async fn main() -> anyhow::Result<()> {
         sequencer_url = %args.sequencer_url,
         zisk_binary = %args.zisk_binary.display(),
         elf_path = %args.elf_path.display(),
-        coordinator_url = %args.coordinator_url,
+        coordinator_url = ?args.coordinator_url,
         aggregation = args.aggregation,
         aggregator_elf = ?args.aggregator_elf,
         supported_vk_hashes = ?supported_vks,
         vk_filter = if supported_vks.is_empty() { "disabled (accepts all)" } else { "enabled" },
         "Starting ZiSK prover service"
     );
+
+    // Select the proving backend. A coordinator URL moves the keys and the
+    // GPU to the resident worker; without one, this process owns both.
+    let backend = match args.coordinator_url.clone() {
+        Some(url) => prover::ProvingBackend::Coordinator { url },
+        None => prover::ProvingBackend::Spawn(prover::SpawnBackend {
+            proving_key: args
+                .proving_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--proving-key is required"))?,
+            proving_key_plonk: args
+                .proving_key_plonk
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--proving-key-plonk is required"))?,
+            gpu: !args.no_gpu,
+            asm_emulator: args.asm_emulator,
+        }),
+    };
 
     // Validate paths.
     let mut required_paths = vec![
@@ -193,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
     ];
     if let Some(ref aggregator_elf) = args.aggregator_elf {
         required_paths.push(("aggregator_elf", aggregator_elf));
+    }
+    if let prover::ProvingBackend::Spawn(ref spawn) = backend {
+        required_paths.push(("proving_key", &spawn.proving_key));
+        required_paths.push(("proving_key_plonk", &spawn.proving_key_plonk));
     }
     for (name, path) in required_paths {
         anyhow::ensure!(path.exists(), "{name} does not exist: {}", path.display());
@@ -211,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
         args.zisk_binary,
         args.elf_path,
         args.aggregator_elf.clone(),
-        args.coordinator_url,
+        backend,
         args.work_dir,
     );
 
@@ -232,14 +285,13 @@ async fn main() -> anyhow::Result<()> {
         cancel_clone.cancel();
     });
 
-    // One-time setup for the guest ELF(s) on the prover service (upload +
-    // setup, once per ELF at startup).
-    if !prover.ensure_setup(&cancel).await? {
-        tracing::info!("cancelled during remote setup, exiting");
+    // One-time ROM setup for the guest ELF(s) (idempotent, cheap when cached).
+    if !prover.ensure_program_setup(&cancel).await? {
+        tracing::info!("cancelled during program-setup, exiting");
         return Ok(());
     }
-    if args.aggregation && !prover.ensure_aggregator_setup(&cancel).await? {
-        tracing::info!("cancelled during aggregator remote setup, exiting");
+    if args.aggregation && !prover.ensure_aggregator_program_setup(&cancel).await? {
+        tracing::info!("cancelled during aggregator program-setup, exiting");
         return Ok(());
     }
 

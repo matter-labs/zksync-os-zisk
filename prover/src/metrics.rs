@@ -41,15 +41,14 @@ pub struct ZiskProverMetrics {
     #[metrics(buckets = PROOF_TIME_BUCKETS)]
     pub proof_generation_time: Histogram<Duration>,
 
-    /// `cargo-zisk remote prove` client time (STARK on the worker, plus the
-    /// PLONK wrap in per-batch and aggregation-range modes).
+    /// `cargo-zisk` prove time (integrated STARK, plus the PLONK wrap in
+    /// per-batch and aggregation-range modes).
     #[metrics(buckets = PROOF_TIME_BUCKETS)]
     pub prove_time: Histogram<Duration>,
 
-    /// One-time per-ELF `cargo-zisk remote setup` duration (upload + setup on
-    /// the prover service).
+    /// One-time per-ELF program-setup duration.
     #[metrics(buckets = PROOF_TIME_BUCKETS)]
-    pub remote_setup_time: Histogram<Duration>,
+    pub program_setup_time: Histogram<Duration>,
 
     /// Proof attempts by outcome (success / failure / cancelled).
     pub proofs: Family<ProofOutcome, vise::Counter>,

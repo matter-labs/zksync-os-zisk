@@ -1,12 +1,16 @@
-//! ZiSK proof generation via the resident ZiSK prover service (ZiSK v0.18.0).
+//! ZiSK proof generation through the `cargo-zisk` command-line tool.
 //!
-//! The daemon is a thin client. A long-lived `zisk-coordinator` and its
-//! `zisk-worker` hold the proving keys and the GPU context. The daemon shells
-//! `cargo-zisk remote` subcommands against the coordinator. The keys and GPU
-//! are loaded once for the service lifetime, not reloaded per proof.
+//! Two backends share one pipeline, selected by [`ProvingBackend`]:
+//! - [`ProvingBackend::Spawn`] (the default) runs one `cargo-zisk` process
+//!   per proof. The process loads the proving keys and initializes the GPU
+//!   on every invocation. ZiSK v0.18.0 supports this backend.
+//! - [`ProvingBackend::Coordinator`] runs `cargo-zisk remote` client calls
+//!   against a resident `zisk-coordinator`, whose `zisk-worker` keeps the
+//!   keys and the GPU loaded for the service lifetime. The `remote`
+//!   subcommand starts at ZiSK v1.0.0-alpha; v0.18.0 does not have it.
 //!
-//! Startup runs `remote setup` once per guest ELF. That call uploads the ELF
-//! and generates its setup on the service.
+//! Startup runs a one-time setup per guest ELF. It must run before the first
+//! proof for that ELF.
 //!
 //! Three proving flows share the pipeline:
 //! - [`ZiskProver::generate_proof`] — per-batch STF proof with the PLONK
@@ -17,10 +21,10 @@
 //! - [`ZiskProver::generate_aggregated_proof`] — the aggregator guest over
 //!   N per-batch streams, with the PLONK wrap: one range proof for L1.
 //!
-//! Each `cargo-zisk remote` call runs as a subprocess via `tokio::process`.
-//! A `CancellationToken` cancels the wait instantly, so shutdown does not
-//! busy-poll. A failed client call is logged and retried by the run loop; it
-//! does not kill the daemon.
+//! Each `cargo-zisk` call runs as a subprocess via `tokio::process`. A
+//! `CancellationToken` cancels the wait instantly, so shutdown does not
+//! busy-poll. A failed call is logged and retried by the run loop; it does
+//! not kill the daemon.
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -45,14 +49,36 @@ pub struct ZiskSnarkOutput {
     pub public_values: Vec<u8>,
 }
 
+/// Where `cargo-zisk` does the proving work.
+#[derive(Debug)]
+pub enum ProvingBackend {
+    /// One `cargo-zisk` process per proof, on this machine.
+    Spawn(SpawnBackend),
+    /// `cargo-zisk remote` client calls against the `zisk-coordinator` at
+    /// this gRPC URL.
+    Coordinator { url: String },
+}
+
+/// Settings for the [`ProvingBackend::Spawn`] backend. Each process needs the
+/// key paths and the hardware choices, because nothing stays resident between
+/// proofs.
+#[derive(Debug)]
+pub struct SpawnBackend {
+    pub proving_key: PathBuf,
+    pub proving_key_plonk: PathBuf,
+    pub gpu: bool,
+    /// Select the ASM emulator for witness generation. It is faster than the
+    /// standard emulator, but it needs a high memlock limit that containers
+    /// frequently do not give.
+    pub asm_emulator: bool,
+}
+
 pub struct ZiskProver {
     binary: PathBuf,
     elf_path: PathBuf,
     /// The aggregator guest ELF (aggregated mode only).
     aggregator_elf_path: Option<PathBuf>,
-    /// gRPC URL of the resident `zisk-coordinator`. The `cargo-zisk remote`
-    /// client sends setup and prove requests here.
-    coordinator_url: String,
+    backend: ProvingBackend,
     work_dir_base: PathBuf,
 }
 
@@ -61,14 +87,14 @@ impl ZiskProver {
         binary: PathBuf,
         elf_path: PathBuf,
         aggregator_elf_path: Option<PathBuf>,
-        coordinator_url: String,
+        backend: ProvingBackend,
         work_dir_base: PathBuf,
     ) -> Self {
         Self {
             binary,
             elf_path,
             aggregator_elf_path,
-            coordinator_url,
+            backend,
             work_dir_base,
         }
     }
@@ -103,44 +129,36 @@ impl ZiskProver {
         let _ = tokio::fs::remove_dir_all(self.range_work_dir(from_batch, to_batch)).await;
     }
 
-    /// One-time setup for the STF guest ELF on the prover service (`cargo-zisk
-    /// remote setup`). This uploads the ELF and generates its setup on the
-    /// service. It must run before the first `remote prove` for the ELF.
-    /// Returns `Ok(false)` if cancelled.
-    pub async fn ensure_setup(&self, cancel: &CancellationToken) -> anyhow::Result<bool> {
+    /// One-time ROM setup for the STF guest ELF. Must run before the first
+    /// proof for a given guest ELF; subsequent runs are cheap. Returns
+    /// `Ok(false)` if cancelled.
+    pub async fn ensure_program_setup(&self, cancel: &CancellationToken) -> anyhow::Result<bool> {
         let elf = self.elf_path.clone();
-        self.remote_setup(&elf, cancel).await
+        self.program_setup(&elf, cancel).await
     }
 
-    /// One-time setup for the aggregator guest ELF on the prover service
-    /// (aggregated mode). See [`Self::ensure_setup`].
-    pub async fn ensure_aggregator_setup(
+    /// One-time ROM setup for the aggregator guest ELF (aggregated mode).
+    /// See [`Self::ensure_program_setup`].
+    pub async fn ensure_aggregator_program_setup(
         &self,
         cancel: &CancellationToken,
     ) -> anyhow::Result<bool> {
         let elf = self.aggregator_elf()?.to_path_buf();
-        self.remote_setup(&elf, cancel).await
+        self.program_setup(&elf, cancel).await
     }
 
-    /// Upload an ELF to the prover service and generate its setup there
-    /// (`cargo-zisk remote setup`). The proving keys live on the worker, so
-    /// this call passes no key path. Returns `Ok(false)` if cancelled.
-    async fn remote_setup(&self, elf: &Path, cancel: &CancellationToken) -> anyhow::Result<bool> {
-        let args = remote_setup_args(&self.coordinator_url, elf);
-        tracing::info!(
-            elf = %elf.display(),
-            coordinator = %self.coordinator_url,
-            "running remote setup"
-        );
+    async fn program_setup(&self, elf: &Path, cancel: &CancellationToken) -> anyhow::Result<bool> {
+        let args = setup_args(&self.backend, elf);
+        tracing::info!(elf = %elf.display(), "running program-setup");
         let start = Instant::now();
         let done = run_cancellable(&self.binary, &args, cancel).await?;
         if done {
             ZISK_PROVER_METRICS
-                .remote_setup_time
+                .program_setup_time
                 .observe(start.elapsed());
             tracing::info!(
                 elapsed_secs = start.elapsed().as_secs(),
-                "remote setup complete"
+                "program-setup complete"
             );
         }
         Ok(done)
@@ -267,11 +285,9 @@ impl ZiskProver {
         .await
     }
 
-    /// Shared `cargo-zisk remote prove` invocation. The `plonk` flag adds the
-    /// BN254 PLONK wrap (`--plonk`); without it the run keeps the
-    /// `vadcop_final` proof. The service holds the proving keys, the GPU, and
-    /// the emulator choice, so this call passes only the ELF, the input, and
-    /// the output path. Returns `Ok(false)` if cancelled.
+    /// Shared prove invocation. The `plonk` flag adds the BN254 PLONK wrap
+    /// (`--plonk`); without it the run keeps the `vadcop_final` proof.
+    /// Returns `Ok(false)` if cancelled.
     async fn run_prove(
         &self,
         elf: &Path,
@@ -280,7 +296,7 @@ impl ZiskProver {
         plonk: bool,
         cancel: &CancellationToken,
     ) -> anyhow::Result<bool> {
-        let args = remote_prove_args(&self.coordinator_url, elf, input_path, proof_path, plonk);
+        let args = prove_args(&self.backend, elf, input_path, proof_path, plonk);
         let prove_start = Instant::now();
         if !run_cancellable(&self.binary, &args, cancel).await? {
             return Ok(false);
@@ -345,47 +361,94 @@ fn p(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Build the `cargo-zisk remote setup` argument vector: upload the ELF and
-/// generate its setup on the coordinator. No proving-key path is passed; the
-/// keys live on the worker.
-fn remote_setup_args(coordinator_url: &str, elf: &Path) -> Vec<String> {
-    vec![
-        "remote".to_string(),
-        "setup".into(),
-        "--coordinator".into(),
-        coordinator_url.to_string(),
-        "-e".into(),
-        p(elf),
-    ]
+/// Build the one-time per-ELF setup argument vector. The spawn backend runs
+/// `program-setup` against its own proving key. The coordinator backend runs
+/// `remote setup`, which uploads the ELF and generates its setup on the
+/// service, so it passes no key path: the keys live on the worker.
+fn setup_args(backend: &ProvingBackend, elf: &Path) -> Vec<String> {
+    match backend {
+        ProvingBackend::Spawn(spawn) => {
+            let mut args = vec![
+                "program-setup".to_string(),
+                "-e".into(),
+                p(elf),
+                "-k".into(),
+                p(&spawn.proving_key),
+            ];
+            if spawn.gpu {
+                args.push("-g".into());
+            }
+            args
+        }
+        ProvingBackend::Coordinator { url } => vec![
+            "remote".to_string(),
+            "setup".into(),
+            "--coordinator".into(),
+            url.clone(),
+            "-e".into(),
+            p(elf),
+        ],
+    }
 }
 
-/// Build the `cargo-zisk remote prove` argument vector. `plonk` appends
-/// `--plonk` for the BN254 wrap (per-batch and aggregation-range modes);
-/// without it the run keeps the `vadcop_final` proof (aggregated per-batch
-/// mode).
-fn remote_prove_args(
-    coordinator_url: &str,
+/// Build the prove argument vector. `plonk` adds the BN254 wrap (per-batch
+/// and aggregation-range modes); without it the run keeps the `vadcop_final`
+/// proof (aggregated per-batch mode). The spawn backend also passes the key
+/// paths and the hardware choices, which the coordinator backend leaves to
+/// the worker.
+fn prove_args(
+    backend: &ProvingBackend,
     elf: &Path,
     input_path: &Path,
     proof_path: &Path,
     plonk: bool,
 ) -> Vec<String> {
-    let mut args = vec![
-        "remote".to_string(),
-        "prove".into(),
-        "--coordinator".into(),
-        coordinator_url.to_string(),
-        "-e".into(),
-        p(elf),
-        "-i".into(),
-        p(input_path),
-        "-o".into(),
-        p(proof_path),
-    ];
-    if plonk {
-        args.push("--plonk".into());
+    match backend {
+        ProvingBackend::Spawn(spawn) => {
+            let mut args = vec![
+                "prove".to_string(),
+                "-e".into(),
+                p(elf),
+                "-i".into(),
+                p(input_path),
+                "-k".into(),
+                p(&spawn.proving_key),
+            ];
+            if plonk {
+                args.push("-w".into());
+                args.push(p(&spawn.proving_key_plonk));
+                args.push("--plonk".into());
+            }
+            args.push("-y".into());
+            args.push("-o".into());
+            args.push(p(proof_path));
+            if spawn.gpu {
+                args.push("-g".into());
+            }
+            if !spawn.asm_emulator {
+                args.push("--emulator".into());
+            }
+            args
+        }
+        ProvingBackend::Coordinator { url } => {
+            let mut args = vec![
+                "remote".to_string(),
+                "prove".into(),
+                "--coordinator".into(),
+                url.clone(),
+                "-e".into(),
+                p(elf),
+                "-i".into(),
+                p(input_path),
+                "-o".into(),
+                p(proof_path),
+            ];
+            if plonk {
+                args.push("--plonk".into());
+            }
+            args
+        }
     }
-    args
 }
 
 fn write_zisk_input(path: &Path, bincode: &[u8]) -> anyhow::Result<()> {
@@ -863,26 +926,126 @@ mod tests {
         assert!(err.contains("Vadcop"), "unexpected error: {err}");
     }
 
+    fn spawn_backend() -> ProvingBackend {
+        ProvingBackend::Spawn(SpawnBackend {
+            proving_key: PathBuf::from("/keys/provingKey"),
+            proving_key_plonk: PathBuf::from("/keys/provingKeySnark"),
+            gpu: true,
+            asm_emulator: false,
+        })
+    }
+
+    fn coordinator_backend() -> ProvingBackend {
+        ProvingBackend::Coordinator {
+            url: "http://coord:7000".to_string(),
+        }
+    }
+
     fn test_prover(work_dir_base: PathBuf) -> ZiskProver {
         ZiskProver::new(
             PathBuf::from("/nonexistent-cargo-zisk"),
             PathBuf::from("/nonexistent-elf"),
             None,
-            "http://localhost:7000".to_string(),
+            spawn_backend(),
             work_dir_base,
         )
     }
 
+    /// The spawn backend must invoke only subcommands and flags that the
+    /// pinned ZiSK v0.18.0 `cargo-zisk` accepts. `remote` is not one of them.
     #[test]
-    fn remote_setup_args_upload_and_generate() {
-        let args = remote_setup_args("http://localhost:7000", Path::new("/elf/guest"));
+    fn spawn_setup_args_run_program_setup() {
+        let args = setup_args(&spawn_backend(), Path::new("/elf/guest"));
+        assert_eq!(
+            args,
+            vec![
+                "program-setup",
+                "-e",
+                "/elf/guest",
+                "-k",
+                "/keys/provingKey",
+                "-g",
+            ]
+        );
+    }
+
+    #[test]
+    fn spawn_prove_args_per_batch_wrap_plonk_on_the_emulator() {
+        let args = prove_args(
+            &spawn_backend(),
+            Path::new("/elf/guest"),
+            Path::new("/wd/input.bin"),
+            Path::new("/wd/proof.bin"),
+            true,
+        );
+        assert_eq!(
+            args,
+            vec![
+                "prove",
+                "-e",
+                "/elf/guest",
+                "-i",
+                "/wd/input.bin",
+                "-k",
+                "/keys/provingKey",
+                "-w",
+                "/keys/provingKeySnark",
+                "--plonk",
+                "-y",
+                "-o",
+                "/wd/proof.bin",
+                "-g",
+                "--emulator",
+            ]
+        );
+    }
+
+    /// The ASM emulator needs a memlock limit that containers frequently do
+    /// not give, so the standard emulator is the default and the ASM
+    /// emulator is opt-in.
+    #[test]
+    fn spawn_prove_args_select_the_asm_emulator_on_request() {
+        let backend = ProvingBackend::Spawn(SpawnBackend {
+            proving_key: PathBuf::from("/keys/provingKey"),
+            proving_key_plonk: PathBuf::from("/keys/provingKeySnark"),
+            gpu: true,
+            asm_emulator: true,
+        });
+        let args = prove_args(
+            &backend,
+            Path::new("/elf/guest"),
+            Path::new("/wd/input.bin"),
+            Path::new("/wd/proof.bin"),
+            true,
+        );
+        assert!(!args.iter().any(|a| a == "--emulator"));
+    }
+
+    /// Aggregated per-batch mode keeps the vadcop_final proof, so it must not
+    /// pass the PLONK key or the wrap flag.
+    #[test]
+    fn spawn_prove_args_aggregated_omits_plonk() {
+        let args = prove_args(
+            &spawn_backend(),
+            Path::new("/elf/guest"),
+            Path::new("/wd/input.bin"),
+            Path::new("/wd/proof.bin"),
+            false,
+        );
+        assert!(!args.iter().any(|a| a == "--plonk" || a == "-w"));
+        assert!(!args.iter().any(|a| a == "/keys/provingKeySnark"));
+    }
+
+    #[test]
+    fn coordinator_setup_args_upload_and_generate() {
+        let args = setup_args(&coordinator_backend(), Path::new("/elf/guest"));
         assert_eq!(
             args,
             vec![
                 "remote",
                 "setup",
                 "--coordinator",
-                "http://localhost:7000",
+                "http://coord:7000",
                 "-e",
                 "/elf/guest",
             ]
@@ -893,9 +1056,9 @@ mod tests {
     }
 
     #[test]
-    fn remote_prove_args_per_batch_wraps_plonk() {
-        let args = remote_prove_args(
-            "http://coord:7000",
+    fn coordinator_prove_args_per_batch_wraps_plonk() {
+        let args = prove_args(
+            &coordinator_backend(),
             Path::new("/elf/guest"),
             Path::new("/wd/input.bin"),
             Path::new("/wd/proof.bin"),
@@ -922,21 +1085,7 @@ mod tests {
             || a == "-w"
             || a == "-g"
             || a == "-y"
-            || a == "-l"));
-    }
-
-    #[test]
-    fn remote_prove_args_aggregated_omits_plonk() {
-        // Aggregated per-batch mode keeps the vadcop_final proof: no --plonk.
-        let args = remote_prove_args(
-            "http://coord:7000",
-            Path::new("/elf/guest"),
-            Path::new("/wd/input.bin"),
-            Path::new("/wd/proof.bin"),
-            false,
-        );
-        assert!(!args.iter().any(|a| a == "--plonk"));
-        assert_eq!(args.last().unwrap(), "/wd/proof.bin");
+            || a == "--emulator"));
     }
 
     /// `finish_run` must keep the work dir on success (submit hasn't run yet)
