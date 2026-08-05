@@ -9,7 +9,7 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 The daemon has two proving backends:
 
 - **Per-proof process** (default, ZiSK v0.18.0). Each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation.
-- **Resident prover service** (`--coordinator-url`). The daemon becomes a thin `cargo-zisk remote` client of a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. The `remote` subcommand starts at ZiSK v1.0.0-alpha.
+- **Resident prover service** (`--coordinator-url`). The daemon shells `zisk-prove-client` calls against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship with ZiSK v0.18.0; `ziskup` installs the coordinator and the worker, and `zisk-prove-client` builds from the ZiSK source tree (`cargo build --release -p zisk-prove-client`).
 
 ### Architecture
 
@@ -29,7 +29,7 @@ Sequencer (zksync-os-server)
 
 ### Proof Pipeline
 
-At startup the daemon runs a one-time setup for the guest ELF: `cargo-zisk program-setup` in the default backend, `cargo-zisk remote setup` against the coordinator otherwise. For each batch it then runs a single `cargo-zisk prove --plonk` invocation (ZiSK v0.18.0) that:
+At startup the daemon runs a one-time setup for the guest ELF: `cargo-zisk program-setup` in the default backend, `zisk-prove-client setup` against the coordinator otherwise (the coordinator content-addresses the ELF by its blake3 hash and reuses an existing setup). For each batch it then runs a single `cargo-zisk prove --plonk` invocation (ZiSK v0.18.0) that:
 
 1. Executes the ZiSK guest ELF and generates + aggregates per-AIR proofs into a verified vadcop final proof.
 2. Wraps it into a BN254 Plonk SNARK suitable for on-chain verification.
@@ -38,7 +38,7 @@ The output file is parsed into the 768-byte SNARK proof and the 320-byte public 
 
 ## Prerequisites
 
-- **ZiSK toolchain v0.18.0**: `cargo-zisk` in PATH ([install](https://github.com/0xPolygonHermez/zisk)); its path is passed as `--zisk-binary`.
+- **ZiSK toolchain v0.18.0**: `cargo-zisk` ([install](https://github.com/0xPolygonHermez/zisk)) for the default backend, `zisk-prove-client` (built from the ZiSK source tree) for the coordinator backend; the selected binary's path is passed as `--zisk-binary`.
 - **ZiSK guest ELF**: built from `zksync-os-zisk/guest/` via the reproducible build (`./build-guest.sh`); its path is passed as `--elf-path`.
 - **STARK proving key**: `~/.zisk/provingKey/` (via `ziskup`), passed as `--proving-key`.
 - **PLONK proving key**: `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`), passed as `--proving-key-plonk`.
@@ -105,13 +105,13 @@ cargo run --release -- \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sequencer-url` | required | Sequencer URL. Supports `http://user:pass@host:port`. |
-| `--zisk-binary` | required | Path to `cargo-zisk` binary. |
+| `--zisk-binary` | required | Toolchain binary the daemon shells: `cargo-zisk` in the default backend, `zisk-prove-client` under `--coordinator-url`. |
 | `--elf-path` | required | Path to ZiSK guest ELF. |
 | `--proving-key` | required | ZiSK STARK proving key directory. Supplied by the worker under `--coordinator-url`. |
 | `--proving-key-plonk` | required | ZiSK PLONK proving key directory. Supplied by the worker under `--coordinator-url`. |
 | `--no-gpu` | off | Prove CPU-only. |
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. |
-| `--coordinator-url` | (none) | ZiSK coordinator gRPC URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. Needs a `cargo-zisk` with the `remote` subcommand (ZiSK v1.0.0-alpha and later). |
+| `--coordinator-url` | (none) | ZiSK coordinator gRPC URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU; `--zisk-binary` must then point at `zisk-prove-client`. |
 | `--work-dir` | `/tmp/zisk_proofs` | Intermediate proof files (cleaned after each proof). |
 | `--poll-interval-secs` | `5` | Seconds between polls when no work available. |
 | `--iterations` | `0` | Exit after N proofs (0 = unlimited). |
@@ -154,35 +154,38 @@ distinguishable in server logs.
 
 ### Resident prover service
 
-On a toolchain with `cargo-zisk remote` (ZiSK v1.0.0-alpha and later), a
-coordinator and its workers keep the proving keys and the GPU loaded across
-proofs. Start the coordinator first; it exposes a client-facing API port and a
-worker-facing cluster port:
+A coordinator and its workers keep the proving keys and the GPU loaded
+across proofs. Start the coordinator first; it serves clients on port 7000
+and workers on the internal cluster port 50051:
 
 ```bash
-# 1. Coordinator: client-facing API on 7000, worker-facing cluster on 7001.
-zisk-coordinator --api-port 7000 --cluster-port 7001
+# 1. Coordinator: client API on 7000, worker cluster port on 50051.
+zisk-coordinator
 
-# 2. Worker: proving keys + GPU, joined to the coordinator's cluster port.
-#    --preload-plonk loads the PLONK key up front so the wrap runs without a
-#    per-proof reload.
+# 2. Worker: proving keys + GPU, joined to the coordinator's CLUSTER port
+#    through its TOML config ([coordinator] url = "http://127.0.0.1:50051").
+#    --plonk wires the PLONK key (without it the wrap jobs fail);
+#    --emulator selects the standard emulator (the ASM path needs a high
+#    memlock ulimit); --gpu proves on the GPU. The worker registers only
+#    after the full key load (several minutes) — jobs submitted before the
+#    coordinator logs "Registered worker:" fail with "no workers connected".
 CUDA_VISIBLE_DEVICES=0 zisk-worker \
-  --coordinator-url http://localhost:7001 \
+  --config worker.toml \
   --proving-key ~/.zisk/provingKey \
   --proving-key-snark ~/.zisk/provingKeySnark \
-  --preload-plonk
+  --emulator --gpu --plonk
 
-# 3. Daemon: thin client pointed at the coordinator's API port.
+# 3. Daemon: shells zisk-prove-client against the coordinator's API port.
 zksync-os-zisk-prover-service \
   --sequencer-url http://sequencer:3124 \
   --coordinator-url http://localhost:7000 \
-  --zisk-binary ~/.zisk/bin/cargo-zisk \
+  --zisk-binary /path/to/zisk-prove-client \
   --elf-path /path/to/zksync-os-zisk-guest
 ```
 
 Proving throughput then scales on the worker side: join more workers to the
-same coordinator (each with `--coordinator-url` at the cluster port and its own
-`CUDA_VISIBLE_DEVICES` GPU pin). The coordinator distributes proving work
+same coordinator (each with its own TOML config at the cluster port and its
+own `CUDA_VISIBLE_DEVICES` GPU pin). The coordinator distributes proving work
 across its worker pool while the daemon stays a single thin client.
 
 Server side: set the sequencer's ZiSK assignment timeout comfortably above the

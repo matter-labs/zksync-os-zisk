@@ -5,10 +5,10 @@
 //! back to the server for multi-proof composition.
 //!
 //! By default it runs one `cargo-zisk` process per proof, which the pinned
-//! ZiSK v0.18.0 toolchain supports. `--coordinator-url` instead drives a
-//! resident `zisk-coordinator` whose worker keeps the proving keys and the
-//! GPU loaded; that path needs a toolchain with the `cargo-zisk remote`
-//! subcommand (ZiSK v1.0.0-alpha and later).
+//! ZiSK v0.18.0 toolchain supports. `--coordinator-url` instead shells
+//! `zisk-prove-client` against a resident `zisk-coordinator` whose worker
+//! keeps the proving keys and the GPU loaded for the service lifetime.
+//! `zisk-prove-client` builds from the ZiSK v0.18.0 source tree.
 //!
 //! Two modes, matching the server's `zisk_aggregation` setting:
 //! - Per-batch (default): each batch is proven with the PLONK wrap and the
@@ -21,6 +21,7 @@
 
 use zksync_os_zisk_prover_service::{prover, sequencer_client};
 
+use anyhow::Context as _;
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,7 +37,9 @@ struct Args {
     #[arg(short, long)]
     sequencer_url: String,
 
-    /// Path to the cargo-zisk binary.
+    /// Path to the toolchain binary the daemon shells: `cargo-zisk` for the
+    /// spawn backend, `zisk-prove-client` when `--coordinator-url` selects
+    /// the resident coordinator backend.
     #[arg(long)]
     zisk_binary: PathBuf,
 
@@ -59,12 +62,11 @@ struct Args {
     )]
     proving_key_plonk: Option<PathBuf>,
 
-    /// gRPC URL of a resident `zisk-coordinator`. The daemon uploads the ELF
-    /// and proves against that service; the proving keys and GPU live on its
-    /// worker, so they load once instead of once per proof. Needs a
-    /// `cargo-zisk` with the `remote` subcommand (ZiSK v1.0.0-alpha and
-    /// later). Without this flag the daemon runs one `cargo-zisk` process per
-    /// proof.
+    /// gRPC URL of a resident `zisk-coordinator`. The daemon registers the
+    /// content-addressed ELF and proves against that service; the proving
+    /// keys and GPU live on its worker, so they load once instead of once
+    /// per proof. `--zisk-binary` must point at `zisk-prove-client`. Without
+    /// this flag the daemon runs one `cargo-zisk` process per proof.
     #[arg(
         long,
         env = "ZISK_COORDINATOR_URL",
@@ -266,7 +268,8 @@ async fn main() -> anyhow::Result<()> {
         args.aggregator_elf.clone(),
         backend,
         args.work_dir,
-    );
+    )
+    .context("initialize the prover (the ELF must be readable for its content hash)")?;
 
     let poll_interval = Duration::from_secs(args.poll_interval_secs);
     let mut proofs_generated: u64 = 0;
