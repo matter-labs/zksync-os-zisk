@@ -6,7 +6,7 @@
 # that differ outside the ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
 # identical to the prover daemon's public-values prefix and the server's
-# `prover_api.zisk_program_vk` expectation.
+# `prover_api.zisk_vks[].program_vk` expectation.
 # Root hash limbs: [2096133297690934872, 310176553302656066,
 #                   3030310657868287865, 17074031024476062824]
 0x1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468

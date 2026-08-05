@@ -13,8 +13,8 @@ set -euo pipefail
 #                                    # updated GUEST_ELF_SHA256.
 #
 # The ELF lands in out/zksync-os-zisk-guest-aggregator. Its programVK (the
-# value for the server's `zisk_aggregation.program_vk` tripwire and the L1
-# range-verifier pin) is derived on a prover box with:
+# value for the server's `prover_api.zisk_aggregation.program_vk` tripwire
+# and the L1 range-verifier pin) is derived on a prover box with:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest-aggregator -k ~/.zisk/provingKey
 # — deterministic given the ELF and the pinned cargo-zisk version.
 

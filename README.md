@@ -1,79 +1,85 @@
 # ZiSK Second Proof System for ZKsync OS
 
-A second proof system for ZKsync OS using ZiSK (RV64IMA zkVM). Runs alongside
-the primary airbender (RV32I) proof system, providing independent verification
-of state transitions.
+A second proof system for ZKsync OS that uses ZiSK, an RV64IMA zkVM. It runs
+alongside the primary Airbender (RV32I) proof system and verifies each state
+transition independently. L1 verification requires both proofs.
 
-> **Start here for the cross-repo picture:** [docs/multiprover.md](docs/multiprover.md)
-> covers the full multi-proof lane — proof flow, key pinning, operating
-> modes — and maps which repository owns which component.
+This repository holds an independent re-implementation of the ZKsync OS
+state transition on REVM, the zkVM guests that prove it, the proving daemon,
+and the off-chain verification helpers the server calls.
 
-## Architecture
+| Read this | For |
+|---|---|
+| [docs/multiprover.md](docs/multiprover.md) | The architecture: system flow, the independence invariant, wire formats, key pinning, and the rollout ladder. |
+| [prover/README.md](prover/README.md) | Operations: the daemon, its two proving backends, every flag, the metrics, and fleet deployment. |
+| [E2E_SETUP.md](E2E_SETUP.md) | Bring-up on one machine, from toolchain install to on-chain verification. |
+| [guest-aggregator/BINDING_VECTOR.md](guest-aggregator/BINDING_VECTOR.md) | The cross-stack test vector for the aggregated-range binding digest. |
+| [tools/CORPUS.md](tools/CORPUS.md) | The EEST conformance lane. |
 
-```
-                         ┌─────────────────────────────────┐
-                         │     zksync-os-server pipeline    │
-                         │                                  │
-                         │  BlockExecutor → TreeManager →   │
-                         │  ProverInputGenerator → Batcher  │
-                         │       │               │          │
-                         │  airbender witness  ZiSK input   │
-                         │  (Vec<u32>)       (BatchInput)   │
-                         └───────┬───────────────┬──────────┘
-                                 │               │
-                    ┌────────────▼──┐    ┌───────▼────────┐
-                    │  Airbender    │    │  ZiSK Prover   │
-                    │  RV32I prover │    │  RV64IMA prover│
-                    └────────┬──────┘    └───────┬────────┘
-                             │                   │
-                    ┌────────▼───────────────────▼────────┐
-                    │        L1 Smart Contract             │
-                    │  Verifies BOTH proofs for each batch │
-                    └─────────────────────────────────────┘
-```
-
-## Directory Structure
+## Repository layout
 
 | Directory | What it is |
 |-----------|-----------|
-| `lib/` | Shared Rust library — REVM executor, merkle proof verification, batch commitment hashing, types. Used by the guest and the server. |
-| `guest/` | ZiSK guest binary — compiled to RV64IMA ELF, runs inside the prover. Reads `BatchInput`, executes with proof verification, commits the batch hash. |
-| `prover/` | Prover daemon (`zksync-os-zisk-prover-service`) — polls the server's `/ZiSK/*` prover API, drives `cargo-zisk prove --plonk` over the guest ELF, submits proofs. Standalone crate, no Cargo dependency on `lib/`/`guest/`; see its README for fleet deployment. |
-Solidity verifiers (`ZiskVerifier.sol`, `ZiskSnarkPlonkVerifier.sol`) live in [era-contracts](https://github.com/antoniolocascio-bot/era-contracts/tree/dev/l1-contracts/contracts/state-transition/verifiers) and are generated via `cargo run -- --variant zisk` in `era-contracts/tools/`.
+| `lib/` | The independent state-transition re-implementation on REVM — executor, merkle proof verification, batch commitment hashing, types. The guest and the server both use it. |
+| `guest/` | The ZiSK state-transition guest — the RV64IMA ELF entry point around `lib/`. `GUEST_ELF_SHA256` and `GUEST_PROGRAM_VK` record its pinned identity. |
+| `guest-aggregator/` | The ZiSK range-aggregator guest — verifies one per-batch proof per batch inside the zkVM and commits the range binding digest. |
+| `prover/` | The proving daemon (`zksync-os-zisk-prover-service`) — polls the server's `/ZiSK/*` and `/ZiSK-AGG/*` job API, drives the ZiSK toolchain over both ELFs, and submits the results. |
+| `zisk-verifier/` | Off-chain verification helpers. The server calls them to check a submitted proof before it composes the L1 payload. |
+| `tools/` | The EEST conformance lane, the guest-memory benchmark, and the host-side input assemblers. |
+| `docker/` | The pinned containers of the reproducible guest builds. |
 
-## What the ZiSK Proof Verifies
+The Solidity verifiers live in
+[era-contracts](https://github.com/antoniolocascio-bot/era-contracts):
+`ZiskVerifier.sol` in
+`l1-contracts/contracts/state-transition/verifiers/` and the generated
+`ZiskSnarkPlonkVerifier.sol` in
+`l1-contracts/contracts/dev-contracts/generated/`. Regenerate both from
+`era-contracts/tools/` with `cargo run -- --variant zisk`; that repository's
+`l1-contracts/contracts/state-transition/verifiers/README.md` holds the full
+procedure.
 
-Every storage read is verified against a Blake2s merkle proof that recovers
-the expected state root. The proof commits a `BatchPublicInput` hash:
+## Reproducible guest builds
 
-- **State before**: Blake2s(tree_root, leaf_count, block_number, block_hashes_blake, timestamp)
-- **State after**: Computed from REVM execution + tree update proof
-- **Batch hash**: Keccak256(chain_id, timestamps, DA commitment, tx counts, priority ops hash, L2 logs root, ...)
-- **Committed output**: Keccak256(state_before || state_after || batch_hash)
+Each `programVK` pinned on L1 and in the server's drift tripwires is the ROM
+merkle root of a guest ELF, so a given source revision must map to exactly
+one binary. `docker/guest-builder.Dockerfile` and
+`docker/aggregator-builder.Dockerfile` pin everything that influences the
+build: the base image, the cargo-zisk release (v0.18.0, which fixes the ZiSK
+Rust toolchain it installs), the pinned cargo that orchestrates it, the
+committed `Cargo.lock`, and a fixed `/build` source path.
 
-Verified inside the proof:
-- Storage reads via merkle proofs (every SLOAD)
-- Account balances/nonces via preimage hash verification
-- L2 transaction signatures via secp256k1 ecrecover
-- L1 transaction hash binding (keccak256(encoded_tx) == l1_tx_hash)
-- Bytecode integrity (keccak256(code) == code_hash)
-- Block header hash from execution results (RLP + keccak256)
-- Tree update entries cross-checked against REVM execution diffs
+```bash
+# Build in the pinned containers and verify against the recorded hashes
+./build-guest.sh
+./build-aggregator.sh
 
-## Server Integration
-
-Enable the second proof system in server config:
-
-```yaml
-prover_input_generator:
-  second_proof_system: true
+# After an intentional guest change: rebuild, re-record, commit
+./build-guest.sh --record        # updates guest/GUEST_ELF_SHA256
+./build-aggregator.sh --record   # updates guest-aggregator/GUEST_ELF_SHA256
 ```
 
-This generates ZiSK prover input alongside the primary airbender witness
-for every block. The ZiSK input includes merkle proofs, account preimages,
-and a tree update proof extracted from the server's merkle tree.
+The ELFs land in `out/zksync-os-zisk-guest` and
+`out/zksync-os-zisk-guest-aggregator`. CI runs both scripts on every push,
+so a source change in `lib/`, `guest/` or `guest-aggregator/` turns the
+build red until the recorded hash follows it. Determinism is validated: two
+independent container builds, with the toolchain downloaded again, produce
+byte-identical ELFs.
+
+Derive a `programVK` on a prover box, which holds the proving keys, and
+record it in `guest/GUEST_PROGRAM_VK` or
+`guest-aggregator/GUEST_PROGRAM_VK`:
+
+```bash
+cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+```
+
+[docs/multiprover.md](docs/multiprover.md) covers where each pin then lands
+in the server config and in the L1 verifier.
 
 ## Development
+
+The ZiSK toolchain is pinned at v0.18.0. Install it with
+`ziskup -v 0.18.0`.
 
 ```bash
 # Run lib tests (includes the proven-path end-to-end tests)
@@ -84,65 +90,44 @@ cd lib && cargo test export_proven_input_for_emulator
 # Print the native reference commitment for those exact bytes
 cd lib && cargo test print_input_bin_commitment -- --ignored
 
-# Build guest for ZiSK prover
-cargo-zisk build --release   # in guest/
+# Run the guest ELF in the ZiSK emulator over that input
+ziskemu -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin
 
-# Run in ZiSK emulator
-cargo-zisk execute -e guest/target/riscv64ima-zisk-zkvm-elf/release/zksync-os-zisk-guest -i /tmp/proven_input.bin
+# Execute it through the full proving pipeline, without a proof
+cargo-zisk execute -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
+    --emulator -k ~/.zisk/provingKey
 
-# Verify ZiSK constraints (without full proving)
-cargo-zisk verify-constraints -e <elf> -i input.bin
-
-# Full proof generation (requires 64GB+ RAM)
-./prove_and_verify.sh --input batch.json
+# Prove one batch end to end (needs a GPU and both proving keys)
+cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey -g
+cargo-zisk prove -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
+    -k ~/.zisk/provingKey -w ~/.zisk/provingKeySnark --plonk \
+    -y -o /tmp/proof.bin -g --emulator
 ```
 
-## Reproducible guest builds
+The ASM emulator is faster and needs a high memlock ulimit. Pass
+`--emulator` to select the standard emulator, which runs anywhere.
 
-The `programVK` pinned on L1 (and in the server's
-`prover_api_config.zisk_program_vk` drift tripwire) is the ROM merkle root
-of the guest ELF, so a given source revision must map to exactly one binary.
-`docker/guest-builder.Dockerfile` pins everything that influences the build:
-the base image, the cargo-zisk release (v0.18.0, which fixes the ZiSK Rust
-toolchain it installs), the pinned cargo that orchestrates it, the committed
-`guest/Cargo.lock`, and a fixed `/build` source path.
+Server integration test (it fetches the server-assembled `BatchInput` from
+`/ZiSK/{batch}/peek` and re-executes it with this lib's executor, so it
+needs prover input generation — run it outside the `no-pig` profile):
 
 ```bash
-# Build in the pinned container and verify against the recorded hash
-./build-guest.sh
-
-# After an intentional guest change: rebuild, re-record, commit
-./build-guest.sh --record   # updates guest/GUEST_ELF_SHA256
-```
-
-The ELF lands in `out/zksync-os-zisk-guest`. Derive its `programVK` on a
-prover box with `cargo-zisk rom-setup -e out/zksync-os-zisk-guest` and record
-it in the server config (`zisk_program_vk`) and, at gating time, the L1
-verifier. Determinism is validated: two independent container builds
-(toolchain re-downloaded) produce byte-identical ELFs.
-
-## Testing
-
-```bash
-# Server integration test (fetches the server-assembled BatchInput from
-# /ZiSK/{batch}/peek and re-executes it with this lib's executor; requires
-# prover input generation, so run without the no-pig profile)
 cd ../zksync-os-server
 cargo nextest run -p zksync_os_integration_tests -E 'test(zisk)'
 ```
 
 ## Backend portability
 
-Everything provable lives in the backend-neutral `lib/` (no_std-friendly; the
-crypto syscall bindings are behind the ZiSK target). `guest/` is a thin ZiSK
-shim: input framing, crypto provider installation, and the 32-byte commit.
-Keep new logic in `lib/` so a second zkVM backend stays cheap.
+Everything provable lives in the backend-neutral `lib/` (`no_std`-friendly;
+the crypto syscall bindings sit behind the ZiSK target). `guest/` is a thin
+ZiSK shim: input framing, crypto provider installation, and the 32-byte
+commit. Keep new logic in `lib/` so a second zkVM backend stays cheap.
 
 A validated OpenVM (RV32IM) guest for this same lib is preserved on the
 `backup/openvm-main` branch (`guest-openvm/`): it reproduced the reference
-`BatchPublicInput` end-to-end and proved via app STARK → Halo2/KZG SNARK
-(~3.9 KB) in the multi-prover benchmark. To revive it: cherry-pick `guest-openvm/`
-from that branch, re-pin its `openvm` crates (v2.0.0-beta.2 at the time), and
-re-run the lib's `test_proven` reader against `cargo openvm run` output.
-Inputs are passed as type-prefixed hex (`01` + hex via `--input`, JSON file
-form for inputs over 128 KB).
+`BatchPublicInput` end to end and proved via app STARK → Halo2/KZG SNARK
+(~3.9 KB) in the multi-prover benchmark. To revive it: cherry-pick
+`guest-openvm/` from that branch, re-pin its `openvm` crates (v2.0.0-beta.2
+at the time), and re-run the lib's `test_proven` reader against
+`cargo openvm run` output. Inputs are passed as type-prefixed hex (`01` plus
+hex via `--input`, JSON file form for inputs over 128 KB).

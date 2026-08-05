@@ -1,8 +1,8 @@
 # Reproducible builder for the ZiSK guest ELF.
 #
 # The programVK that ends up pinned on L1 (and in the server's
-# `prover_api_config.zisk_program_vk` tripwire) is the ROM merkle root of
-# this ELF, so a given source revision must map to exactly one binary.
+# `prover_api.zisk_vks` tripwire) is the ROM merkle root of this ELF, so a
+# given source revision must map to exactly one binary.
 # Everything that influences the build is pinned here: the base image, the
 # cargo-zisk release (which fixes the ZiSK Rust toolchain it installs), the
 # committed guest/Cargo.lock, and a fixed /build source path so no host

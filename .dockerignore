@@ -1,5 +1,6 @@
-# Keep the guest-builder context to what the Dockerfile COPYs (lib/, guest/).
-# The ELF must not depend on anything else in the repo.
+# Keep the build context to what the guest builders COPY: lib/ and guest/
+# for the state-transition guest, guest-aggregator/ for the aggregator.
+# An ELF must not depend on anything else in the repo.
 .git
 prover
 **/target

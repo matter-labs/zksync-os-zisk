@@ -12,6 +12,10 @@ guest ELF `7cb3289f…`):
 `corpus-emu.sh` exits 0 exactly when a run reproduces this: only documented
 waivers remain. Any other outcome is a regression or a new finding.
 
+That baseline predates the current ELF pin in `guest/GUEST_ELF_SHA256`. Run
+the suite again against the current ELF to re-establish steady state (see
+**When to re-run** below).
+
 ## Architecture
 
 ```
@@ -34,14 +38,14 @@ input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
    (`block_number_before`, `last_block_timestamp_before`,
    `block_hash_ring_head`).
 2. **Production-semantics tester build** — corpus dumps must reflect
-   production execution semantics, so build `evm-tester` with a feature set
-   that (a) excludes Ethereum-conformance emulation — no base-fee burn, no
-   mocked precompiles, no blob-tx parsing beyond what production enables —
-   and (b) keeps only the harness-required testing features (fixture-scale
-   resource pricing, unlimited native). Concretely: point
-   `tests/evm_tester`'s rig dependency at a feature list built from
-   `production` + `resources_for_tester` + `unlimited_native` in
-   `forward_system`. Fixture verdict FAILs under these semantics are
+   production execution semantics, so build `evm-tester` with the
+   `evm_tester_prod` feature set. It (a) excludes Ethereum-conformance
+   emulation — no base-fee burn, no mocked precompiles, no blob-tx parsing
+   beyond what production enables — and (b) keeps only the harness-required
+   testing features. `forward_system/evm_tester_prod` expands to
+   `production` + `basic_bootloader/resources_for_tester` +
+   `unlimited_native`, and `tests/evm_tester` depends on
+   `rig` with that feature. Fixture verdict FAILs under these semantics are
    expected; only executed blocks and their dumps matter.
 3. **Fixtures** — in `tests/evm_tester/` run `./download_ethereum_fixtures.sh`
    (EEST v5.4.0, ~13 GB unpacked, ~250 MB download).
@@ -57,8 +61,8 @@ input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
    at `out/zksync-os-zisk-guest`.
 6. **Environment overrides** — every location the runner uses is an env var
    (see the header of `corpus-emu.sh`): `ZKOS_DUMP_WORKTREE`,
-   `ZKOS_FIXTURES`, `ZISK_GUEST_ELF`, `ZISKEMU`, `CORPUS_OUT`,
-   `CARGO_TARGET_DIR`, `EMU_JOBS`.
+   `ZKOS_FIXTURES`, `ZISK_TESTUTILS_DIR`, `ZISK_GUEST_ELF`, `ZISKEMU`,
+   `CORPUS_OUT`, `CARGO_TARGET_DIR`, `EMU_JOBS`.
 
 ## Running
 
