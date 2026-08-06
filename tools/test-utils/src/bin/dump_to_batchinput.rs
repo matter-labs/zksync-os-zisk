@@ -13,8 +13,8 @@
 //!   cargo run --bin dump_to_batchinput -- <dump.json> <out_dir> [--no-validate]
 //!
 //! Outputs:
-//!   <out_dir>/batch_input.bin — bincode 1.x fixint `BatchInput` (server format)
-//!   <out_dir>/input.bin       — ziskemu framing: [len u64 LE][bincode][zero pad to 8]
+//!   <out_dir>/batch_input.bin — `BatchInput` in the `lib::wire` encoding
+//!   <out_dir>/input.bin       — ziskemu framing: [len u64 LE][wire bytes][zero pad to 8]
 //!
 //! `--no-validate` skips the native-reference comparison — for corpus entries
 //! where the guest is expected to panic (the artifacts are always written).
@@ -34,6 +34,7 @@ use zksync_os_zisk_lib::merkle::{
     WriteOp, TREE_DEPTH,
 };
 use zksync_os_zisk_lib::types::*;
+use zksync_os_zisk_lib::wire;
 
 // ---------------------------------------------------------------------------
 // Bundle schema (all 32-byte values lowercase hex without 0x)
@@ -970,10 +971,10 @@ fn validate(d: &DDump, bi: &BatchInput) -> bool {
     ok
 }
 
-fn frame_for_zisk(bincode_bytes: &[u8]) -> Vec<u8> {
-    let mut framed = Vec::with_capacity(8 + bincode_bytes.len() + 8);
-    framed.extend_from_slice(&(bincode_bytes.len() as u64).to_le_bytes());
-    framed.extend_from_slice(bincode_bytes);
+fn frame_for_zisk(wire_bytes: &[u8]) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(8 + wire_bytes.len() + 8);
+    framed.extend_from_slice(&(wire_bytes.len() as u64).to_le_bytes());
+    framed.extend_from_slice(wire_bytes);
     let pad = (8 - (framed.len() % 8)) % 8;
     framed.extend(std::iter::repeat_n(0u8, pad));
     framed
@@ -1014,7 +1015,7 @@ fn main() {
 
     let out = Path::new(&out_dir);
     std::fs::create_dir_all(out).expect("create out_dir");
-    let data = bincode::serialize(&bi).expect("bincode serialize");
+    let data = wire::encode(&bi).expect("wire encode");
     let bin_path = out.join("batch_input.bin");
     std::fs::write(&bin_path, &data).expect("write batch_input.bin");
     let framed = frame_for_zisk(&data);

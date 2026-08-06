@@ -1,4 +1,4 @@
-//! Execute a bincode-serialized `BatchInput` (e.g. saved from the server's
+//! Execute a wire-encoded `BatchInput` (e.g. saved from the server's
 //! `/ZiSK/{batch}/peek` endpoint) and print the commitment components — a
 //! quick way to check what the guest computes for a specific batch when
 //! debugging a proof-lane divergence.
@@ -7,13 +7,14 @@
 
 use zksync_os_zisk_lib::executor;
 use zksync_os_zisk_lib::types::BatchInput;
+use zksync_os_zisk_lib::wire;
 
 fn main() {
     let path = std::env::args()
         .nth(1)
         .expect("usage: run_batch_input <batch_input.bin>");
     let bytes = std::fs::read(&path).expect("read input file");
-    let input: BatchInput = bincode::deserialize(&bytes).expect("deserialize BatchInput");
+    let input: BatchInput = wire::decode(&bytes).expect("decode BatchInput");
 
     println!(
         "wire_version={} spec_id={} protocol_minor={} chain_id={} blocks={}..={} txs={}",
