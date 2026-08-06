@@ -129,6 +129,12 @@ emulation status, detail.
 - The runner force-enables all evm_tester index entries (worktree-local
   sed); fixture verdict FAILs under production semantics are expected and
   irrelevant — only executed blocks and their dumps matter.
+- v0.3.0-line bundles report `chain_config_max_tx_gas_limit: 0` (that forward
+  path has no ChainConfig). The reader substitutes a non-binding cap, so the
+  guest's `min(block_gas_limit, max_tx_gas_limit)` bound reduces to the block
+  gas limit — the bound native applies as well. A smaller substitute would
+  reject transactions native executed, which the fixtures do send: EEST blocks
+  routinely carry a 120,000,000 gas limit.
 - Bundles are self-contained per block, including mid-chain fields
   (`block_number_before`, `last_block_timestamp_before`,
   `block_hash_ring_head` — the last is essential at block ≥ 257, the ring
