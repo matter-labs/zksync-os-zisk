@@ -233,11 +233,11 @@ is caught at the layer that notices first:
 | `rootCVadcopFinal` | ZiSK vadcop-final circuit VK | server `prover_api.zisk_vks[].vadcop_vk`, L1 `ZiskVerifier.rootCVadcopFinal()`, binding digest |
 | ZiSK VK hash | `keccak256` over the three pins above, in that order | L1 `ZiskVerifier.verificationKeyHash()` |
 
-Current values, derived 2026-08-04 with ZiSK v0.18.0:
+Current values, with ZiSK v0.18.0:
 
 ```text
-guest ELF sha256      = 32911f12d4ed76827d29bd04884972e865f188a5d2d03bcbf776f5dc0351f079
-guest programVK       = 0x1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468
+guest ELF sha256      = 0966fffff5011d43e41f940783d371f66bee69ae69acc9c79ad2f3ba776e4adf
+guest programVK       = pending derivation on a prover box (guest/GUEST_PROGRAM_VK)
 aggregator ELF sha256 = f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae
 aggregator programVK  = 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254
 rootCVadcopFinal      = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d

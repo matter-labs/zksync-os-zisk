@@ -163,6 +163,16 @@ pub fn no_code_fields_valid(props: &AccountProperties) -> bool {
     code_version <= 1 && actual == evm_code_fields(&[], code_version)
 }
 
+/// Whether the blob is the zeroed account leaf: nonce 0, balance 0, and every
+/// code field zero. Native writes exactly this encoding for an account that
+/// EIP-6780 destruction removes, and the 124-byte layout has no other fields,
+/// so the predicate pins the whole blob.
+pub fn is_zeroed_account(props: &AccountProperties) -> bool {
+    props.nonce == 0
+        && props.balance == [0u8; 32]
+        && CodeFields::of(props) == CodeFields::empty()
+}
+
 /// The full preimage blob stored under `bytecode_hash`:
 /// `code || zero padding to 8 || artifacts`.
 pub fn evm_bytecode_preimage(code: &[u8], code_version: u8) -> Vec<u8> {

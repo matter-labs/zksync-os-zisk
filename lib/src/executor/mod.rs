@@ -11,7 +11,7 @@ mod stream;
 pub mod tx;
 mod verify;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use revm::database::CacheDB;
 use revm::primitives::B256;
@@ -117,12 +117,16 @@ fn run_execution_and_commit(
     // carrying the value of its last change (matches the native tree update,
     // which merges per-block diffs — including writes that net to zero
     // against the batch pre-state).
-    let mut storage_writes: std::collections::HashMap<(revm::primitives::Address, revm::primitives::U256), revm::primitives::U256> =
-        std::collections::HashMap::new();
+    let mut storage_writes: HashMap<(revm::primitives::Address, revm::primitives::U256), revm::primitives::U256> =
+        HashMap::new();
+    // Accounts destruction removed. `CacheDB` leaves a destroyed account
+    // indistinguishable from an account a read found absent, so the write-map
+    // verification below takes the distinction from this journal-derived set.
+    let mut destroyed_accounts: HashSet<revm::primitives::Address> = HashSet::new();
     for block in &input.blocks {
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
-        let (result, net_changes) = evm::execute_block_proven(
+        let (result, state_effects) = evm::execute_block_proven(
             input.chain_id, spec_id, block, &mut cache_db, meta.max_tx_gas_limit,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
@@ -132,7 +136,8 @@ fn run_execution_and_commit(
             .insert_block_hash(block.number, result.computed_block_header_hash);
         computed_block_hashes.insert(block.number, result.computed_block_header_hash);
         block_results.push(result);
-        storage_writes.extend(net_changes);
+        storage_writes.extend(state_effects.storage_writes);
+        destroyed_accounts.extend(state_effects.destroyed_accounts);
     }
 
     let output = BatchOutput { chain_id: input.chain_id, block_results };
@@ -143,6 +148,7 @@ fn run_execution_and_commit(
     // nonzero iff an Upgrade tx is present, so this gate cannot be forged on.
     let revm_writes = verify::build_revm_write_map(
         &storage_writes,
+        &destroyed_accounts,
         &cache_db,
         &meta.account_preimages_after,
         !meta.upgrade_tx_hash.is_zero(),

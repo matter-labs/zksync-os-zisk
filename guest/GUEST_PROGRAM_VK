@@ -1,12 +1,15 @@
 # programVK (ZiSK ROM merkle root) of the reproducible guest ELF.
-# Derived 2026-08-04 via `cargo-zisk program-setup` (ZiSK v0.18.0) from the
-# reproducible container ELF with sha256
-# 32911f12d4ed76827d29bd04884972e865f188a5d2d03bcbf776f5dc0351f079
-# (see GUEST_ELF_SHA256). The value covers the ROM image only, so two ELFs
-# that differ outside the ROM image share it.
+# The value covers the ROM image only, so two ELFs that differ outside the
+# ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
 # identical to the prover daemon's public-values prefix and the server's
 # `prover_api.zisk_vks[].program_vk` expectation.
-# Root hash limbs: [2096133297690934872, 310176553302656066,
-#                   3030310657868287865, 17074031024476062824]
-0x1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468
+#
+# PENDING for the container ELF with sha256
+# 0966fffff5011d43e41f940783d371f66bee69ae69acc9c79ad2f3ba776e4adf
+# (see GUEST_ELF_SHA256). `program-setup` needs the proving keys, so derive
+# the value on a prover box and record it here, together with the limbs:
+#   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+# Until then the server tripwire and the L1 `ZiskVerifier.innerProgramVK()`
+# pin have no value to take for this ELF.
+PENDING
