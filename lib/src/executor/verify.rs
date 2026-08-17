@@ -50,6 +50,46 @@ fn post_state(account: Option<&DbAccount>, destroyed: bool) -> PostState<'_> {
     }
 }
 
+/// Pin an executed account's code fields to the code REVM left on it.
+///
+/// `code_by_hash_ref` proves only that a blob hashes to the hash it is filed
+/// under, so the account's OWN post-state code hash has to select the blob:
+/// resolving the hash the preimage names instead would let an operator bind any
+/// authenticated bytecode, and with it that bytecode's storage, to any account
+/// the batch touched.
+///
+/// An account that holds no code keeps two legal encodings here. Native
+/// materializes a completed deployment even when the deployed runtime code is
+/// empty, and REVM reports the same `KECCAK_EMPTY` for that account as for one
+/// that was never deployed to.
+fn assert_executed_code_fields(
+    proven_db: &ProvenDB,
+    addr: &Address,
+    props: &merkle::AccountProperties,
+    code_hash: B256,
+) {
+    // REVM reports `KECCAK_EMPTY` for an account that holds no code, and its
+    // own `AccountInfo::is_empty` reads the zero hash the same way.
+    if code_hash == KECCAK_EMPTY || code_hash.is_zero() {
+        assert!(account_props::no_code_fields_valid(props),
+            "after-preimage code fields mismatch for {addr}: no observable \
+             code, but fields are neither all-zero nor deployed-empty: {:?}",
+            account_props::CodeFields::of(props));
+        return;
+    }
+    // `load_bytecodes` keys this map by keccak256 of the code it holds, so the
+    // lookup returns the code REVM left and nothing else.
+    let code = proven_db
+        .code_by_hash_ref(code_hash)
+        .unwrap_or_else(|e| panic!("post-state code {code_hash} for {addr} unavailable: {e}"))
+        .original_bytes();
+    assert_eq!(
+        account_props::CodeFields::of(props),
+        account_props::evm_code_fields(&code),
+        "after-preimage code fields mismatch for {addr}"
+    );
+}
+
 /// Build the complete write map: flat_key → new_value for both regular storage
 /// writes and 0x8003 account-property writes. For 0x8003, the server provides
 /// after-state preimages; we verify nonce/balance match REVM output, then use
@@ -115,6 +155,10 @@ pub(super) fn build_revm_write_map(
                     props.nonce, info.nonce);
                 assert_eq!(U256::from_be_bytes(props.balance), info.balance,
                     "after-preimage balance mismatch for {addr}");
+                // The code fields are a pure function of the code REVM left on
+                // the account, so the preimage cannot bind code that belongs to
+                // another account.
+                assert_executed_code_fields(proven_db, addr, &props, info.code_hash);
             }
             // A destroyed account has exactly one legal post-state, so the
             // preimage is pinned whole rather than field by field: any other
@@ -124,39 +168,38 @@ pub(super) fn build_revm_write_map(
                 "after-preimage for destroyed account {addr} is not the zeroed \
                  account leaf: destruction writes nonce 0, balance 0, and no code"
             ),
-            PostState::Unwritten => {}
-        }
-
-        // Code-derived fields are a pure function of the post-state code:
-        // recompute them from the referenced code so a preimage cannot bind
-        // wrong code to the account. The code version is part of that
-        // derivation — native stores code only under the artifact-caching
-        // version — so one account holding one code has one legal leaf.
-        let observable = props.observable_bytecode_hash;
-        if observable == KECCAK_EMPTY || observable.is_zero() {
-            // No observable code: never-deployed (all-zero fields) or
-            // deployed-with-empty-code (native materializes every completed
-            // deployment, empty code included). See `no_code_fields_valid`.
-            assert!(account_props::no_code_fields_valid(&props),
-                "after-preimage code fields mismatch for {addr}: no observable \
-                 code, but fields are neither all-zero nor deployed-empty: {:?}",
-                account_props::CodeFields::of(&props));
-        } else {
-            let code = proven_db
-                .code_by_hash_ref(observable)
-                .unwrap_or_else(|e| panic!(
-                    "post-state code {observable} for {addr} unavailable: {e}"
-                ))
-                .original_bytes();
-            let ee_byte = (props.versioning >> 48) as u8;
-            assert_eq!(ee_byte, account_props::EVM_EE_BYTE,
-                "non-EVM execution environment {ee_byte} for {addr} is not \
-                 supported by the second proof system");
-            assert_eq!(
-                account_props::CodeFields::of(&props),
-                account_props::evm_code_fields(&code),
-                "after-preimage code fields mismatch for {addr}"
-            );
+            // A system force-deploy changes an account REVM never executed, so
+            // there is no post-state code to derive the fields from. It is the
+            // documented trusted hole of an upgrade batch: the fields rest on
+            // the tree authentication plus their own self-consistency.
+            PostState::Unwritten => {
+                let observable = props.observable_bytecode_hash;
+                if observable == KECCAK_EMPTY || observable.is_zero() {
+                    // No observable code: never-deployed (all-zero fields) or
+                    // deployed-with-empty-code (native materializes every completed
+                    // deployment, empty code included). See `no_code_fields_valid`.
+                    assert!(account_props::no_code_fields_valid(&props),
+                        "after-preimage code fields mismatch for {addr}: no observable \
+                         code, but fields are neither all-zero nor deployed-empty: {:?}",
+                        account_props::CodeFields::of(&props));
+                } else {
+                    let code = proven_db
+                        .code_by_hash_ref(observable)
+                        .unwrap_or_else(|e| panic!(
+                            "post-state code {observable} for {addr} unavailable: {e}"
+                        ))
+                        .original_bytes();
+                    let ee_byte = (props.versioning >> 48) as u8;
+                    assert_eq!(ee_byte, account_props::EVM_EE_BYTE,
+                        "non-EVM execution environment {ee_byte} for {addr} is not \
+                         supported by the second proof system");
+                    assert_eq!(
+                        account_props::CodeFields::of(&props),
+                        account_props::evm_code_fields(&code),
+                        "after-preimage code fields mismatch for {addr}"
+                    );
+                }
+            }
         }
 
         let flat_key = merkle::derive_account_properties_key(&(*addr).into_array());
@@ -399,21 +442,50 @@ mod tests {
         vec![0u8; merkle::AccountProperties::ENCODED_SIZE]
     }
 
-    /// A `CacheDB` whose authenticated pre-state is `pre_state`, whose cache
-    /// holds `cache_entries`, and whose code map holds `bytecodes`.
-    /// `build_revm_write_map` reads nothing else from the database, so the
-    /// remaining `ProvenDB` maps stay empty.
+    /// A `CacheDB` whose merkle-authenticated pre-state holds the given
+    /// account-properties blobs, whose cache holds `cache_entries`, and whose
+    /// code map holds `bytecodes`.
+    ///
+    /// The blobs resolve through the production helper
+    /// `build_verified_accounts`, so a test reads the same `AccountInfo` the
+    /// guest derives from an authenticated preimage. `build_revm_write_map`
+    /// reads nothing else from the database.
     fn cache_db_with(
-        pre_state: Vec<(Address, Option<AccountInfo>)>,
+        pre_state: Vec<(Address, Vec<u8>)>,
         cache_entries: Vec<(Address, DbAccount)>,
         bytecodes: HashMap<B256, Bytecode>,
     ) -> CacheDB<ProvenDB> {
-        let proven_db = ProvenDB::from_parts(
-            HashMap::new(),
-            pre_state.into_iter().collect(),
-            bytecodes,
-            HashMap::new(),
+        let verified_storage: HashMap<B256, Option<B256>> = pre_state
+            .iter()
+            .map(|(addr, blob)| {
+                (
+                    merkle::derive_account_properties_key(&addr.into_array()),
+                    Some(merkle::AccountProperties::hash(blob)),
+                )
+            })
+            .collect();
+        let block = BlockInput {
+            number: 1,
+            timestamp: 0,
+            base_fee: 0,
+            gas_limit: 0,
+            coinbase: Address::ZERO,
+            prev_randao: B256::ZERO,
+            transactions: vec![],
+            account_preimages: pre_state,
+            block_hashes: vec![],
+            storage_proofs: vec![],
+            block_header_hash: B256::ZERO,
+            l2_to_l1_logs: vec![],
+            expected_tree_root: B256::ZERO,
+        };
+        let verified_accounts = crate::executor::proven_db::build_verified_accounts(
+            std::slice::from_ref(&block),
+            &verified_storage,
+            &bytecodes,
         );
+        let proven_db =
+            ProvenDB::from_parts(verified_storage, verified_accounts, bytecodes, HashMap::new());
         let mut cache_db = CacheDB::new(proven_db);
         cache_db.cache.accounts.extend(cache_entries);
         cache_db
@@ -453,11 +525,28 @@ mod tests {
         blob
     }
 
-    /// The cache entry execution leaves for an account it wrote, carrying the
-    /// post-state nonce and balance the after-preimage must match.
+    /// The cache entry execution leaves for an account it wrote without code,
+    /// carrying the post-state nonce and balance the after-preimage must match.
+    /// `AccountInfo::default` carries `KECCAK_EMPTY`, which is what REVM reports
+    /// for an account that holds no code.
     fn written(nonce: u64, balance: U256) -> DbAccount {
         DbAccount {
             info: AccountInfo { nonce, balance, ..Default::default() },
+            account_state: AccountState::Touched,
+            ..Default::default()
+        }
+    }
+
+    /// The cache entry execution leaves for an account it wrote that holds
+    /// `code`, carrying the post-state code hash the after-preimage must match.
+    fn written_holding(nonce: u64, balance: U256, code: &[u8]) -> DbAccount {
+        DbAccount {
+            info: AccountInfo {
+                nonce,
+                balance,
+                code_hash: crate::hash::keccak256(code),
+                ..Default::default()
+            },
             account_state: AccountState::Touched,
             ..Default::default()
         }
@@ -472,9 +561,9 @@ mod tests {
         let addr = Address::repeat_byte(0x11);
         // Pre-state balance 1: the destruction is a real change, so the
         // completeness pass also requires this after-preimage.
-        let pre = AccountInfo { balance: U256::from(1), ..Default::default() };
+        let pre = account_blob(&account_props::CodeFields::empty(), 0, U256::from(1));
         let cache_db = cache_db_with(
-            vec![(addr, Some(pre))],
+            vec![(addr, pre)],
             vec![(addr, DbAccount::new_not_existing())],
             HashMap::new(),
         );
@@ -503,8 +592,8 @@ mod tests {
     #[test]
     fn accepts_zeroed_preimage_for_destroyed_account_absent_from_the_cache() {
         let addr = Address::repeat_byte(0x44);
-        let pre = AccountInfo { balance: U256::from(1), ..Default::default() };
-        let cache_db = cache_db_with(vec![(addr, Some(pre))], vec![], HashMap::new());
+        let pre = account_blob(&account_props::CodeFields::empty(), 0, U256::from(1));
+        let cache_db = cache_db_with(vec![(addr, pre)], vec![], HashMap::new());
 
         let writes = build_revm_write_map(
             &HashMap::new(),
@@ -587,9 +676,11 @@ mod tests {
         fields.artifacts_len = 0;
         fields.bytecode_hash = merkle::blake2s(&code);
 
+        // REVM left this exact code on the account, so the claimed code version
+        // is the only thing the preimage gets wrong.
         let cache_db = cache_db_with(
             vec![],
-            vec![(addr, written(1, U256::ZERO))],
+            vec![(addr, written_holding(1, U256::ZERO, &code))],
             bytecode_map(&[&code]),
         );
 
@@ -602,11 +693,44 @@ mod tests {
         );
     }
 
+    /// An after-preimage may not bind code to an account REVM left without any.
+    /// The code map proves only that a blob hashes to the hash it is filed
+    /// under, so nothing but this pin ties the hash to the account: an operator
+    /// could otherwise hand any account the batch touched the code of any
+    /// contract the batch carries, and with it that contract's storage.
+    #[test]
+    #[should_panic(expected = "after-preimage code fields mismatch")]
+    fn rejects_after_preimage_binding_another_contracts_code() {
+        let plain_account = Address::repeat_byte(0x61);
+        let runtime_code: [u8; 5] = [0x5b, 0x60, 0x01, 0x00, 0x5b];
+
+        // Execution moved the balance and left the account holding no code.
+        let cache_db = cache_db_with(
+            vec![(
+                plain_account,
+                account_blob(&account_props::CodeFields::empty(), 0, U256::from(1)),
+            )],
+            vec![(plain_account, written(0, U256::from(2)))],
+            bytecode_map(&[&runtime_code]),
+        );
+
+        build_revm_write_map(
+            &HashMap::new(),
+            &HashSet::new(),
+            &cache_db,
+            &[(
+                plain_account,
+                account_blob(&account_props::evm_code_fields(&runtime_code), 0, U256::from(2)),
+            )],
+            false,
+        );
+    }
+
     /// Every code-field shape native writes must still pass in one batch: a
     /// fresh deployment, an account that keeps its code while its balance
-    /// moves, an EIP-7702 delegation set, a delegation cleared, and a
-    /// deployment whose runtime code is empty. Deriving the code version must
-    /// reject none of them.
+    /// moves, a plain account with no code at all, an EIP-7702 delegation set,
+    /// a delegation cleared, and a deployment whose runtime code is empty.
+    /// Deriving the fields from REVM's post-state code must reject none of them.
     #[test]
     fn accepts_every_native_code_field_shape() {
         let runtime_code: [u8; 5] = [0x5b, 0x60, 0x01, 0x00, 0x5b];
@@ -618,9 +742,11 @@ mod tests {
         let delegated = Address::repeat_byte(0x53);
         let delegation_cleared = Address::repeat_byte(0x54);
         let deployed_empty = Address::repeat_byte(0x55);
+        let plain_account = Address::repeat_byte(0x56);
 
         let code_fields = account_props::evm_code_fields(&runtime_code);
         let delegation_fields = account_props::evm_code_fields(&designator);
+        let no_code = account_props::CodeFields::empty();
 
         let after_preimages = vec![
             // Fresh deployment: no pre-state, nonce 1, the derived code fields.
@@ -631,45 +757,30 @@ mod tests {
             // Delegation set: delegated status, no artifacts.
             (delegated, account_blob(&delegation_fields, 1, U256::from(5))),
             // Delegation cleared: native zeroes every code field.
-            (
-                delegation_cleared,
-                account_blob(&account_props::CodeFields::empty(), 2, U256::ZERO),
-            ),
+            (delegation_cleared, account_blob(&no_code, 2, U256::ZERO)),
             // Deployment with empty runtime code: the empty-blob hashes.
-            (
-                deployed_empty,
-                account_blob(&account_props::evm_code_fields(&[]), 1, U256::ZERO),
-            ),
+            (deployed_empty, account_blob(&account_props::evm_code_fields(&[]), 1, U256::ZERO)),
+            // Balance-only change on an account that never held code.
+            (plain_account, account_blob(&no_code, 0, U256::from(9))),
         ];
 
         // Authenticated pre-state: the account that keeps its code already held
         // it, the account whose delegation is cleared already held the
-        // designator, and the delegation target starts as a plain EOA.
-        let held_code = AccountInfo {
-            nonce: 3,
-            balance: U256::from(1),
-            code_hash: crate::hash::keccak256(&runtime_code),
-            ..Default::default()
-        };
-        let held_delegation = AccountInfo {
-            nonce: 1,
-            code_hash: crate::hash::keccak256(&designator),
-            ..Default::default()
-        };
-        let plain_account = AccountInfo { balance: U256::from(5), ..Default::default() };
-
+        // designator, and the delegation target starts with no code.
         let cache_db = cache_db_with(
             vec![
-                (code_kept, Some(held_code)),
-                (delegated, Some(plain_account)),
-                (delegation_cleared, Some(held_delegation)),
+                (code_kept, account_blob(&code_fields, 3, U256::from(1))),
+                (delegated, account_blob(&no_code, 0, U256::from(5))),
+                (delegation_cleared, account_blob(&delegation_fields, 1, U256::ZERO)),
+                (plain_account, account_blob(&no_code, 0, U256::from(4))),
             ],
             vec![
-                (deployed, written(1, U256::ZERO)),
-                (code_kept, written(3, U256::from(2))),
-                (delegated, written(1, U256::from(5))),
+                (deployed, written_holding(1, U256::ZERO, &runtime_code)),
+                (code_kept, written_holding(3, U256::from(2), &runtime_code)),
+                (delegated, written_holding(1, U256::from(5), &designator)),
                 (delegation_cleared, written(2, U256::ZERO)),
                 (deployed_empty, written(1, U256::ZERO)),
+                (plain_account, written(0, U256::from(9))),
             ],
             bytecode_map(&[&runtime_code, &designator]),
         );
