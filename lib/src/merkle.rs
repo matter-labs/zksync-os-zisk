@@ -206,6 +206,7 @@ pub enum WriteOp {
 pub struct BatchTreeUpdate {
     pub operations: Vec<WriteOp>,
     pub entries: Vec<(B256, B256)>,
+    /// Ascending, distinct leaf indices, each below `leaf_count_before`.
     pub sorted_leaves: Vec<(u64, TreeLeaf)>,
     /// Intermediate sibling hashes for reconstructing the OLD root from
     /// sorted_leaves, in traversal order. Authenticated by the old-root check.
@@ -239,6 +240,7 @@ impl BatchTreeUpdate {
     /// missing an anchor makes the old root mismatch (or exhausts the
     /// intermediate hashes) — a hard failure, exactly as before.
     pub fn apply(&self, expected_old_root: &B256) -> (B256, u64) {
+        self.assert_leaves_name_distinct_old_positions();
         let (new_leaves, next_tree_index) = self.apply_writes();
         let (old_root, new_root) = self.walk_old_and_new(&new_leaves);
         assert_eq!(
@@ -246,6 +248,32 @@ impl BatchTreeUpdate {
             "batch tree update: old root mismatch: computed {old_root}, expected {expected_old_root}"
         );
         (new_root, next_tree_index)
+    }
+
+    /// Every `sorted_leaves` entry must name a distinct position of the OLD
+    /// tree, in ascending order. A position at or beyond `leaf_count_before` is
+    /// empty in the old tree, so the old root reconciles from that empty leaf
+    /// while the witness leaf enters the new root, covered by no `entries`
+    /// pair. A repeated position puts two nodes at one slot: the walk carries
+    /// both to the top and returns the first, so the last copy reconciles the
+    /// old root while the first copy forges the new one.
+    fn assert_leaves_name_distinct_old_positions(&self) {
+        for pair in self.sorted_leaves.windows(2) {
+            assert!(
+                pair[0].0 < pair[1].0,
+                "sorted_leaves indices must strictly increase: index {} is followed by index {}",
+                pair[0].0,
+                pair[1].0,
+            );
+        }
+        for (index, _) in &self.sorted_leaves {
+            assert!(
+                *index < self.leaf_count_before,
+                "sorted_leaves index {index} is at or beyond leaf_count_before {}: \
+                 the old tree holds no leaf at that position",
+                self.leaf_count_before,
+            );
+        }
     }
 
     /// Apply the write operations to a clone of `sorted_leaves`, returning the
@@ -387,7 +415,7 @@ impl BatchTreeUpdate {
             hashes_iter.next().is_none(),
             "not all intermediate hashes consumed"
         );
-        debug_assert_eq!(level.len(), 1, "walk did not reduce to a single root");
+        assert_eq!(level.len(), 1, "walk did not reduce to a single root");
         (level[0].1, level[0].2)
     }
 
@@ -971,6 +999,68 @@ mod tests {
         };
         let result = std::panic::catch_unwind(|| update.apply(&old_root));
         assert!(result.is_err(), "mis-bracketed insert must be rejected");
+    }
+
+    /// A `sorted_leaves` entry at or beyond `leaf_count_before` names a
+    /// position the old tree holds empty, so the old side reconciles the pinned
+    /// root from the empty leaf while the attacker's leaf hash enters the new
+    /// root. No `operations`/`entries` pair mentions it, so the write-set
+    /// equality check never sees it. The witness below reconciles `old_root`;
+    /// only the index bound rejects it.
+    #[test]
+    #[should_panic(expected = "is at or beyond leaf_count_before")]
+    fn rejects_leaf_index_at_or_beyond_leaf_count() {
+        let leaf0 = TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: 1 };
+        let leaf1 = TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 };
+        let old_root = dense_root(&[(0u64, leaf0.clone()), (1u64, leaf1.clone())], 2);
+
+        let phantom = TreeLeaf {
+            key: B256::repeat_byte(0x77),
+            value: B256::repeat_byte(0x88),
+            next_index: 1,
+        };
+        let update = BatchTreeUpdate {
+            operations: vec![],
+            entries: vec![],
+            sorted_leaves: vec![(0, leaf0), (1, leaf1), (5, phantom)],
+            intermediate_hashes: vec![],
+            leaf_count_before: 2,
+        };
+        update.apply(&old_root);
+    }
+
+    /// A repeated `sorted_leaves` index puts two nodes at one tree position.
+    /// The walk carries both to the top and returns the first, so the last copy
+    /// (which `orig_by_idx` keeps) reconciles the pinned old root while the
+    /// first copy forges the new one. The witness below supplies the doubled
+    /// off-path siblings the two paths consume, so it reconciles `old_root`;
+    /// only the ordering rule rejects it.
+    #[test]
+    #[should_panic(expected = "sorted_leaves indices must strictly increase")]
+    fn rejects_repeated_leaf_index() {
+        let leaf0 = TreeLeaf { key: B256::ZERO, value: B256::ZERO, next_index: 2 };
+        let leaf1 = TreeLeaf { key: B256::repeat_byte(0xff), value: B256::ZERO, next_index: 1 };
+        let leaf2 = TreeLeaf {
+            key: B256::repeat_byte(0x40),
+            value: B256::repeat_byte(0xa2),
+            next_index: 1,
+        };
+        let old_root = dense_root(
+            &[(0u64, leaf0.clone()), (1u64, leaf1.clone()), (2u64, leaf2.clone())],
+            3,
+        );
+
+        let h = |l: &TreeLeaf| hash_leaf(&l.key, &l.value, l.next_index);
+        let node_over_leaf_two = blake2s_compress(&h(&leaf2), &empty_subtree_hash(0));
+        let forged = TreeLeaf { value: B256::repeat_byte(0x99), ..leaf0.clone() };
+        let update = BatchTreeUpdate {
+            operations: vec![],
+            entries: vec![],
+            sorted_leaves: vec![(0, forged), (0, leaf0), (1, leaf1.clone()), (2, leaf2)],
+            intermediate_hashes: vec![h(&leaf1), node_over_leaf_two],
+            leaf_count_before: 3,
+        };
+        update.apply(&old_root);
     }
 
     // =================== Streaming tree-update A/B ===================
