@@ -734,7 +734,7 @@ mod tests {
     fn encode_account_props_code(nonce: u64, balance: U256, code: &[u8]) -> Vec<u8> {
         let mut data = encode_account_props(nonce, balance);
         if !code.is_empty() {
-            let f = crate::account_props::evm_code_fields(code, 1);
+            let f = crate::account_props::evm_code_fields(code);
             data[0..8].copy_from_slice(&f.versioning.to_be_bytes());
             data[48..80].copy_from_slice(f.bytecode_hash.as_slice());
             data[80..84].copy_from_slice(&f.unpadded_code_len.to_be_bytes());

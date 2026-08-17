@@ -9,8 +9,11 @@
 //! Native recipe (EVM):
 //! - artifacts = jumpdest bitmap: `ceil(code_len / 64)` u64 words,
 //!   little-endian, bit `i` set iff `code[i]` is a JUMPDEST outside PUSH
-//!   immediates (code version 1, `ARTIFACTS_CACHING_CODE_VERSION_BYTE`);
-//!   code version 0 predates artifact caching and has no artifacts.
+//!   immediates (code version 1, `ARTIFACTS_CACHING_CODE_VERSION_BYTE`).
+//!   Every native path that stores code (`deploy_code`, `set_bytecode_details`,
+//!   `set_delegation`) writes that one code version, so the guest derives it
+//!   and never reads it from the witness. Code version 0 belongs to the
+//!   all-zero blob of an account that holds no code.
 //! - padding: code zero-padded to 8-byte (`BYTECODE_ALIGNMENT`) alignment.
 //! - `bytecode_hash = blake2s256(code || padding || artifacts)`; the preimage
 //!   blob stored under it is exactly that concatenation.
@@ -102,17 +105,21 @@ fn versioning(status: u8, code_version: u8) -> u64 {
     ((status as u64) << 56) | ((EVM_EE_BYTE as u64) << 48) | ((code_version as u64) << 40)
 }
 
-/// Derive every code-dependent `AccountProperties` field for EVM code under
-/// the given code version (0 = no cached artifacts, 1 = jumpdest bitmap).
+/// Derive every code-dependent `AccountProperties` field for EVM code.
+///
+/// The code version is derived, not read: native stores code only under
+/// `ARTIFACTS_CACHING_CODE_VERSION`, so one account holding one code has one
+/// legal leaf, and a blob that claims any other code version fails the field
+/// comparison at the caller.
 ///
 /// A 23-byte `0xef0100 || address` blob is an EIP-7702 delegation designator:
 /// delegated status, no artifacts, code version 1 — matching native
 /// `set_delegation`.
-pub fn evm_code_fields(code: &[u8], code_version: u8) -> CodeFields {
+pub fn evm_code_fields(code: &[u8]) -> CodeFields {
     let is_delegation =
         code.len() == 23 && code[..3] == EIP7702_DELEGATION_MARKER;
 
-    let artifacts = if is_delegation || code_version == 0 {
+    let artifacts = if is_delegation {
         Vec::new()
     } else {
         evm_jumpdest_bitmap(code)
@@ -125,14 +132,14 @@ pub fn evm_code_fields(code: &[u8], code_version: u8) -> CodeFields {
     hasher.update(&artifacts);
     let bytecode_hash = B256::from_slice(&hasher.finalize());
 
-    let (status, code_version) = if is_delegation {
-        (DELEGATED_STATUS_BYTE, ARTIFACTS_CACHING_CODE_VERSION)
+    let status = if is_delegation {
+        DELEGATED_STATUS_BYTE
     } else {
-        (DEPLOYED_STATUS_BYTE, code_version)
+        DEPLOYED_STATUS_BYTE
     };
 
     CodeFields {
-        versioning: versioning(status, code_version),
+        versioning: versioning(status, ARTIFACTS_CACHING_CODE_VERSION),
         bytecode_hash,
         unpadded_code_len: code.len() as u32,
         artifacts_len: artifacts.len() as u32,
@@ -156,11 +163,7 @@ pub fn evm_code_fields(code: &[u8], code_version: u8) -> CodeFields {
 /// the batch public input) pins which one native actually wrote.
 pub fn no_code_fields_valid(props: &AccountProperties) -> bool {
     let actual = CodeFields::of(props);
-    if actual == CodeFields::empty() {
-        return true;
-    }
-    let code_version = (props.versioning >> 40) as u8;
-    code_version <= 1 && actual == evm_code_fields(&[], code_version)
+    actual == CodeFields::empty() || actual == evm_code_fields(&[])
 }
 
 /// Whether the blob is the zeroed account leaf: nonce 0, balance 0, and every
@@ -175,10 +178,10 @@ pub fn is_zeroed_account(props: &AccountProperties) -> bool {
 
 /// The full preimage blob stored under `bytecode_hash`:
 /// `code || zero padding to 8 || artifacts`.
-pub fn evm_bytecode_preimage(code: &[u8], code_version: u8) -> Vec<u8> {
+pub fn evm_bytecode_preimage(code: &[u8]) -> Vec<u8> {
     let is_delegation =
         code.len() == 23 && code[..3] == EIP7702_DELEGATION_MARKER;
-    let artifacts = if is_delegation || code_version == 0 {
+    let artifacts = if is_delegation {
         Vec::new()
     } else {
         evm_jumpdest_bitmap(code)
@@ -215,11 +218,14 @@ mod tests {
     fn delegation_designator_fields() {
         let mut code = vec![0xef, 0x01, 0x00];
         code.extend_from_slice(&[0x11; 20]);
-        let fields = evm_code_fields(&code, ARTIFACTS_CACHING_CODE_VERSION);
+        let fields = evm_code_fields(&code);
         assert_eq!(fields.artifacts_len, 0);
         assert_eq!(fields.unpadded_code_len, 23);
         assert_eq!(fields.versioning >> 56, DELEGATED_STATUS_BYTE as u64);
         assert_eq!((fields.versioning >> 48) as u8, EVM_EE_BYTE);
+        // Native `set_delegation` tags the designator with the artifact-caching
+        // code version even though it caches no artifacts.
+        assert_eq!((fields.versioning >> 40) as u8, ARTIFACTS_CACHING_CODE_VERSION);
         // blake2s over code + 1 byte of padding (23 -> 24), no artifacts
         let mut h = Blake2s256::new();
         h.update(&code);
@@ -230,8 +236,8 @@ mod tests {
     #[test]
     fn deployed_code_fields_roundtrip_with_preimage() {
         let code = [0x5b, 0x60, 0x01, 0x00, 0x5b]; // 5 bytes -> pad 3
-        let fields = evm_code_fields(&code, ARTIFACTS_CACHING_CODE_VERSION);
-        let blob = evm_bytecode_preimage(&code, ARTIFACTS_CACHING_CODE_VERSION);
+        let fields = evm_code_fields(&code);
+        let blob = evm_bytecode_preimage(&code);
         assert_eq!(blob.len(), 5 + 3 + 8);
         let mut h = Blake2s256::new();
         h.update(&blob);
@@ -256,14 +262,17 @@ mod tests {
 
     /// Both canonical no-observable-code encodings must be accepted, and
     /// nothing else. Pins the exact native deployed-empty materialization
-    /// observed on v0.3.x (`deploy_code` with empty runtime code).
+    /// observed on v0.3.x (`deploy_code` with empty runtime code), including
+    /// its code version: `deploy_code` writes the artifact-caching version for
+    /// empty runtime code as well, so the pre-artifact-caching encoding of the
+    /// same account is not a native encoding.
     #[test]
     fn no_code_fields_accepts_exactly_the_two_native_encodings() {
         // Arm 1: never-deployed (or delegation-cleared) — all zero.
         assert!(no_code_fields_valid(&props_from(&CodeFields::empty(), 7)));
 
         // Arm 2: deployed with empty runtime code, code version 1.
-        let deployed_empty = evm_code_fields(&[], ARTIFACTS_CACHING_CODE_VERSION);
+        let deployed_empty = evm_code_fields(&[]);
         assert_eq!(deployed_empty.versioning, 0x0101_0100_0000_0000);
         assert_eq!(
             deployed_empty.bytecode_hash,
@@ -274,8 +283,14 @@ mod tests {
         assert_eq!(deployed_empty.artifacts_len, 0);
         assert_eq!(deployed_empty.observable_bytecode_len, 0);
         assert!(no_code_fields_valid(&props_from(&deployed_empty, 1)));
-        // Code version 0 (pre-artifact-caching) deployed-empty is also valid.
-        assert!(no_code_fields_valid(&props_from(&evm_code_fields(&[], 0), 1)));
+
+        // A claimed code version other than the native one is rejected, so a
+        // deployed-empty account has ONE legal leaf. For empty runtime code the
+        // pre-artifact-caching encoding differs from the native one in the
+        // versioning word alone: both carry no artifacts and the same hashes.
+        let mut pre_artifact_caching = deployed_empty.clone();
+        pre_artifact_caching.versioning = 0x0101_0000_0000_0000; // code version 0
+        assert!(!no_code_fields_valid(&props_from(&pre_artifact_caching, 1)));
 
         // Mixed encodings are rejected: deployed status with zero hashes...
         let mut mixed = CodeFields::empty();

@@ -129,7 +129,9 @@ pub(super) fn build_revm_write_map(
 
         // Code-derived fields are a pure function of the post-state code:
         // recompute them from the referenced code so a preimage cannot bind
-        // wrong code to the account.
+        // wrong code to the account. The code version is part of that
+        // derivation — native stores code only under the artifact-caching
+        // version — so one account holding one code has one legal leaf.
         let observable = props.observable_bytecode_hash;
         if observable == KECCAK_EMPTY || observable.is_zero() {
             // No observable code: never-deployed (all-zero fields) or
@@ -146,16 +148,13 @@ pub(super) fn build_revm_write_map(
                     "post-state code {observable} for {addr} unavailable: {e}"
                 ))
                 .original_bytes();
-            let code_version = (props.versioning >> 40) as u8;
-            assert!(code_version <= 1,
-                "unsupported code version {code_version} for {addr}");
             let ee_byte = (props.versioning >> 48) as u8;
             assert_eq!(ee_byte, account_props::EVM_EE_BYTE,
                 "non-EVM execution environment {ee_byte} for {addr} is not \
                  supported by the second proof system");
             assert_eq!(
                 account_props::CodeFields::of(&props),
-                account_props::evm_code_fields(&code, code_version),
+                account_props::evm_code_fields(&code),
                 "after-preimage code fields mismatch for {addr}"
             );
         }
@@ -297,6 +296,8 @@ mod tests {
     use super::*;
     use crate::merkle::{BatchTreeUpdate, TreeLeaf, WriteOp};
     use crate::types::BatchMeta;
+    use revm::primitives::Bytes;
+    use revm::state::Bytecode;
 
     /// Compress two child hashes, exactly like `merkle::blake2s_compress`
     /// (a single Blake2s over the two 32-byte slices).
@@ -398,22 +399,68 @@ mod tests {
         vec![0u8; merkle::AccountProperties::ENCODED_SIZE]
     }
 
-    /// A `CacheDB` whose authenticated pre-state is `pre_state` and whose cache
-    /// holds `cache_entries`. `build_revm_write_map` reads nothing else from the
-    /// database, so the remaining `ProvenDB` maps stay empty.
+    /// A `CacheDB` whose authenticated pre-state is `pre_state`, whose cache
+    /// holds `cache_entries`, and whose code map holds `bytecodes`.
+    /// `build_revm_write_map` reads nothing else from the database, so the
+    /// remaining `ProvenDB` maps stay empty.
     fn cache_db_with(
         pre_state: Vec<(Address, Option<AccountInfo>)>,
         cache_entries: Vec<(Address, DbAccount)>,
+        bytecodes: HashMap<B256, Bytecode>,
     ) -> CacheDB<ProvenDB> {
         let proven_db = ProvenDB::from_parts(
             HashMap::new(),
             pre_state.into_iter().collect(),
-            HashMap::new(),
+            bytecodes,
             HashMap::new(),
         );
         let mut cache_db = CacheDB::new(proven_db);
         cache_db.cache.accounts.extend(cache_entries);
         cache_db
+    }
+
+    /// The code map keyed the way `load_bytecodes` keys it: keccak256 of the
+    /// raw code, which is what an after-preimage's `observable_bytecode_hash`
+    /// resolves against.
+    fn bytecode_map(codes: &[&[u8]]) -> HashMap<B256, Bytecode> {
+        codes
+            .iter()
+            .map(|code| {
+                (
+                    crate::hash::keccak256(code),
+                    Bytecode::new_raw(Bytes::copy_from_slice(code)),
+                )
+            })
+            .collect()
+    }
+
+    /// The 124-byte account-properties blob carrying `fields`, `nonce` and
+    /// `balance`, at the offsets `merkle::AccountProperties::decode` reads.
+    fn account_blob(
+        fields: &account_props::CodeFields,
+        nonce: u64,
+        balance: U256,
+    ) -> Vec<u8> {
+        let mut blob = vec![0u8; merkle::AccountProperties::ENCODED_SIZE];
+        blob[0..8].copy_from_slice(&fields.versioning.to_be_bytes());
+        blob[8..16].copy_from_slice(&nonce.to_be_bytes());
+        blob[16..48].copy_from_slice(&balance.to_be_bytes::<32>());
+        blob[48..80].copy_from_slice(fields.bytecode_hash.as_slice());
+        blob[80..84].copy_from_slice(&fields.unpadded_code_len.to_be_bytes());
+        blob[84..88].copy_from_slice(&fields.artifacts_len.to_be_bytes());
+        blob[88..120].copy_from_slice(fields.observable_bytecode_hash.as_slice());
+        blob[120..124].copy_from_slice(&fields.observable_bytecode_len.to_be_bytes());
+        blob
+    }
+
+    /// The cache entry execution leaves for an account it wrote, carrying the
+    /// post-state nonce and balance the after-preimage must match.
+    fn written(nonce: u64, balance: U256) -> DbAccount {
+        DbAccount {
+            info: AccountInfo { nonce, balance, ..Default::default() },
+            account_state: AccountState::Touched,
+            ..Default::default()
+        }
     }
 
     /// An account created and destroyed inside one transaction reaches
@@ -429,6 +476,7 @@ mod tests {
         let cache_db = cache_db_with(
             vec![(addr, Some(pre))],
             vec![(addr, DbAccount::new_not_existing())],
+            HashMap::new(),
         );
 
         let writes = build_revm_write_map(
@@ -456,7 +504,7 @@ mod tests {
     fn accepts_zeroed_preimage_for_destroyed_account_absent_from_the_cache() {
         let addr = Address::repeat_byte(0x44);
         let pre = AccountInfo { balance: U256::from(1), ..Default::default() };
-        let cache_db = cache_db_with(vec![(addr, Some(pre))], vec![]);
+        let cache_db = cache_db_with(vec![(addr, Some(pre))], vec![], HashMap::new());
 
         let writes = build_revm_write_map(
             &HashMap::new(),
@@ -486,7 +534,7 @@ mod tests {
             account_state: AccountState::None,
             ..Default::default()
         };
-        let cache_db = cache_db_with(vec![], vec![(addr, read_only)]);
+        let cache_db = cache_db_with(vec![], vec![(addr, read_only)], HashMap::new());
 
         build_revm_write_map(
             &HashMap::new(),
@@ -504,7 +552,8 @@ mod tests {
     #[should_panic(expected = "is not the zeroed account leaf")]
     fn rejects_non_zeroed_preimage_for_destroyed_account() {
         let addr = Address::repeat_byte(0x33);
-        let cache_db = cache_db_with(vec![], vec![(addr, DbAccount::new_not_existing())]);
+        let cache_db =
+            cache_db_with(vec![], vec![(addr, DbAccount::new_not_existing())], HashMap::new());
 
         let mut blob = zeroed_account_blob();
         blob[47] = 1; // balance = 1 wei
@@ -515,6 +564,136 @@ mod tests {
             &cache_db,
             &[(addr, blob)],
             false,
+        );
+    }
+
+    /// The code version is not the operator's to choose. Native stores code
+    /// only under the artifact-caching version, so the pre-artifact-caching
+    /// encoding of the same code must be rejected: accepting it would give one
+    /// account holding one code two legal leaves, and the batch two legal
+    /// post-state roots.
+    #[test]
+    #[should_panic(expected = "after-preimage code fields mismatch")]
+    fn rejects_after_preimage_claiming_a_non_native_code_version() {
+        let addr = Address::repeat_byte(0x44);
+        // Eight bytes, so the code needs no alignment padding and the
+        // pre-artifact-caching preimage is the code alone.
+        let code: [u8; 8] = [0x5b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        // The leaf a pre-artifact-caching encoding of this code would produce:
+        // code version 0, no jumpdest bitmap, and a hash over the bare code.
+        let mut fields = account_props::evm_code_fields(&code);
+        fields.versioning = 0x0101_0000_0000_0000;
+        fields.artifacts_len = 0;
+        fields.bytecode_hash = merkle::blake2s(&code);
+
+        let cache_db = cache_db_with(
+            vec![],
+            vec![(addr, written(1, U256::ZERO))],
+            bytecode_map(&[&code]),
+        );
+
+        build_revm_write_map(
+            &HashMap::new(),
+            &HashSet::new(),
+            &cache_db,
+            &[(addr, account_blob(&fields, 1, U256::ZERO))],
+            false,
+        );
+    }
+
+    /// Every code-field shape native writes must still pass in one batch: a
+    /// fresh deployment, an account that keeps its code while its balance
+    /// moves, an EIP-7702 delegation set, a delegation cleared, and a
+    /// deployment whose runtime code is empty. Deriving the code version must
+    /// reject none of them.
+    #[test]
+    fn accepts_every_native_code_field_shape() {
+        let runtime_code: [u8; 5] = [0x5b, 0x60, 0x01, 0x00, 0x5b];
+        let mut designator = account_props::EIP7702_DELEGATION_MARKER.to_vec();
+        designator.extend_from_slice(&[0x77; 20]);
+
+        let deployed = Address::repeat_byte(0x51);
+        let code_kept = Address::repeat_byte(0x52);
+        let delegated = Address::repeat_byte(0x53);
+        let delegation_cleared = Address::repeat_byte(0x54);
+        let deployed_empty = Address::repeat_byte(0x55);
+
+        let code_fields = account_props::evm_code_fields(&runtime_code);
+        let delegation_fields = account_props::evm_code_fields(&designator);
+
+        let after_preimages = vec![
+            // Fresh deployment: no pre-state, nonce 1, the derived code fields.
+            (deployed, account_blob(&code_fields, 1, U256::ZERO)),
+            // Balance-only change: native rewrites the whole blob and preserves
+            // the code fields the account already had.
+            (code_kept, account_blob(&code_fields, 3, U256::from(2))),
+            // Delegation set: delegated status, no artifacts.
+            (delegated, account_blob(&delegation_fields, 1, U256::from(5))),
+            // Delegation cleared: native zeroes every code field.
+            (
+                delegation_cleared,
+                account_blob(&account_props::CodeFields::empty(), 2, U256::ZERO),
+            ),
+            // Deployment with empty runtime code: the empty-blob hashes.
+            (
+                deployed_empty,
+                account_blob(&account_props::evm_code_fields(&[]), 1, U256::ZERO),
+            ),
+        ];
+
+        // Authenticated pre-state: the account that keeps its code already held
+        // it, the account whose delegation is cleared already held the
+        // designator, and the delegation target starts as a plain EOA.
+        let held_code = AccountInfo {
+            nonce: 3,
+            balance: U256::from(1),
+            code_hash: crate::hash::keccak256(&runtime_code),
+            ..Default::default()
+        };
+        let held_delegation = AccountInfo {
+            nonce: 1,
+            code_hash: crate::hash::keccak256(&designator),
+            ..Default::default()
+        };
+        let plain_account = AccountInfo { balance: U256::from(5), ..Default::default() };
+
+        let cache_db = cache_db_with(
+            vec![
+                (code_kept, Some(held_code)),
+                (delegated, Some(plain_account)),
+                (delegation_cleared, Some(held_delegation)),
+            ],
+            vec![
+                (deployed, written(1, U256::ZERO)),
+                (code_kept, written(3, U256::from(2))),
+                (delegated, written(1, U256::from(5))),
+                (delegation_cleared, written(2, U256::ZERO)),
+                (deployed_empty, written(1, U256::ZERO)),
+            ],
+            bytecode_map(&[&runtime_code, &designator]),
+        );
+
+        let writes = build_revm_write_map(
+            &HashMap::new(),
+            &HashSet::new(),
+            &cache_db,
+            &after_preimages,
+            false,
+        );
+
+        let expected: HashMap<B256, B256> = after_preimages
+            .iter()
+            .map(|(addr, blob)| {
+                (
+                    merkle::derive_account_properties_key(&addr.into_array()),
+                    merkle::AccountProperties::hash(blob),
+                )
+            })
+            .collect();
+        assert_eq!(
+            writes, expected,
+            "every native code-field shape must become its 0x8003 write"
         );
     }
 
