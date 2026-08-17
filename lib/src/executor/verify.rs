@@ -50,32 +50,44 @@ fn post_state(account: Option<&DbAccount>, destroyed: bool) -> PostState<'_> {
     }
 }
 
-/// Pin an executed account's code fields to the code REVM left on it.
+/// The code fields native writes for an account execution wrote.
 ///
-/// `code_by_hash_ref` proves only that a blob hashes to the hash it is filed
-/// under, so the account's OWN post-state code hash has to select the blob:
-/// resolving the hash the preimage names instead would let an operator bind any
-/// authenticated bytecode, and with it that bytecode's storage, to any account
-/// the batch touched.
+/// Native derives every code field from the code the account holds, and it
+/// carries the fields through unchanged on a change that does not write code.
+/// The code REVM left therefore fixes the fields, and the operator chooses
+/// none of them:
 ///
-/// An account that holds no code keeps two legal encodings here. Native
-/// materializes a completed deployment even when the deployed runtime code is
-/// empty, and REVM reports the same `KECCAK_EMPTY` for that account as for one
-/// that was never deployed to.
-fn assert_executed_code_fields(
+/// - an account that holds observable code carries the derivation of exactly
+///   that code, so a preimage cannot bind one account's code to another;
+/// - a deployment that completed in this batch carries the deployed encoding,
+///   empty runtime code included (native `deploy_code` runs for every completed
+///   deployment);
+/// - an account whose code the batch cleared carries the zeroed encoding, which
+///   is what native `set_delegation` writes when it clears a delegation;
+/// - an account whose code the batch never wrote keeps the code fields of its
+///   merkle-authenticated pre-state.
+fn expected_code_fields(
     proven_db: &ProvenDB,
     addr: &Address,
-    props: &merkle::AccountProperties,
     code_hash: B256,
-) {
+    deployed_in_batch: bool,
+) -> account_props::CodeFields {
     // REVM reports `KECCAK_EMPTY` for an account that holds no code, and its
-    // own `AccountInfo::is_empty` reads the zero hash the same way.
+    // own `AccountInfo::is_empty` reads the zero hash the same way, so both
+    // values mean "no code" here. Native carries a third value for the same
+    // situation: the never-deployed encoding leaves the observable hash zero
+    // while the deployed-with-empty-code encoding holds `keccak256("")`, and
+    // the branches below decide which of the two this account is in.
     if code_hash == KECCAK_EMPTY || code_hash.is_zero() {
-        assert!(account_props::no_code_fields_valid(props),
-            "after-preimage code fields mismatch for {addr}: no observable \
-             code, but fields are neither all-zero nor deployed-empty: {:?}",
-            account_props::CodeFields::of(props));
-        return;
+        if deployed_in_batch {
+            return account_props::evm_code_fields(&[]);
+        }
+        let pre_state = proven_db.pre_state_code_fields(addr);
+        return if pre_state.observable_bytecode_len == 0 {
+            pre_state
+        } else {
+            account_props::CodeFields::empty()
+        };
     }
     // `load_bytecodes` keys this map by keccak256 of the code it holds, so the
     // lookup returns the code REVM left and nothing else.
@@ -83,11 +95,7 @@ fn assert_executed_code_fields(
         .code_by_hash_ref(code_hash)
         .unwrap_or_else(|e| panic!("post-state code {code_hash} for {addr} unavailable: {e}"))
         .original_bytes();
-    assert_eq!(
-        account_props::CodeFields::of(props),
-        account_props::evm_code_fields(&code),
-        "after-preimage code fields mismatch for {addr}"
-    );
+    account_props::evm_code_fields(&code)
 }
 
 /// Build the complete write map: flat_key → new_value for both regular storage
@@ -97,6 +105,7 @@ fn assert_executed_code_fields(
 pub(super) fn build_revm_write_map(
     storage_writes: &HashMap<(Address, U256), U256>,
     destroyed_accounts: &HashSet<Address>,
+    deployed_accounts: &HashSet<Address>,
     cache_db: &CacheDB<ProvenDB>,
     after_preimages: &[(Address, Vec<u8>)],
     is_upgrade_batch: bool,
@@ -155,10 +164,18 @@ pub(super) fn build_revm_write_map(
                     props.nonce, info.nonce);
                 assert_eq!(U256::from_be_bytes(props.balance), info.balance,
                     "after-preimage balance mismatch for {addr}");
-                // The code fields are a pure function of the code REVM left on
-                // the account, so the preimage cannot bind code that belongs to
-                // another account.
-                assert_executed_code_fields(proven_db, addr, &props, info.code_hash);
+                // Every code field is derived, so the account has one legal
+                // leaf and the preimage carries no operator choice at all.
+                assert_eq!(
+                    account_props::CodeFields::of(&props),
+                    expected_code_fields(
+                        proven_db,
+                        addr,
+                        info.code_hash,
+                        deployed_accounts.contains(addr),
+                    ),
+                    "after-preimage code fields mismatch for {addr}"
+                );
             }
             // A destroyed account has exactly one legal post-state, so the
             // preimage is pinned whole rather than field by field: any other
@@ -169,7 +186,7 @@ pub(super) fn build_revm_write_map(
                  account leaf: destruction writes nonce 0, balance 0, and no code"
             ),
             // A system force-deploy changes an account REVM never executed, so
-            // there is no post-state code to derive the fields from. It is the
+            // there is no post-state to derive the fields from. It is the
             // documented trusted hole of an upgrade batch: the fields rest on
             // the tree authentication plus their own self-consistency.
             PostState::Unwritten => {
@@ -447,9 +464,9 @@ mod tests {
     /// code map holds `bytecodes`.
     ///
     /// The blobs resolve through the production helper
-    /// `build_verified_accounts`, so a test reads the same `AccountInfo` the
-    /// guest derives from an authenticated preimage. `build_revm_write_map`
-    /// reads nothing else from the database.
+    /// `build_verified_accounts`, so a test reads the same `AccountInfo` and the
+    /// same pre-state code fields the guest derives from an authenticated
+    /// preimage. `build_revm_write_map` reads nothing else from the database.
     fn cache_db_with(
         pre_state: Vec<(Address, Vec<u8>)>,
         cache_entries: Vec<(Address, DbAccount)>,
@@ -571,6 +588,7 @@ mod tests {
         let writes = build_revm_write_map(
             &HashMap::new(),
             &HashSet::from([addr]),
+            &HashSet::new(),
             &cache_db,
             &[(addr, zeroed_account_blob())],
             false,
@@ -598,6 +616,7 @@ mod tests {
         let writes = build_revm_write_map(
             &HashMap::new(),
             &HashSet::from([addr]),
+            &HashSet::new(),
             &cache_db,
             &[(addr, zeroed_account_blob())],
             false,
@@ -628,6 +647,7 @@ mod tests {
         build_revm_write_map(
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &cache_db,
             &[(addr, zeroed_account_blob())],
             false,
@@ -650,6 +670,7 @@ mod tests {
         build_revm_write_map(
             &HashMap::new(),
             &HashSet::from([addr]),
+            &HashSet::new(),
             &cache_db,
             &[(addr, blob)],
             false,
@@ -687,6 +708,7 @@ mod tests {
         build_revm_write_map(
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &cache_db,
             &[(addr, account_blob(&fields, 1, U256::ZERO))],
             false,
@@ -717,6 +739,7 @@ mod tests {
         build_revm_write_map(
             &HashMap::new(),
             &HashSet::new(),
+            &HashSet::new(),
             &cache_db,
             &[(
                 plain_account,
@@ -726,11 +749,71 @@ mod tests {
         );
     }
 
+    /// An account with no code that no deployment reached keeps the code fields
+    /// of its authenticated pre-state. A never-deployed account that claims the
+    /// deployed-with-empty-code leaf must be rejected: accepting it would give
+    /// the batch a second post-state root and the operator the choice between
+    /// the two.
+    #[test]
+    #[should_panic(expected = "after-preimage code fields mismatch")]
+    fn rejects_deployed_empty_leaf_for_a_never_deployed_account() {
+        let never_deployed = Address::repeat_byte(0x62);
+        let cache_db = cache_db_with(
+            vec![(
+                never_deployed,
+                account_blob(&account_props::CodeFields::empty(), 0, U256::from(1)),
+            )],
+            vec![(never_deployed, written(0, U256::from(2)))],
+            HashMap::new(),
+        );
+
+        build_revm_write_map(
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &cache_db,
+            &[(
+                never_deployed,
+                account_blob(&account_props::evm_code_fields(&[]), 0, U256::from(2)),
+            )],
+            false,
+        );
+    }
+
+    /// The other direction of the same choice: an account native deployed with
+    /// empty runtime code in an earlier batch keeps the deployed encoding while
+    /// its balance moves, so the zeroed leaf must be rejected for it.
+    #[test]
+    #[should_panic(expected = "after-preimage code fields mismatch")]
+    fn rejects_zeroed_leaf_for_an_account_deployed_with_empty_code() {
+        let deployed_empty = Address::repeat_byte(0x63);
+        let cache_db = cache_db_with(
+            vec![(
+                deployed_empty,
+                account_blob(&account_props::evm_code_fields(&[]), 1, U256::from(1)),
+            )],
+            vec![(deployed_empty, written(1, U256::from(2)))],
+            HashMap::new(),
+        );
+
+        build_revm_write_map(
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &cache_db,
+            &[(
+                deployed_empty,
+                account_blob(&account_props::CodeFields::empty(), 1, U256::from(2)),
+            )],
+            false,
+        );
+    }
+
     /// Every code-field shape native writes must still pass in one batch: a
     /// fresh deployment, an account that keeps its code while its balance
     /// moves, a plain account with no code at all, an EIP-7702 delegation set,
     /// a delegation cleared, and a deployment whose runtime code is empty.
-    /// Deriving the fields from REVM's post-state code must reject none of them.
+    /// Deriving the fields must reject none of them.
     #[test]
     fn accepts_every_native_code_field_shape() {
         let runtime_code: [u8; 5] = [0x5b, 0x60, 0x01, 0x00, 0x5b];
@@ -788,6 +871,9 @@ mod tests {
         let writes = build_revm_write_map(
             &HashMap::new(),
             &HashSet::new(),
+            // Both deployments completed in this batch, the empty-runtime-code
+            // one included.
+            &HashSet::from([deployed, deployed_empty]),
             &cache_db,
             &after_preimages,
             false,

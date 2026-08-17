@@ -123,6 +123,11 @@ fn run_execution_and_commit(
     // indistinguishable from an account a read found absent, so the write-map
     // verification below takes the distinction from this journal-derived set.
     let mut destroyed_accounts: HashSet<revm::primitives::Address> = HashSet::new();
+    // Accounts a deployment completed at. `CacheDB` keeps no record of a
+    // deployment, so the write-map verification below takes this signal from
+    // the execution journal as well: it decides which code encoding native
+    // wrote for an account that ends the batch holding no code.
+    let mut deployed_accounts: HashSet<revm::primitives::Address> = HashSet::new();
     for block in &input.blocks {
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
@@ -138,6 +143,7 @@ fn run_execution_and_commit(
         block_results.push(result);
         storage_writes.extend(state_effects.storage_writes);
         destroyed_accounts.extend(state_effects.destroyed_accounts);
+        deployed_accounts.extend(state_effects.deployed_accounts);
     }
 
     let output = BatchOutput { chain_id: input.chain_id, block_results };
@@ -149,6 +155,7 @@ fn run_execution_and_commit(
     let revm_writes = verify::build_revm_write_map(
         &storage_writes,
         &destroyed_accounts,
+        &deployed_accounts,
         &cache_db,
         &meta.account_preimages_after,
         !meta.upgrade_tx_hash.is_zero(),

@@ -11,8 +11,22 @@ use revm::primitives::{Address, B256, Bytes, U256, KECCAK_EMPTY};
 use revm::state::{AccountInfo, Bytecode};
 use revm::DatabaseRef;
 
+use crate::account_props::CodeFields;
 use crate::merkle::{self, StorageProof};
 use crate::types::*;
+
+/// The merkle-authenticated pre-state of every account a batch names, in the two
+/// shapes the executor consumes.
+#[derive(Debug, PartialEq)]
+pub(super) struct VerifiedAccounts {
+    /// Nonce, balance and code hash, as REVM reads them. None = proven
+    /// non-existent.
+    infos: HashMap<Address, Option<AccountInfo>>,
+    /// The code-derived fields of the account's 124-byte properties blob, which
+    /// `AccountInfo` does not carry. An account whose leaf the pre-state does
+    /// not hold has no entry.
+    code_fields: HashMap<Address, CodeFields>,
+}
 
 /// Database that verifies every read against a merkle proof.
 /// Values are taken FROM the proofs — there is no separate unverified data path.
@@ -22,9 +36,9 @@ pub(super) struct ProvenDB {
     /// All proofs are verified at construction time; reads are pure lookups.
     /// This includes account-property entries at address 0x8003.
     pub(super) verified_storage: HashMap<B256, Option<B256>>,
-    /// Merkle-verified account info. Every entry was proven against the tree
-    /// root at construction time. None = proven non-existent.
-    verified_accounts: HashMap<Address, Option<AccountInfo>>,
+    /// Merkle-verified account pre-state. Every entry was proven against the
+    /// tree root at construction time.
+    verified_accounts: VerifiedAccounts,
     /// Verified bytecodes keyed by hash (keccak256 or blake2s).
     bytecodes: HashMap<B256, Bytecode>,
     /// Block hashes for BLOCKHASH opcode (verified against batch_meta).
@@ -38,7 +52,7 @@ impl ProvenDB {
     /// byte-identical database.
     pub(super) fn from_parts(
         verified_storage: HashMap<B256, Option<B256>>,
-        verified_accounts: HashMap<Address, Option<AccountInfo>>,
+        verified_accounts: VerifiedAccounts,
         bytecodes: HashMap<B256, Bytecode>,
         block_hashes: HashMap<u64, B256>,
     ) -> Self {
@@ -63,6 +77,19 @@ impl ProvenDB {
     pub(super) fn insert_block_hash(&mut self, number: u64, hash: B256) {
         self.block_hashes.insert(number, hash);
     }
+
+    /// The code-derived fields of an account's merkle-authenticated pre-state
+    /// properties blob. Native rewrites the whole blob on every account change
+    /// and carries these fields through unchanged unless it writes the account's
+    /// code, so they are the post-state fields of an account whose code the
+    /// batch never wrote. An account the pre-state tree does not hold has none.
+    pub(super) fn pre_state_code_fields(&self, address: &Address) -> CodeFields {
+        self.verified_accounts
+            .code_fields
+            .get(address)
+            .cloned()
+            .unwrap_or_else(CodeFields::empty)
+    }
 }
 
 #[cfg(test)]
@@ -74,7 +101,7 @@ impl ProvenDB {
         &self,
     ) -> (
         &HashMap<B256, Option<B256>>,
-        &HashMap<Address, Option<AccountInfo>>,
+        &VerifiedAccounts,
         &HashMap<B256, Bytecode>,
         &HashMap<u64, B256>,
     ) {
@@ -104,7 +131,7 @@ impl DatabaseRef for ProvenDB {
 
     fn basic_ref(&self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
         // Fast path: account was pre-verified from account_preimages
-        if let Some(proven) = self.verified_accounts.get(&address) {
+        if let Some(proven) = self.verified_accounts.infos.get(&address) {
             return Ok(proven.clone());
         }
 
@@ -231,12 +258,13 @@ pub(super) fn build_verified_accounts(
     blocks: &[BlockInput],
     verified_storage: &HashMap<B256, Option<B256>>,
     bytecodes: &HashMap<B256, Bytecode>,
-) -> HashMap<Address, Option<AccountInfo>> {
-    let mut verified_accounts: HashMap<Address, Option<AccountInfo>> = HashMap::new();
+) -> VerifiedAccounts {
+    let mut infos: HashMap<Address, Option<AccountInfo>> = HashMap::new();
+    let mut code_fields: HashMap<Address, CodeFields> = HashMap::new();
 
     for block in blocks {
         for (addr, preimage) in &block.account_preimages {
-            if verified_accounts.contains_key(addr) {
+            if infos.contains_key(addr) {
                 continue;
             }
             let addr_bytes: [u8; 20] = addr.into_array();
@@ -248,7 +276,7 @@ pub(super) fn build_verified_accounts(
 
             match proven_value {
                 None => {
-                    verified_accounts.insert(*addr, None);
+                    infos.insert(*addr, None);
                 }
                 Some(proven_hash) => {
                     let preimage_hash = merkle::AccountProperties::hash(preimage);
@@ -274,7 +302,7 @@ pub(super) fn build_verified_accounts(
                     };
                     let code = bytecodes.get(&code_hash).cloned();
 
-                    verified_accounts.insert(
+                    infos.insert(
                         *addr,
                         Some(AccountInfo {
                             nonce: props.nonce,
@@ -284,12 +312,13 @@ pub(super) fn build_verified_accounts(
                             account_id: None,
                         }),
                     );
+                    code_fields.insert(*addr, CodeFields::of(&props));
                 }
             }
         }
     }
 
-    verified_accounts
+    VerifiedAccounts { infos, code_fields }
 }
 
 /// Cross-check the witnessed per-block `block_hashes` against

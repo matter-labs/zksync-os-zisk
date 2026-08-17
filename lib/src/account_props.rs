@@ -157,10 +157,11 @@ pub fn evm_code_fields(code: &[u8]) -> CodeFields {
 ///   deployed/EVM versioning with the hashes of the empty blob
 ///   (`bytecode_hash = blake2s("")`, `observable = keccak256("")`, lens 0).
 ///
-/// The deployment status is genuine native state that REVM does not model,
-/// so the guest cannot recompute it for empty-code accounts; it accepts
-/// exactly these two self-consistent encodings, and the tree root (hence
-/// the batch public input) pins which one native actually wrote.
+/// The two encodings are two distinct leaves, so the predicate belongs to the
+/// system force-deploy path alone — the trusted hole of an upgrade batch, where
+/// REVM models no post-state and only the tree authentication and this
+/// self-consistency check constrain the fields. An account execution wrote has
+/// its code fields DERIVED, so it has one legal leaf.
 pub fn no_code_fields_valid(props: &AccountProperties) -> bool {
     let actual = CodeFields::of(props);
     actual == CodeFields::empty() || actual == evm_code_fields(&[])
@@ -260,9 +261,28 @@ mod tests {
         }
     }
 
+    /// `observable_bytecode_len` separates the native shapes that hold code
+    /// from the ones that do not. Post-execution verification reads the
+    /// authenticated pre-state length to tell an account whose code the batch
+    /// cleared from one whose code fields the batch left alone, so the two
+    /// no-code shapes must both report zero and every shape that holds code
+    /// must report the unpadded length of that code.
+    #[test]
+    fn observable_bytecode_len_marks_the_shapes_that_hold_code() {
+        assert_eq!(CodeFields::empty().observable_bytecode_len, 0);
+        assert_eq!(evm_code_fields(&[]).observable_bytecode_len, 0);
+
+        let mut designator = EIP7702_DELEGATION_MARKER.to_vec();
+        designator.extend_from_slice(&[0x22; 20]);
+        assert_eq!(evm_code_fields(&designator).observable_bytecode_len, 23);
+        assert_eq!(evm_code_fields(&[0x5b, 0x00]).observable_bytecode_len, 2);
+    }
+
     /// Both canonical no-observable-code encodings must be accepted, and
-    /// nothing else. Pins the exact native deployed-empty materialization
-    /// observed on v0.3.x (`deploy_code` with empty runtime code), including
+    /// nothing else. The predicate guards the system force-deploy path, where
+    /// REVM models no post-state to derive the fields from. Pins the exact
+    /// native deployed-empty materialization observed on v0.3.x
+    /// (`deploy_code` with empty runtime code), including
     /// its code version: `deploy_code` writes the artifact-caching version for
     /// empty runtime code as well, so the pre-artifact-caching encoding of the
     /// same account is not a native encoding.

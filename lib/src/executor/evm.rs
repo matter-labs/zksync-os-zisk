@@ -22,6 +22,10 @@ pub(super) struct BlockStateEffects {
     pub(super) storage_writes: Vec<((Address, U256), U256)>,
     /// Accounts that destruction removed from the state.
     pub(super) destroyed_accounts: HashSet<Address>,
+    /// Accounts a deployment completed at. Native runs `deploy_code` for every
+    /// completed deployment, so these accounts carry the deployed code
+    /// encoding even when the deployed runtime code is empty.
+    pub(super) deployed_accounts: HashSet<Address>,
 }
 
 /// Execute a single block using the shared batch-level CacheDB.
@@ -152,6 +156,7 @@ where
     let mut slot_writes: std::collections::HashMap<(Address, U256), (U256, U256)> =
         std::collections::HashMap::new();
     let mut destroyed_accounts: HashSet<Address> = HashSet::new();
+    let mut deployed_accounts: HashSet<Address> = HashSet::new();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
         evm.0.ctx.chain.set_tx_number(tx_idx as u16);
@@ -180,6 +185,14 @@ where
                             destroyed_accounts.insert(*addr);
                         }
                         continue;
+                    }
+                    // A create frame that committed at this address. revm sets
+                    // the flag before the init code runs and clears it again on
+                    // revert, so it marks exactly the deployments that
+                    // completed — including one whose runtime code is empty,
+                    // which native still materializes as deployed.
+                    if account.is_created() {
+                        deployed_accounts.insert(*addr);
                     }
                     for (slot, s) in &account.storage {
                         if s.is_changed() {
@@ -222,6 +235,6 @@ where
         tx_results,
         tx_hashes,
         l2_to_l1_logs,
-        BlockStateEffects { storage_writes, destroyed_accounts },
+        BlockStateEffects { storage_writes, destroyed_accounts, deployed_accounts },
     )
 }
