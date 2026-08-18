@@ -5,11 +5,15 @@
 # identical to the prover daemon's public-values prefix and the server's
 # `prover_api.zisk_vks[].program_vk` expectation.
 #
-# PENDING for the container ELF with sha256
-# 81c0a04e266b8c3149a25d101579e5f38874e26f81ed6dd40a8eb4bd4979f267
-# (see GUEST_ELF_SHA256). `program-setup` needs the proving keys, so derive
-# the value on a prover box and record it here, together with the limbs:
+# Derived with cargo-zisk 0.18.0 on 2026-08-18 from the container ELF with
+# sha256 81c0a04e266b8c3149a25d101579e5f38874e26f81ed6dd40a8eb4bd4979f267
+# (see GUEST_ELF_SHA256):
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
-# Until then the server tripwire and the L1 `ZiskVerifier.innerProgramVK()`
-# pin have no value to take for this ELF.
-PENDING
+#
+# The same run re-derived the aggregator programVK from its unchanged ELF and
+# reproduced the recorded value, which shows the setup carries no toolchain
+# drift.
+#
+# Root hash limbs: [426946317103461375, 5802275556545228987,
+#                   1425716418516836576, 16106317095152047070]
+0x05ecd169d11cf3ff5085d2e07ccf70bb13c92987642360e0df8522102856d3de
