@@ -242,6 +242,13 @@ fn run_execution_and_commit(
     let mut num_l2_txs: u64 = 0;
     let mut num_upgrade_txs: u64 = 0;
     let mut interop_roots_rolling_hash = B256::ZERO;
+    // The `InteropRoot` tuple gains a creation timestamp at AtlasV4, which moves
+    // both the import selector and the rolling-hash preimage.
+    let import_abi = if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        tx::InteropImportAbi::WithTimestamp
+    } else {
+        tx::InteropImportAbi::WithoutTimestamp
+    };
 
     for block in &input.blocks {
         for tx in &block.transactions {
@@ -270,6 +277,7 @@ fn run_execution_and_commit(
                     tx::fold_system_tx_interop_roots(
                         tx_hash,
                         encoded_2718,
+                        import_abi,
                         &mut interop_roots_rolling_hash,
                     );
                 }

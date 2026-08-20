@@ -346,9 +346,50 @@ fn rlp_len(buf: &[u8], pos: usize, len_len: usize) -> usize {
 // System tx call selectors (keccak256 of the canonical signatures, first 4
 // bytes) and their protocol-defined target addresses — must stay in lockstep
 // with zksync-os-server's `SystemTxInput`.
-const SEL_ADD_INTEROP_ROOTS: [u8; 4] = [0xcc, 0xa2, 0xf7, 0xbc]; // addInteropRootsInBatch((uint256,uint256,bytes32[])[])
 const SEL_SET_SL_CHAIN_ID: [u8; 4] = [0x04, 0x02, 0x03, 0xe6]; // setSettlementLayerChainId(uint256)
 const SEL_SET_INTEROP_FEE: [u8; 4] = [0x08, 0x27, 0x3d, 0x8a]; // setInteropFee(uint256)
+
+/// The `addInteropRootsInBatch` ABI the spec's L2InteropRootStorage exposes.
+/// Native whitelists exactly one `(to, selector)` pair per line, so a batch
+/// carrying the other spec's import is rejected as an unknown selector.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum InteropImportAbi {
+    /// AtlasV1 through AtlasV3:
+    /// `addInteropRootsInBatch((uint256,uint256,bytes32[])[])`.
+    WithoutTimestamp,
+    /// AtlasV4: the `InteropRoot` tuple carries the root's creation timestamp,
+    /// `addInteropRootsInBatch((uint256,uint256,uint256,bytes32[])[])`.
+    WithTimestamp,
+}
+
+impl InteropImportAbi {
+    /// The first four bytes of the keccak256 of the canonical signature.
+    fn selector(self) -> [u8; 4] {
+        match self {
+            Self::WithoutTimestamp => [0xcc, 0xa2, 0xf7, 0xbc],
+            Self::WithTimestamp => [0xc1, 0x7a, 0x9f, 0xbd],
+        }
+    }
+
+    /// Size of the tuple's static head, which is where the `sides` offset word
+    /// sits: three words without the timestamp, four with it.
+    fn static_head_len(self) -> usize {
+        match self {
+            Self::WithoutTimestamp => 96,
+            Self::WithTimestamp => 128,
+        }
+    }
+}
+
+/// One imported interop root, as the raw ABI words the rolling hash re-encodes.
+struct ImportedInteropRoot {
+    chain_id: [u8; 32],
+    block_or_batch_number: [u8; 32],
+    /// The root's creation timestamp on the source chain, present when the
+    /// spec's ABI carries it.
+    timestamp: Option<[u8; 32]>,
+    sides: Vec<B256>,
+}
 
 const L2_INTEROP_ROOT_STORAGE_ADDRESS: [u8; 20] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -390,32 +431,41 @@ fn decode_system_tx(tx_hash: &B256, encoded_2718: &[u8]) -> ([u8; 20], Vec<u8>) 
 }
 
 /// Fold the interop roots of an `addInteropRootsInBatch` system tx into the
-/// batch's dependency-roots rolling hash, exactly as the server's batch
-/// builder does: `hash = keccak256(hash ‖ chainId ‖ blockOrBatchNumber ‖
-/// sides…)` per root, in calldata order. Non-import system txs (SL-chain-id,
-/// interop-fee updates) contribute nothing; unknown selectors are rejected.
+/// batch's dependency-roots rolling hash, mirroring native
+/// `calculate_interop_roots_rolling_hash`: `hash = keccak256(hash ‖ chainId ‖
+/// blockOrBatchNumber ‖ [timestamp] ‖ sides…)` per root, in calldata order. The
+/// timestamp word is present from AtlasV4 on, and the settlement layer hashes
+/// the same preimage in `ExecutorFacet._verifyDependencyInteropRoots`.
+///
+/// Non-import system txs (SL-chain-id, interop-fee updates) contribute nothing;
+/// unknown selectors are rejected.
 pub(super) fn fold_system_tx_interop_roots(
     tx_hash: &B256,
     encoded_2718: &[u8],
+    import_abi: InteropImportAbi,
     rolling_hash: &mut B256,
 ) {
     let (to, data) = decode_system_tx(tx_hash, encoded_2718);
     assert!(data.len() >= 4, "system tx calldata missing selector");
     let selector: [u8; 4] = data[..4].try_into().unwrap();
-    match selector {
-        SEL_ADD_INTEROP_ROOTS => {
-            assert_eq!(to, L2_INTEROP_ROOT_STORAGE_ADDRESS, "interop import to wrong target");
-            for (chain_id, block_or_batch, sides) in decode_interop_roots(&data[4..]) {
-                let mut buf = Vec::with_capacity(96 + 32 * sides.len());
-                buf.extend_from_slice(rolling_hash.as_slice());
-                buf.extend_from_slice(&chain_id);
-                buf.extend_from_slice(&block_or_batch);
-                for side in &sides {
-                    buf.extend_from_slice(side.as_slice());
-                }
-                *rolling_hash = crate::hash::keccak256(&buf);
+    if selector == import_abi.selector() {
+        assert_eq!(to, L2_INTEROP_ROOT_STORAGE_ADDRESS, "interop import to wrong target");
+        for root in decode_interop_roots(&data[4..], import_abi) {
+            let mut buf = Vec::with_capacity(import_abi.static_head_len() + 32 * root.sides.len());
+            buf.extend_from_slice(rolling_hash.as_slice());
+            buf.extend_from_slice(&root.chain_id);
+            buf.extend_from_slice(&root.block_or_batch_number);
+            if let Some(timestamp) = root.timestamp {
+                buf.extend_from_slice(&timestamp);
             }
+            for side in &root.sides {
+                buf.extend_from_slice(side.as_slice());
+            }
+            *rolling_hash = crate::hash::keccak256(&buf);
         }
+        return;
+    }
+    match selector {
         SEL_SET_SL_CHAIN_ID => {
             assert_eq!(to, SYSTEM_CONTEXT_ADDRESS, "SL-chain-id update to wrong target");
         }
@@ -426,10 +476,10 @@ pub(super) fn fold_system_tx_interop_roots(
     }
 }
 
-/// Strict ABI decode of `InteropRoot[]` (`(uint256,uint256,bytes32[])[]`)
-/// from post-selector calldata. Returns raw 32-byte words for the two
-/// uint256 fields (only ever re-encoded into the rolling hash) plus sides.
-fn decode_interop_roots(abi: &[u8]) -> Vec<([u8; 32], [u8; 32], Vec<B256>)> {
+/// Strict ABI decode of `InteropRoot[]` from post-selector calldata. Returns
+/// raw 32-byte words for the uint256 fields (only ever re-encoded into the
+/// rolling hash) plus sides.
+fn decode_interop_roots(abi: &[u8], import_abi: InteropImportAbi) -> Vec<ImportedInteropRoot> {
     let word = |off: usize| -> [u8; 32] {
         assert!(off + 32 <= abi.len(), "interop ABI: word out of bounds");
         abi[off..off + 32].try_into().unwrap()
@@ -450,18 +500,29 @@ fn decode_interop_roots(abi: &[u8]) -> Vec<([u8; 32], [u8; 32], Vec<B256>)> {
     let array_off = uword(0);
     let n = uword(array_off);
     let elems_base = array_off + 32;
+    // The `sides` offset word is the last word of the tuple's static head.
+    let sides_offset_word = import_abi.static_head_len() - 32;
     let mut roots = Vec::with_capacity(n.min(MAX_PREALLOC));
     for i in 0..n {
         let struct_off = elems_base + uword(elems_base + 32 * i);
         let chain_id = word(struct_off);
-        let block_or_batch = word(struct_off + 32);
-        let sides_off = struct_off + uword(struct_off + 64);
+        let block_or_batch_number = word(struct_off + 32);
+        let timestamp = match import_abi {
+            InteropImportAbi::WithoutTimestamp => None,
+            InteropImportAbi::WithTimestamp => Some(word(struct_off + 64)),
+        };
+        let sides_off = struct_off + uword(struct_off + sides_offset_word);
         let m = uword(sides_off);
         let mut sides = Vec::with_capacity(m.min(MAX_PREALLOC));
         for j in 0..m {
             sides.push(B256::from(word(sides_off + 32 + 32 * j)));
         }
-        roots.push((chain_id, block_or_batch, sides));
+        roots.push(ImportedInteropRoot {
+            chain_id,
+            block_or_batch_number,
+            timestamp,
+            sides,
+        });
     }
     roots
 }
@@ -605,6 +666,178 @@ mod tests {
             };
             let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, None);
             assert_eq!(tx_type, claimed);
+        }
+    }
+
+    // ---- interop-root import: ABI encoding and the rolling-hash preimage ----
+
+    /// Minimal RLP string encoding, for the system-tx envelope below.
+    fn rlp_string(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        if bytes.len() == 1 && bytes[0] < 0x80 {
+            out.push(bytes[0]);
+        } else if bytes.len() <= 55 {
+            out.push(0x80 + bytes.len() as u8);
+            out.extend_from_slice(bytes);
+        } else {
+            let len = bytes.len().to_be_bytes();
+            let lead = len.iter().position(|&b| b != 0).unwrap();
+            out.push(0xb7 + (len.len() - lead) as u8);
+            out.extend_from_slice(&len[lead..]);
+            out.extend_from_slice(bytes);
+        }
+        out
+    }
+
+    /// Minimal RLP list encoding over already-encoded items.
+    fn rlp_list(items: &[Vec<u8>]) -> Vec<u8> {
+        let payload: Vec<u8> = items.concat();
+        let mut out = Vec::new();
+        if payload.len() <= 55 {
+            out.push(0xc0 + payload.len() as u8);
+        } else {
+            let len = payload.len().to_be_bytes();
+            let lead = len.iter().position(|&b| b != 0).unwrap();
+            out.push(0xf7 + (len.len() - lead) as u8);
+            out.extend_from_slice(&len[lead..]);
+        }
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    /// ABI-encode `addInteropRootsInBatch` for a single `InteropRoot` holding
+    /// one side, under the tuple shape `import_abi` describes.
+    fn import_calldata(
+        import_abi: InteropImportAbi,
+        chain_id: u64,
+        block_or_batch_number: u64,
+        timestamp: u64,
+        side: B256,
+    ) -> Vec<u8> {
+        let head = import_abi.static_head_len();
+        let mut abi = Vec::new();
+        let push_word = |abi: &mut Vec<u8>, value: u64| {
+            abi.extend_from_slice(&[0u8; 24]);
+            abi.extend_from_slice(&value.to_be_bytes());
+        };
+        push_word(&mut abi, 32); // offset of the InteropRoot[] array
+        push_word(&mut abi, 1); // one element
+        push_word(&mut abi, 32); // that element's offset, relative to elems_base
+        push_word(&mut abi, chain_id);
+        push_word(&mut abi, block_or_batch_number);
+        if import_abi == InteropImportAbi::WithTimestamp {
+            push_word(&mut abi, timestamp);
+        }
+        push_word(&mut abi, head as u64); // sides offset, relative to struct_off
+        push_word(&mut abi, 1); // one side
+        abi.extend_from_slice(side.as_slice());
+
+        let mut calldata = import_abi.selector().to_vec();
+        calldata.extend_from_slice(&abi);
+        calldata
+    }
+
+    /// Wrap `calldata` in the hash-authenticated system-tx envelope
+    /// `0x7d ‖ rlp([to, input, salt])` addressed to L2InteropRootStorage.
+    fn import_system_tx(calldata: Vec<u8>) -> (B256, Vec<u8>) {
+        let mut encoded = vec![SYSTEM_TX_TYPE];
+        encoded.extend_from_slice(&rlp_list(&[
+            rlp_string(&L2_INTEROP_ROOT_STORAGE_ADDRESS),
+            rlp_string(&calldata),
+            rlp_string(&[]),
+        ]));
+        (crate::hash::keccak256(&encoded), encoded)
+    }
+
+    /// Fold one imported root and report the resulting rolling hash.
+    fn fold_one_import(
+        import_abi: InteropImportAbi,
+        chain_id: u64,
+        block_or_batch_number: u64,
+        timestamp: u64,
+        side: B256,
+    ) -> B256 {
+        let (tx_hash, encoded) = import_system_tx(import_calldata(
+            import_abi,
+            chain_id,
+            block_or_batch_number,
+            timestamp,
+            side,
+        ));
+        let mut rolling = B256::ZERO;
+        fold_system_tx_interop_roots(&tx_hash, &encoded, import_abi, &mut rolling);
+        rolling
+    }
+
+    /// The AtlasV4 preimage is `prev ‖ chainId ‖ blockOrBatchNumber ‖ timestamp
+    /// ‖ root`, 160 bytes, matching native
+    /// `calculate_interop_roots_rolling_hash` and the settlement layer's
+    /// `abi.encodePacked(prev, chainId, blockOrBatchNumber, timestamp, sides)`.
+    #[test]
+    fn interop_rolling_hash_folds_the_native_preimage() {
+        let side = B256::repeat_byte(0xab);
+        let word = |value: u64| {
+            let mut w = [0u8; 32];
+            w[24..].copy_from_slice(&value.to_be_bytes());
+            w
+        };
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(B256::ZERO.as_slice());
+        preimage.extend_from_slice(&word(37));
+        preimage.extend_from_slice(&word(11));
+        preimage.extend_from_slice(&word(1_700_000_000));
+        preimage.extend_from_slice(side.as_slice());
+        assert_eq!(preimage.len(), 160);
+
+        assert_eq!(
+            fold_one_import(
+                InteropImportAbi::WithTimestamp,
+                37,
+                11,
+                1_700_000_000,
+                side
+            ),
+            crate::hash::keccak256(&preimage),
+        );
+    }
+
+    /// The timestamp reaches the committed value: two roots that differ only in
+    /// their creation timestamp fold to different rolling hashes, and the
+    /// timestamp-less tuple folds to a third value even at timestamp zero.
+    #[test]
+    fn interop_rolling_hash_commits_the_timestamp() {
+        let side = B256::repeat_byte(0xab);
+        let with_zero = fold_one_import(InteropImportAbi::WithTimestamp, 37, 11, 0, side);
+        let with_value = fold_one_import(InteropImportAbi::WithTimestamp, 37, 11, 7, side);
+        let without = fold_one_import(InteropImportAbi::WithoutTimestamp, 37, 11, 0, side);
+        assert_ne!(with_zero, with_value);
+        assert_ne!(with_zero, without);
+    }
+
+    /// Native whitelists one `(to, selector)` pair per line, so each spec
+    /// rejects the other's import as an unknown selector rather than decoding
+    /// it under the wrong tuple shape.
+    #[test]
+    fn interop_import_selector_is_spec_gated() {
+        for (encoded_abi, expected_abi) in [
+            (InteropImportAbi::WithTimestamp, InteropImportAbi::WithoutTimestamp),
+            (InteropImportAbi::WithoutTimestamp, InteropImportAbi::WithTimestamp),
+        ] {
+            let (tx_hash, encoded) = import_system_tx(import_calldata(
+                encoded_abi,
+                37,
+                11,
+                0,
+                B256::repeat_byte(0xab),
+            ));
+            let mut rolling = B256::ZERO;
+            let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                fold_system_tx_interop_roots(&tx_hash, &encoded, expected_abi, &mut rolling)
+            }));
+            assert!(
+                rejected.is_err(),
+                "{encoded_abi:?} import must not decode under {expected_abi:?}",
+            );
         }
     }
 }
