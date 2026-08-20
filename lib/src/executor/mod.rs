@@ -373,6 +373,7 @@ fn run_execution_and_commit(
             input.chain_id,
             meta.fri_proof_verification_enabled,
             meta.max_tx_gas_limit,
+            meta.pubdata_content,
         )
     });
     let commitment = commitment::batch_public_input_hash(
@@ -424,6 +425,10 @@ fn validate_block_sequence(input: &BatchInput, spec_id: ZkSpecId) {
 ///   above Ethereum's limit but never lowered below it. The value is committed
 ///   in `chain_config_hash` and caps every L2 transaction, so a config native
 ///   refuses to load must not reach either consumer.
+/// - `PubdataContent::try_from`: the mode id is 0 or 1. Native rejects any
+///   other byte while deserializing the chain config, so an out-of-range value
+///   must fail loudly here rather than reach `chain_config_hash` as a word
+///   native never commits.
 /// - `block_gas_limit <= MAX_BLOCK_GAS_LIMIT` and
 ///   `min(block_gas_limit, max_tx_gas_limit) <= MAX_TX_GAS_LIMIT`: an over-large
 ///   limit aborts the whole block in native.
@@ -438,6 +443,16 @@ fn validate_atlas_v4_block_invariants(input: &BatchInput, spec_id: ZkSpecId) {
         max_tx_gas_limit >= DEFAULT_MAX_TX_GAS_LIMIT,
         "chain max_tx_gas_limit {max_tx_gas_limit} is below the EIP-7825 \
          single-transaction gas limit {DEFAULT_MAX_TX_GAS_LIMIT}",
+    );
+    let pubdata_content = input.batch_meta.pubdata_content;
+    assert!(
+        matches!(
+            pubdata_content,
+            PUBDATA_CONTENT_FULL | PUBDATA_CONTENT_LOGS_ONLY
+        ),
+        "unknown chain pubdata_content {pubdata_content}: native accepts \
+         {PUBDATA_CONTENT_FULL} (full pubdata) and {PUBDATA_CONTENT_LOGS_ONLY} \
+         (logs only)",
     );
     for block in &input.blocks {
         assert!(
@@ -824,6 +839,17 @@ mod tests {
     fn rejects_a_chain_cap_below_the_eip7825_limit() {
         let mut input = dispatch_batch(3, 32);
         input.batch_meta.max_tx_gas_limit = (1 << 24) - 1;
+        resolve_spec_and_validate(&input);
+    }
+
+    /// A pubdata content mode native's `PubdataContent::try_from` rejects must
+    /// not reach `chain_config_hash`, which would otherwise commit a word no
+    /// native run produces.
+    #[test]
+    #[should_panic(expected = "unknown chain pubdata_content 2")]
+    fn rejects_an_unknown_pubdata_content_mode() {
+        let mut input = dispatch_batch(3, 32);
+        input.batch_meta.pubdata_content = 2;
         resolve_spec_and_validate(&input);
     }
 

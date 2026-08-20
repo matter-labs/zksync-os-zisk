@@ -270,6 +270,7 @@ mod tests {
                 batch_input.chain_id,
                 batch_input.batch_meta.fri_proof_verification_enabled,
                 batch_input.batch_meta.max_tx_gas_limit,
+                batch_input.batch_meta.pubdata_content,
             );
             assert_ne!(
                 commitment,

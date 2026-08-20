@@ -179,21 +179,28 @@ pub fn batch_output_hash_native(
 }
 
 /// Canonical keccak256 commitment to the chain config, matching zksync-os
-/// draft-0.4.0 `ChainConfig::hash` (zk_ee .../metadata/chain_config.rs):
+/// `ChainConfig::hash` (zk_ee .../metadata/chain_config.rs):
 ///   chain_id (uint256 BE), fri_proof_verification_enabled (32-byte word,
-///   last byte 0/1), max_tx_gas_limit (u64 BE, right-aligned in a 32-byte word).
+///   last byte 0/1), max_tx_gas_limit (u64 BE, right-aligned in a 32-byte
+///   word), pubdata_content (32-byte word, last byte the mode id).
+///
+/// era-contracts `Executor._getBatchProofPublicInputZKsyncOS` holds the same
+/// encoding, so L1 can gate the two proving lanes against each other.
 pub fn chain_config_hash(
     chain_id: u64,
     fri_proof_verification_enabled: bool,
     max_tx_gas_limit: u64,
+    pubdata_content: u8,
 ) -> B256 {
-    let mut data = [0u8; 96];
+    let mut data = [0u8; 128];
     // chain_id as U256 BE
     data[24..32].copy_from_slice(&chain_id.to_be_bytes());
     // fri word: last byte 0/1
     data[63] = u8::from(fri_proof_verification_enabled);
     // max_tx_gas_limit right-aligned in the third 32-byte word
     data[88..96].copy_from_slice(&max_tx_gas_limit.to_be_bytes());
+    // pubdata_content mode id in the last byte of the fourth 32-byte word
+    data[127] = pubdata_content;
     keccak256(&data)
 }
 
@@ -304,8 +311,73 @@ mod tests {
         }
     }
 
+    /// Native's own golden vector for `ChainConfig::hash`
+    /// (`.../zk/post_tx_op/public_input.rs`, `chain_config_hash_golden_vector`):
+    /// chain id 37, FRI proof verification disabled, the EIP-7825 default
+    /// per-transaction gas cap and full pubdata. era-contracts
+    /// `Executor._getBatchProofPublicInputZKsyncOS` pins the same value, so a
+    /// move here must move there too.
+    #[test]
+    fn chain_config_matches_the_native_golden_vector() {
+        let expected: B256 =
+            "0x9bba8b838beaad59a5dec253b49be1f496d47df8c2086b561298cae2cc232c0a"
+                .parse()
+                .unwrap();
+        assert_eq!(chain_config_hash(37, false, 1 << 24, 0), expected);
+    }
+
+    /// Native's own golden vector for the whole batch public input
+    /// (`.../zk/post_tx_op/public_input.rs`,
+    /// `batch_public_input_hash_golden_vector`): zero state commitments, the
+    /// chain config above, and the batch output of
+    /// `atlas_v4_batch_output_matches_the_native_golden_vector`. era-contracts
+    /// `ZKsyncOSPublicInput.t.sol::PUBLIC_INPUT_HASH_GOLDEN` pins the same value.
+    #[test]
+    fn batch_public_input_matches_the_native_golden_vector() {
+        let batch_output = batch_output_hash_native(
+            BatchOutputLayout::AtlasV4,
+            37,
+            1,
+            2,
+            3,
+            &B256::ZERO,
+            3,
+            4,
+            &B256::ZERO,
+            &B256::ZERO,
+            &B256::ZERO,
+            &B256::ZERO,
+            9,
+        );
+        let expected: B256 =
+            "0x0a5143e28ed3fc1728ef4d96319f2306bb5a81bfccd908154e44029988ef9e7c"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            batch_public_input_hash(
+                &B256::ZERO,
+                &B256::ZERO,
+                Some(&chain_config_hash(37, false, 1 << 24, 0)),
+                &batch_output,
+            ),
+            expected,
+        );
+    }
+
+    /// Every chain-config word reaches the commitment, so a change in any one
+    /// of the four moves the hash. Native pins the same property per field
+    /// (`batch_public_input_hash_commits_to_*`).
+    #[test]
+    fn chain_config_commits_to_every_word() {
+        let base = chain_config_hash(37, false, 1 << 24, 0);
+        assert_ne!(base, chain_config_hash(38, false, 1 << 24, 0));
+        assert_ne!(base, chain_config_hash(37, true, 1 << 24, 0));
+        assert_ne!(base, chain_config_hash(37, false, 1 << 25, 0));
+        assert_ne!(base, chain_config_hash(37, false, 1 << 24, 1));
+    }
+
     /// The three layouts are distinct, and the v30 and v31 preimages keep the
-    /// chain-id prefix. The lengths pin the field counts: v30 is 336 bytes, v31
+    /// chain-id prefix. The lengths pin the field counts: v30 is 272 bytes, v31
     /// adds the layer-2 count and the settlement chain id, and AtlasV4 is v31
     /// without the chain-id word.
     #[test]

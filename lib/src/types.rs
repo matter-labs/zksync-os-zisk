@@ -101,6 +101,16 @@ pub struct InteropCommitmentTreeProofs {
     pub root_end: StorageProof,
 }
 
+/// `PubdataContent::FullPubdata`: the batch commits the block hash, the
+/// timestamp, the storage diffs, the L2→L1 log records and the message
+/// payloads.
+pub const PUBDATA_CONTENT_FULL: u8 = 0;
+
+/// `PubdataContent::LogsOnly`: the batch commits the mandatory L2→L1 log
+/// records alone. Storage diffs and message payloads stay off the DA
+/// commitment.
+pub const PUBDATA_CONTENT_LOGS_ONLY: u8 = 1;
+
 /// Complete batch input for the ZiSK guest.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BatchInput {
@@ -179,9 +189,9 @@ pub struct BatchMeta {
     /// taken from `BatchInput::chain_id`.
     pub fri_proof_verification_enabled: bool,
     pub max_tx_gas_limit: u64,
-    /// Which part of the pubdata the chain commits: 0 = FullPubdata (state
-    /// diffs, log records and message payloads), 1 = LogsOnly (the mandatory
-    /// L2→L1 log records alone). The executor rejects any other value.
+    /// Which part of the pubdata the chain commits, as the native
+    /// `PubdataContent` discriminant ([`PUBDATA_CONTENT_FULL`] or
+    /// [`PUBDATA_CONTENT_LOGS_ONLY`]). The executor rejects any other value.
     pub pubdata_content: u8,
     /// Authenticated proofs for the interop-derived scalars (`sl_chain_id`,
     /// `multichain_root`). Required for v31+ batches; `None` for v30.
