@@ -6,7 +6,7 @@
 # `prover_api.zisk_vks[].program_vk` expectation.
 #
 # PENDING for the container ELF with sha256
-# 5eb51c53e560adb7c3511e173b8d57a2b5cf14c13e6baf57fd94eda5cffa144a
+# 7f4cbb6c58aa79d877cddfcaf297075b63b0b9284020da2c3013a6c2787a96a1
 # (see GUEST_ELF_SHA256). `program-setup` needs the proving keys, so derive
 # the value on a prover box and record it here, together with the limbs:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
