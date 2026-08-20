@@ -238,7 +238,6 @@ fn run_execution_and_commit(
 
     // Batch output hash
     let mut l1_tx_hashes = Vec::new();
-    let mut l2_to_l1_encoded_logs = Vec::new();
     let mut num_l1_txs: u64 = 0;
     let mut num_l2_txs: u64 = 0;
     let mut num_upgrade_txs: u64 = 0;
@@ -303,11 +302,15 @@ fn run_execution_and_commit(
         meta.upgrade_tx_hash,
     );
 
-    for br in &output.block_results {
-        for log in &br.l2_to_l1_logs {
-            l2_to_l1_encoded_logs.push(log.encode());
-        }
-    }
+    // The logs tree folds the whole batch's records; the logs-only pubdata
+    // writes one section per block, so keep the per-block grouping.
+    let l2_to_l1_logs_by_block: Vec<Vec<[u8; commitment::L2_TO_L1_LOG_SIZE]>> = output
+        .block_results
+        .iter()
+        .map(|br| br.l2_to_l1_logs.iter().map(|log| log.encode()).collect())
+        .collect();
+    let l2_to_l1_encoded_logs: Vec<[u8; commitment::L2_TO_L1_LOG_SIZE]> =
+        l2_to_l1_logs_by_block.iter().flatten().copied().collect();
 
     // Authenticate the two interop scalars instead of trusting the witness.
     // Native reads both as storage reads of fixed system-contract slots at batch
@@ -392,9 +395,24 @@ fn run_execution_and_commit(
         &commitment_tree_roots.end,
     );
 
+    // A LogsOnly chain commits nothing but its own L2->L1 log records under the
+    // two-byte envelope header, so the guest derives the whole blob and leaves
+    // the unauthenticated witness copy out of the commitment. FullPubdata also
+    // carries the block hash, the timestamp and the storage diffs, which the
+    // guest does not model, so that mode still hashes the witness blob.
+    //
+    // Native's pubdata CHARGING is mode-dependent from ZKsync OS 0.5.0 (the
+    // per-block intrinsic, the per-transaction intrinsic and the solvency check
+    // all follow the mode). The guest models neither mode's charging and takes
+    // the reported gas from the witness, so the sealed `block_header_hash`
+    // stays the mechanism that catches a divergent transaction set.
+    let derived_pubdata = (ZkSpecId::AtlasV4.is_enabled_in(spec_id)
+        && meta.pubdata_content == PUBDATA_CONTENT_LOGS_ONLY)
+        .then(|| commitment::logs_only_pubdata(&l2_to_l1_logs_by_block));
+    let committed_pubdata = derived_pubdata.as_deref().unwrap_or(&meta.pubdata);
     let da_commitment = match meta.da_commitment_scheme {
         0 | 1 => B256::ZERO,                                          // None / EmptyNoDA
-        2 | 3 => commitment::da_commitment_calldata(&meta.pubdata),       // PubdataKeccak / BlobsAndPubdataKeccak
+        2 | 3 => commitment::da_commitment_calldata(committed_pubdata),   // PubdataKeccak / BlobsAndPubdataKeccak
         4 => commitment::da_commitment_blobs(&meta.blob_versioned_hashes), // BlobsZKsyncOS
         _ => panic!("unsupported DA commitment scheme: {}", meta.da_commitment_scheme),
     };

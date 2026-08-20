@@ -3778,6 +3778,31 @@ mod tests {
         );
     }
 
+    /// A LogsOnly chain commits the pubdata the guest derives from its own
+    /// L2->L1 log set, so the unauthenticated witness blob leaves the
+    /// commitment entirely: two batches differing only in `meta.pubdata`
+    /// produce the same public input. Under FullPubdata the same difference
+    /// still moves it, because that mode hashes the witness copy.
+    #[test]
+    fn logs_only_pubdata_is_derived_not_inherited() {
+        let commit_with = |pubdata_content: u8, pubdata: Vec<u8>| {
+            let mut batch = atlas_v4_transfer_batch(History::Contract);
+            batch.batch_meta.pubdata_content = pubdata_content;
+            batch.batch_meta.pubdata = pubdata;
+            executor::execute_and_commit(&batch).1
+        };
+        assert_eq!(
+            commit_with(1, vec![0xaa; 8]),
+            commit_with(1, vec![0xbb; 16]),
+            "a LogsOnly batch must not commit the witness pubdata",
+        );
+        assert_ne!(
+            commit_with(0, vec![0xaa; 8]),
+            commit_with(0, vec![0xbb; 16]),
+            "a FullPubdata batch commits the witness blob",
+        );
+    }
+
     /// The EIP-2935 write puts the block's parent hash into ring slot
     /// `(number - 1) % 8191`, and it enters the batch write set. Dropping the
     /// leaf from the tree update makes the batch unprovable, which shows the

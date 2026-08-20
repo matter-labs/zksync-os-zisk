@@ -301,6 +301,38 @@ pub fn priority_ops_rolling_hash(l1_tx_hashes: &[B256]) -> B256 {
     hash
 }
 
+/// Pubdata encoding version (native `PUBDATA_ENCODING_VERSION`). Every layout
+/// starts with the shared two-byte envelope header `[version, mode]`, where the
+/// mode byte is the `PubdataContent` discriminant selecting the payload.
+const PUBDATA_ENCODING_VERSION: u8 = 3;
+
+/// The pubdata a `LogsOnly` chain commits, derived from the guest's own L2→L1
+/// log set instead of the unauthenticated witness blob.
+///
+/// Native writes one section per block (`write_pubdata`): the two-byte envelope
+/// header, then `apply_logs_pubdata` — the log count as a 4-byte big-endian
+/// integer, then every 88-byte log record. State diffs and message payloads are
+/// neither committed nor published in this mode, so the whole blob is bytes the
+/// guest already derives.
+///
+/// This does not extend to `FullPubdata`, where the payload also carries the
+/// block hash, the timestamp and the storage diffs; deriving that means
+/// modelling the whole storage-diff encoding, which the guest does not do.
+pub fn logs_only_pubdata(logs_by_block: &[Vec<[u8; L2_TO_L1_LOG_SIZE]>]) -> Vec<u8> {
+    let record_bytes: usize = logs_by_block.iter().map(|logs| logs.len()).sum::<usize>()
+        * L2_TO_L1_LOG_SIZE;
+    let mut pubdata = Vec::with_capacity(logs_by_block.len() * 6 + record_bytes);
+    for logs in logs_by_block {
+        pubdata.push(PUBDATA_ENCODING_VERSION);
+        pubdata.push(crate::types::PUBDATA_CONTENT_LOGS_ONLY);
+        pubdata.extend_from_slice(&(logs.len() as u32).to_be_bytes());
+        for log in logs {
+            pubdata.extend_from_slice(log);
+        }
+    }
+    pubdata
+}
+
 /// DA commitment for calldata mode:
 /// keccak256(0x00*32 || keccak256(pubdata) || 0x01 || 0x00*32)
 pub fn da_commitment_calldata(pubdata: &[u8]) -> B256 {
@@ -641,6 +673,28 @@ mod tests {
             ),
             keccak_two(&logs, &multichain),
         );
+    }
+
+    /// The logs-only blob is one section per block: the two-byte envelope
+    /// header, the 4-byte big-endian log count, then every 88-byte record.
+    #[test]
+    fn logs_only_pubdata_is_the_header_and_the_log_records() {
+        let first = [0x11u8; L2_TO_L1_LOG_SIZE];
+        let second = [0x22u8; L2_TO_L1_LOG_SIZE];
+        let pubdata = logs_only_pubdata(&[vec![first, second], vec![]]);
+
+        let mut expected = vec![3u8, 1, 0, 0, 0, 2];
+        expected.extend_from_slice(&first);
+        expected.extend_from_slice(&second);
+        expected.extend_from_slice(&[3u8, 1, 0, 0, 0, 0]);
+        assert_eq!(pubdata, expected);
+    }
+
+    /// A block with no logs still writes its envelope header and a zero count,
+    /// so an empty batch commits six bytes per block rather than nothing.
+    #[test]
+    fn logs_only_pubdata_of_an_empty_block_is_the_header_and_a_zero_count() {
+        assert_eq!(logs_only_pubdata(&[vec![]]), vec![3u8, 1, 0, 0, 0, 0]);
     }
 
     #[test]
