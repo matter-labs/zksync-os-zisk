@@ -14,11 +14,28 @@ waivers remain. Any other outcome is a regression or a new finding. The count
 spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
 **Known sharp edges**).
 
-The AtlasV4/0.4.0 line has its own steady state to establish. Its runs take
-guest ELF `5eb51c53…`, which wires the EIP-152, EIP-4844 point-evaluation
-and EIP-2537 precompiles that AtlasV4 activates. Its
-`prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008 cases → 2,008
-OK, 0 panics, 0 waived.
+The ZKsync OS 0.5.0 line runs against the `zksync-os-dump-05` worktree and
+guest ELF `7f4cbb6c…`. Its steady state over the 35 chunks is 10,605 cases →
+10,589 OK, 0 unexpected, and the same two waiver families the 0.4.0 line
+carries. Its `prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008
+cases → 2,008 OK, 0 panics, 0 waived.
+
+The sweep exercises the two derivations that run on every batch: the
+four-word `chain_config_hash`, checked against the bundle's
+`native_chain_config_hash`, and the height-3 chain batch root, which folds
+with zero interop commitment tree roots. It does **not** reach the paths that
+need chain state the EEST fixtures never build:
+
+- a non-zero interop commitment tree root, so the creation-timestamp word in
+  the interop roots rolling hash stays unexercised;
+- an interop leaf insertion, so the `0x7004` hook and its L2->L1 log stay
+  unexercised;
+- `PubdataContent::LogsOnly`, because the dump rig configures full pubdata
+  only and the state-dump hook exports no `pubdata_content` field, so the
+  chain-config word is covered at mode 0 alone.
+
+Unit tests in `lib/` cover those three, so extend them there rather than
+reading a green sweep as full coverage of the 0.5.0 semantics.
 
 ## Architecture
 
