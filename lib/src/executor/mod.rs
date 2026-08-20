@@ -706,6 +706,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
         }
@@ -795,13 +796,13 @@ mod tests {
     }
 
     /// The wire-format version the previous guest understood is rejected with
-    /// the named error, so a server that predates the AtlasV4 input contract
-    /// cannot feed this guest.
+    /// the named error, so a server that predates the ZKsync OS 0.5.0 input
+    /// contract cannot feed this guest.
     #[test]
-    #[should_panic(expected = "unsupported BatchInput wire-format version 3")]
+    #[should_panic(expected = "unsupported BatchInput wire-format version 4")]
     fn rejects_the_previous_wire_format_version() {
         let mut input = dispatch_batch(2, 31);
-        input.version = 3;
+        input.version = 4;
         resolve_spec_and_validate(&input);
     }
 

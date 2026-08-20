@@ -175,6 +175,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -351,6 +352,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -467,6 +469,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -620,6 +623,7 @@ mod tests {
             sl_chain_id: non_existence_proof(&post_leaves, &post_sib, &sl_key),
             multichain_height: non_existence_proof(&post_leaves, &post_sib, &height_key),
             multichain_root: non_existence_proof(&post_leaves, &post_sib, &root_key),
+            commitment_tree: None,
         }
     }
 
@@ -736,6 +740,7 @@ mod tests {
                     ],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs,
                 },
                 blocks: vec![BlockInput {
@@ -913,6 +918,7 @@ mod tests {
                 account_preimages_after,
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs,
             },
             blocks: vec![block],
@@ -1257,6 +1263,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -1485,6 +1492,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_bh), mk_block(LAST, second_bh)],
@@ -1704,6 +1712,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_block_hashes.clone()), mk_block(LAST, second_bh)],
@@ -1857,6 +1866,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -2139,6 +2149,7 @@ mod tests {
                     ],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![
@@ -2292,6 +2303,7 @@ mod tests {
                 ],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
@@ -2445,12 +2457,14 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: Some(InteropSlotProofs {
                         // No writes => tree_root_after == tree_root_before, so all
                         // three proofs verify against `root`.
                         sl_chain_id: non_existence_proof(&leaves, &siblings, &sl_key),
                         multichain_height: existing_for(&height_key),
                         multichain_root: existing_for(&root_key),
+                        commitment_tree: None,
                     }),
                 },
                 blocks: vec![BlockInput {
@@ -2678,6 +2692,7 @@ mod tests {
                 account_preimages_after: vec![(fd, fd_after.clone())],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -2794,6 +2809,7 @@ mod tests {
                     account_preimages_after: vec![(fd, fd_after.clone())],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![BlockInput {
@@ -2928,6 +2944,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -3067,6 +3084,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3202,6 +3220,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![
@@ -3361,6 +3380,7 @@ mod tests {
                     account_preimages_after: vec![],
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
+                    pubdata_content: 0,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3649,6 +3669,7 @@ mod tests {
                 ],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit,
+                pubdata_content: 0,
                 interop_proofs,
             },
             blocks: vec![BlockInput {

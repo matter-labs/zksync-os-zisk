@@ -293,6 +293,7 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: non_existing(&leaves, &sib, &height_key()),
             multichain_root: non_existing(&leaves, &sib, &root_key_for(&B256::ZERO)),
+            commitment_tree: None,
         };
         assert_eq!(derive_multichain_root(&proofs, &root), B256::ZERO);
     }
@@ -310,6 +311,7 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: existing(&leaves, &sib, &hkey),
             multichain_root: existing(&leaves, &sib, &rkey),
+            commitment_tree: None,
         };
         assert_eq!(derive_multichain_root(&proofs, &root), agg_root);
     }
@@ -330,6 +332,7 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: existing(&leaves, &sib, &hkey),
             multichain_root: forged_root,
+            commitment_tree: None,
         };
         assert!(std::panic::catch_unwind(|| derive_multichain_root(&proofs, &root)).is_err());
     }

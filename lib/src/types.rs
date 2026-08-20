@@ -5,6 +5,11 @@ use serde::{Deserialize, Serialize};
 
 /// Current `BatchInput` wire-format version.
 ///
+/// **v5**: ZKsync OS 0.5.0 semantics under AtlasV4. `BatchMeta` carries the
+/// chain-config `pubdata_content` mode (the fourth word of
+/// `chain_config_hash`), and `BatchMeta.interop_proofs` carries the four
+/// interop commitment tree (`0x10012`) slot proofs the chain batch root needs.
+///
 /// **v4**: AtlasV4 support. The struct layout is unchanged, but the
 /// input-builder contract is not: an AtlasV4 block must carry the EIP-2935
 /// history contract's account preimage, its account-properties proof, and a
@@ -34,7 +39,7 @@ use serde::{Deserialize, Serialize};
 /// does not understand before touching the rest of the payload, so a skew
 /// fails with a named error instead of a positional misparse. A version bump
 /// implies a guest rebuild and therefore a VK rotation.
-pub const BATCH_INPUT_VERSION: u32 = 4;
+pub const BATCH_INPUT_VERSION: u32 = 5;
 
 use crate::merkle::{BatchTreeUpdate, StorageProof};
 
@@ -66,6 +71,34 @@ pub struct InteropSlotProofs {
     /// height read above; `NonExisting` ⇒ root 0 (chain is not a settlement
     /// layer).
     pub multichain_root: StorageProof,
+    /// Proofs of the interop commitment tree root at both batch boundaries.
+    /// Required for AtlasV4 batches, whose chain batch root carries both roots
+    /// as leaves; `None` for the earlier specs, which commit neither.
+    pub commitment_tree: Option<InteropCommitmentTreeProofs>,
+}
+
+/// Authenticated storage proofs for the interop commitment tree (`0x10012`)
+/// root at the two batch boundaries.
+///
+/// Native reads the tree height (slot 0) and then `_nodes[height][0]` before
+/// the batch's first block and again after its last block
+/// (`block_flow/zk/pre_tx_loop` and
+/// `.../post_tx_op::read_interop_commitment_tree_root`). Both roots are leaves
+/// of the chain batch root, so the guest reproduces both reads against the two
+/// state roots it already pins.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct InteropCommitmentTreeProofs {
+    /// Proof of `0x10012` slot 0 — the tree height — against
+    /// `tree_root_before`. `NonExisting` ⇒ height 0.
+    pub height_begin: StorageProof,
+    /// Proof of `0x10012` slot `_nodes[height][0]` against `tree_root_before`.
+    /// The slot is derived in-guest from the height read above; `NonExisting`
+    /// ⇒ root 0 (the chain has no commitment tree deployed).
+    pub root_begin: StorageProof,
+    /// Proof of `0x10012` slot 0 against `tree_root_after`.
+    pub height_end: StorageProof,
+    /// Proof of `0x10012` slot `_nodes[height][0]` against `tree_root_after`.
+    pub root_end: StorageProof,
 }
 
 /// Complete batch input for the ZiSK guest.
@@ -140,11 +173,16 @@ pub struct BatchMeta {
     /// REVM's output, then checks blake2s(preimage) == tree_update value.
     pub account_preimages_after: Vec<(Address, Vec<u8>)>,
     /// Chain-config inputs committed into the batch public input via
-    /// `chain_config_hash` (zksync-os draft-0.4.0 `ChainConfig::hash`).
-    /// `fri_proof_verification_enabled` and `max_tx_gas_limit` are not otherwise
-    /// present in the batch; `chain_id` is taken from `BatchInput::chain_id`.
+    /// `chain_config_hash` (zksync-os `ChainConfig::hash`).
+    /// `fri_proof_verification_enabled`, `max_tx_gas_limit` and
+    /// `pubdata_content` are not otherwise present in the batch; `chain_id` is
+    /// taken from `BatchInput::chain_id`.
     pub fri_proof_verification_enabled: bool,
     pub max_tx_gas_limit: u64,
+    /// Which part of the pubdata the chain commits: 0 = FullPubdata (state
+    /// diffs, log records and message payloads), 1 = LogsOnly (the mandatory
+    /// L2→L1 log records alone). The executor rejects any other value.
+    pub pubdata_content: u8,
     /// Authenticated proofs for the interop-derived scalars (`sl_chain_id`,
     /// `multichain_root`). Required for v31+ batches; `None` for v30.
     pub interop_proofs: Option<InteropSlotProofs>,
@@ -173,9 +211,11 @@ pub struct BlockInput {
     /// failing re-execution loudly on any header drift.
     pub block_header_hash: B256,
     /// L2→L1 logs produced by this block's execution (from server's BlockOutput).
-    /// These are included in the batch commitment's l2_to_l1_logs merkle tree.
-    /// The guest verifies consistency by checking that L1Messenger EVM log events
-    /// in the REVM execution match these L2→L1 log entries.
+    ///
+    /// Witness data the commitment path does not read: the guest derives its own
+    /// L2→L1 log set from the REVM journal and folds that into the logs merkle
+    /// tree (`executor::evm`). Comparing two guest-derived sets authenticates
+    /// nothing, so this field is retained for the server's own use only.
     pub l2_to_l1_logs: Vec<L2ToL1LogEntry>,
     /// Per-block tree root that this block's merkle proofs were extracted from.
     /// For the first block in a batch this equals batch_meta.tree_root_before.

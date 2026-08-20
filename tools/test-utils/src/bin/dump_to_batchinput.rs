@@ -117,6 +117,11 @@ struct DDump {
     /// this field verbatim.
     #[serde(default)]
     chain_config_max_tx_gas_limit: u64,
+    /// Chain-config pubdata content: 0 = FullPubdata, 1 = LogsOnly. The native
+    /// state-dump hook does not export the field, so a bundle without it is a
+    /// full-pubdata chain, which is the only mode the dump rig configures.
+    #[serde(default)]
+    chain_config_pubdata_content: u8,
     /// Pre-block chain position (hook commit a37838a8): both feed the
     /// pre-block ChainStateCommitment. Old bundles (chain-start blocks)
     /// lack them: block_number_before falls back to block.number - 1 and
@@ -533,81 +538,145 @@ const SYSTEM_CONTEXT_ADDRESS: [u8; 20] = [
 const MESSAGE_ROOT_ADDRESS: [u8; 20] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x05,
 ];
+/// L2InteropCommitmentTree system contract, address `0x10012`. Slot 0 holds the
+/// tree height, and `_nodes` lives at contract slot 2.
+const INTEROP_COMMITMENT_TREE_ADDRESS: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x12,
+];
 
-/// Storage slot of `nodes[height][0]` in MessageRoot (`0x10005`). This mirrors
-/// lib `executor::interop::calculate_multichain_root_slot`: `_nodes` lives at
-/// contract slot 6, and `_nodes[height][0]` resolves to
-/// `keccak256(keccak256(6) + height)`.
-fn multichain_root_slot(height: &B256) -> B256 {
-    let base = U256::from_be_bytes(keccak256(B256::with_last_byte(0x06).as_slice()).0);
+/// Storage slot of `_nodes[height][0]` for a `FullMerkle` engine whose `_nodes`
+/// dynamic array lives at `nodes_base_slot`. This mirrors lib
+/// `executor::interop::nodes_root_slot`: solidity addresses `_nodes[height][0]`
+/// as `keccak256(keccak256(nodes_base_slot) + height)`.
+fn nodes_root_slot(nodes_base_slot: u8, height: &B256) -> B256 {
+    let base = U256::from_be_bytes(keccak256(B256::with_last_byte(nodes_base_slot).as_slice()).0);
     let slot = base.wrapping_add(U256::from_be_bytes(height.0));
     keccak256(&slot.to_be_bytes::<32>())
 }
 
-/// Build the three interop slot proofs the v31 guest authenticates
-/// (`executor::interop`). Native reads `sl_chain_id` (SystemContext `0x800b`
-/// slot 0) and the multichain root (MessageRoot `0x10005`) at the POST-batch
-/// tree, so each proof is built against the post-state tree. An absent slot
-/// yields a NonExisting proof, so a chain that is not a settlement layer (the
-/// EEST corpus case) derives `sl_chain_id` 0 and `multichain_root` 0. A present
-/// slot yields an Existing proof with the stored value, so a real settlement
-/// layer derives the true values too. This matches what native reads, so the
-/// derived scalars agree with the recorded batch-output hash.
-fn build_interop_proofs(
-    post_by_index: &[(u64, B256, B256, u64)],
-    post_levels: &[Vec<B256>],
-) -> InteropSlotProofs {
-    let key_to_leaf: HashMap<B256, (u64, B256, u64)> = post_by_index
-        .iter()
-        .map(|(idx, k, v, n)| (*k, (*idx, *v, *n)))
-        .collect();
-    let mut by_key: Vec<&(u64, B256, B256, u64)> = post_by_index.iter().collect();
-    by_key.sort_by_key(|entry| entry.1);
+/// A flat-storage tree the interop slot proofs are built against, as the
+/// `(index, key, value, next)` leaf records plus the dense level hashes.
+struct ProvableTree<'a> {
+    by_index: &'a [(u64, B256, B256, u64)],
+    levels: &'a [Vec<B256>],
+}
 
-    let prove = |fk: &B256| -> StorageProof {
+impl ProvableTree<'_> {
+    /// Prove `fk` against this tree: `Existing` with the stored value when the
+    /// leaf is present, `NonExisting` bracketed by its linked-list neighbours
+    /// otherwise.
+    fn prove(&self, fk: &B256) -> StorageProof {
         let entry_for = |idx: u64, val: B256, next: u64| SlotProofEntry {
             index: idx,
             value: val,
             next_index: next,
-            siblings: siblings_for(post_levels, idx),
+            siblings: siblings_for(self.levels, idx),
         };
-        if let Some((idx, val, next)) = key_to_leaf.get(fk) {
-            StorageProof::Existing(entry_for(*idx, *val, *next))
-        } else {
-            // Non-existence: bracket fk between its linked-list predecessor
-            // (greatest key < fk, guaranteed by the MIN guard) and successor.
-            let pos = by_key.partition_point(|e| e.1 < *fk);
-            assert!(pos > 0, "no predecessor leaf for interop key {fk}");
-            let l = by_key[pos - 1];
-            let r = &post_by_index[l.3 as usize];
-            assert!(r.1 > *fk, "post-state linked list inconsistent around {fk}");
-            StorageProof::NonExisting {
-                left_neighbor: NeighborProofEntry {
-                    entry: entry_for(l.0, l.2, l.3),
-                    leaf_key: l.1,
-                },
-                right_neighbor: NeighborProofEntry {
-                    entry: entry_for(r.0, r.2, r.3),
-                    leaf_key: r.1,
-                },
-            }
+        if let Some((idx, _, val, next)) = self.by_index.iter().find(|(_, k, _, _)| k == fk) {
+            return StorageProof::Existing(entry_for(*idx, *val, *next));
         }
-    };
+        // Non-existence: bracket fk between its linked-list predecessor
+        // (greatest key < fk, guaranteed by the MIN guard) and successor.
+        let l = self
+            .by_index
+            .iter()
+            .filter(|e| e.1 < *fk)
+            .max_by_key(|e| e.1)
+            .unwrap_or_else(|| panic!("no predecessor leaf for interop key {fk}"));
+        let r = &self.by_index[l.3 as usize];
+        assert!(r.1 > *fk, "tree linked list inconsistent around {fk}");
+        StorageProof::NonExisting {
+            left_neighbor: NeighborProofEntry {
+                entry: entry_for(l.0, l.2, l.3),
+                leaf_key: l.1,
+            },
+            right_neighbor: NeighborProofEntry {
+                entry: entry_for(r.0, r.2, r.3),
+                leaf_key: r.1,
+            },
+        }
+    }
 
-    // The multichain-root slot depends on the height read first (native reads
-    // height, then derives nodes[height][0]); an absent height reads as 0.
+    /// The value stored at `fk`, or zero when the leaf is absent.
+    fn value_at(&self, fk: &B256) -> B256 {
+        self.by_index
+            .iter()
+            .find(|(_, k, _, _)| k == fk)
+            .map(|(_, _, v, _)| *v)
+            .unwrap_or(B256::ZERO)
+    }
+
+    /// The two proofs of a `FullMerkle` engine's root: the height slot, then the
+    /// `_nodes[height][0]` slot the height selects.
+    fn prove_merkle_engine_root(
+        &self,
+        address: &[u8; 20],
+        height_slot: B256,
+        nodes_base_slot: u8,
+    ) -> (StorageProof, StorageProof) {
+        let height_key = derive_flat_storage_key(address, &height_slot);
+        let height = self.value_at(&height_key);
+        let root_key = derive_flat_storage_key(address, &nodes_root_slot(nodes_base_slot, &height));
+        (self.prove(&height_key), self.prove(&root_key))
+    }
+}
+
+/// Build the interop slot proofs the guest authenticates (`executor::interop`).
+///
+/// Native reads `sl_chain_id` (SystemContext `0x800b` slot 0) and the multichain
+/// root (MessageRoot `0x10005`) at the POST-batch tree, so those proofs are
+/// built against the post-state tree. The interop commitment tree (`0x10012`)
+/// root is read once before the batch's first block and once after its last, so
+/// its proofs are built against the pre-state tree and the post-state tree
+/// respectively.
+///
+/// An absent slot yields a NonExisting proof, so a chain that is not a
+/// settlement layer and carries no commitment tree (the EVM test-corpus case)
+/// derives `sl_chain_id` 0, `multichain_root` 0 and both commitment tree roots
+/// 0. A present slot yields an Existing proof with the stored value, so a real
+/// settlement layer derives the true values too. This matches what native
+/// reads, so the derived scalars agree with the recorded batch-output hash.
+fn build_interop_proofs(
+    pre: &ProvableTree,
+    post: &ProvableTree,
+    commits_interop_commitment_tree: bool,
+) -> InteropSlotProofs {
+    const MULTICHAIN_HEIGHT_SLOT: B256 = B256::with_last_byte(0x04);
+    const MULTICHAIN_NODES_SLOT: u8 = 0x06;
+    const COMMITMENT_TREE_HEIGHT_SLOT: B256 = B256::ZERO;
+    const COMMITMENT_TREE_NODES_SLOT: u8 = 0x02;
+
     let sl_key = derive_flat_storage_key(&SYSTEM_CONTEXT_ADDRESS, &B256::ZERO);
-    let height_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &B256::with_last_byte(0x04));
-    let height = key_to_leaf
-        .get(&height_key)
-        .map(|(_, v, _)| *v)
-        .unwrap_or(B256::ZERO);
-    let root_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &multichain_root_slot(&height));
+    let (multichain_height, multichain_root) = post.prove_merkle_engine_root(
+        &MESSAGE_ROOT_ADDRESS,
+        MULTICHAIN_HEIGHT_SLOT,
+        MULTICHAIN_NODES_SLOT,
+    );
+
+    let commitment_tree = commits_interop_commitment_tree.then(|| {
+        let (height_begin, root_begin) = pre.prove_merkle_engine_root(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            COMMITMENT_TREE_HEIGHT_SLOT,
+            COMMITMENT_TREE_NODES_SLOT,
+        );
+        let (height_end, root_end) = post.prove_merkle_engine_root(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            COMMITMENT_TREE_HEIGHT_SLOT,
+            COMMITMENT_TREE_NODES_SLOT,
+        );
+        InteropCommitmentTreeProofs {
+            height_begin,
+            root_begin,
+            height_end,
+            root_end,
+        }
+    });
 
     InteropSlotProofs {
-        sl_chain_id: prove(&sl_key),
-        multichain_height: prove(&height_key),
-        multichain_root: prove(&root_key),
+        sl_chain_id: post.prove(&sl_key),
+        multichain_height,
+        multichain_root,
+        commitment_tree,
     }
 }
 
@@ -895,9 +964,10 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
 
     // v31 batches carry authenticated interop slot proofs; the guest derives
     // sl_chain_id / multichain_root from them and ignores the witness scalars.
-    // v30 carries none (its batch-output layout commits neither scalar). The
-    // proofs are read at the POST-batch tree, so build the post-state tree
-    // from the dump's full post leaves.
+    // v30 carries none (its batch-output layout commits neither scalar). An
+    // AtlasV4 batch additionally carries the interop commitment tree proofs at
+    // both batch boundaries. The post-state proofs need the post-state tree
+    // built from the dump's full post leaves.
     let interop_proofs = if d.protocol_version_minor >= 31 {
         let mut post_by_index: Vec<(u64, B256, B256, u64)> = d
             .post
@@ -924,7 +994,17 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
             hb256(&d.tree_root_after),
             "dense post-state root != tree_root_after"
         );
-        Some(build_interop_proofs(&post_by_index, &post_levels))
+        Some(build_interop_proofs(
+            &ProvableTree {
+                by_index: &pre_by_index,
+                levels: &levels,
+            },
+            &ProvableTree {
+                by_index: &post_by_index,
+                levels: &post_levels,
+            },
+            ZkSpecId::AtlasV4.is_enabled_in(spec),
+        ))
     } else {
         None
     };
@@ -949,6 +1029,7 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
         account_preimages_after,
         fri_proof_verification_enabled: d.chain_config_fri,
         max_tx_gas_limit: resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit),
+        pubdata_content: d.chain_config_pubdata_content,
         interop_proofs,
     };
 

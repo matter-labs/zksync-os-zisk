@@ -284,6 +284,7 @@ fn build_read_spam(n: usize, d: usize) -> BatchInput {
             account_preimages_after: vec![],
             fri_proof_verification_enabled: false,
             max_tx_gas_limit: 1 << 24,
+            pubdata_content: 0,
             // v30 batch: the output layout commits no interop scalars.
             interop_proofs: None,
         },
