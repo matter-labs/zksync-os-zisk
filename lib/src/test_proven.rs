@@ -595,6 +595,21 @@ mod tests {
             .collect()
     }
 
+    /// The pre-state data leaves (index >= 2) a `BatchTreeUpdate` carries, in
+    /// index order — the leaf set `post_state_data` starts from.
+    fn pre_state_data(update: &BatchTreeUpdate) -> Vec<(B256, B256)> {
+        use std::collections::BTreeMap;
+        update
+            .sorted_leaves
+            .iter()
+            .map(|(i, l)| (*i, (l.key, l.value)))
+            .collect::<BTreeMap<_, _>>()
+            .into_iter()
+            .filter(|(i, _)| *i >= 2)
+            .map(|(_, kv)| kv)
+            .collect()
+    }
+
     /// Interop slot keys (guest-visible flat keys) for a non-settlement chain.
     fn interop_slot_keys() -> (B256, B256, B256) {
         const SYSTEM_CONTEXT_ADDR: [u8; 20] = [
@@ -612,19 +627,42 @@ mod tests {
         (sl_key, height_key, root_key)
     }
 
-    /// Build the three NonExisting interop slot proofs for a NON-settlement-layer
-    /// v31 batch (derives `sl_chain_id` 0, `multichain_root` 0). All three are
-    /// read at post-state, so every proof is built against the post-state tree
-    /// rebuilt from the `tree_update`; its root equals the guest's
-    /// `tree_root_after`.
+    /// Interop commitment tree flat keys for a chain with no tree deployed: the
+    /// `0x10012` height slot, and the `_nodes[0][0]` root slot height 0 selects.
+    fn commitment_tree_slot_keys() -> (B256, B256) {
+        const COMMITMENT_TREE_ADDR: [u8; 20] = [
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x12,
+        ];
+        let height_key = derive_flat_storage_key(&COMMITMENT_TREE_ADDR, &B256::ZERO);
+        let base = crate::hash::keccak256(B256::with_last_byte(0x02).as_slice());
+        let root_slot = crate::hash::keccak256(base.as_slice());
+        (height_key, derive_flat_storage_key(&COMMITMENT_TREE_ADDR, &root_slot))
+    }
+
+    /// Build the interop slot proofs for a NON-settlement-layer batch on a chain
+    /// with no interop commitment tree deployed, so every derived value is zero:
+    /// `sl_chain_id`, `multichain_root`, and both commitment tree roots.
+    ///
+    /// The settlement-layer reads happen at post-state, so those proofs are
+    /// built against the post-state tree rebuilt from the `tree_update`; its
+    /// root equals the guest's `tree_root_after`. The commitment tree is read
+    /// once at each boundary, so its begin proofs are built against the
+    /// pre-state tree the same update carries.
     fn interop_proofs_nonsettlement(update: &BatchTreeUpdate) -> InteropSlotProofs {
+        let (_pre_root, pre_leaves, pre_sib) = build_dense_tree(&pre_state_data(update));
         let (_post_root, post_leaves, post_sib) = build_dense_tree(&post_state_data(update));
         let (sl_key, height_key, root_key) = interop_slot_keys();
+        let (imt_height_key, imt_root_key) = commitment_tree_slot_keys();
         InteropSlotProofs {
             sl_chain_id: non_existence_proof(&post_leaves, &post_sib, &sl_key),
             multichain_height: non_existence_proof(&post_leaves, &post_sib, &height_key),
             multichain_root: non_existence_proof(&post_leaves, &post_sib, &root_key),
-            commitment_tree: None,
+            commitment_tree: Some(InteropCommitmentTreeProofs {
+                height_begin: non_existence_proof(&pre_leaves, &pre_sib, &imt_height_key),
+                root_begin: non_existence_proof(&pre_leaves, &pre_sib, &imt_root_key),
+                height_end: non_existence_proof(&post_leaves, &post_sib, &imt_height_key),
+                root_end: non_existence_proof(&post_leaves, &post_sib, &imt_root_key),
+            }),
         }
     }
 

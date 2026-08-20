@@ -307,7 +307,7 @@ fn run_execution_and_commit(
     // so `multichain_root`/`sl_chain_id` are DERIVED, not inherited. A proof
     // inconsistent with the pinned root fails there, rejecting a forged scalar.
     let commits_interop = ZkSpecId::AtlasV3.is_enabled_in(spec_id);
-    let (derived_multichain_root, derived_sl_chain_id) = if commits_interop {
+    let derived_interop = if commits_interop {
         let proofs = meta.interop_proofs.as_ref().expect(
             "v31 batch is missing interop_proofs: the server must supply the \
              sl_chain_id / multichain_root slot proofs",
@@ -321,18 +321,43 @@ fn run_execution_and_commit(
         // always derived from an authenticated proof rather than inherited from
         // the witness scalar.
         let sl_chain_id = interop::derive_sl_chain_id(&proofs.sl_chain_id, &tree_root_after);
-        (multichain_root, sl_chain_id)
+        // The interop commitment tree root at both batch boundaries: two more
+        // leaves of the AtlasV4 chain batch root, read at the L1-pinned
+        // pre-state root and at the in-guest-computed post-state root.
+        let commitment_tree_roots =
+            ZkSpecId::AtlasV4.is_enabled_in(spec_id).then(|| {
+                let proofs = proofs.commitment_tree.as_ref().expect(
+                    "AtlasV4 batch is missing the interop commitment tree proofs: \
+                     the server must supply the 0x10012 height and root slot \
+                     proofs at the pre-batch and post-batch states",
+                );
+                interop::derive_interop_commitment_tree_roots(
+                    proofs,
+                    &meta.tree_root_before,
+                    &tree_root_after,
+                )
+            });
+        interop::DerivedInteropValues {
+            multichain_root,
+            sl_chain_id,
+            commitment_tree_roots,
+        }
     } else {
-        // v30 commits neither value: multichain folds in as zero below, and
-        // sl_chain_id is absent from the v30 batch-output layout.
-        (B256::ZERO, meta.sl_chain_id)
+        // v30 commits none of these: multichain folds in as zero below,
+        // sl_chain_id is absent from the v30 batch-output layout, and the chain
+        // batch root of that line carries no commitment tree leaf.
+        interop::DerivedInteropValues {
+            multichain_root: B256::ZERO,
+            sl_chain_id: meta.sl_chain_id,
+            commitment_tree_roots: None,
+        }
     };
 
     let priority_ops_hash = commitment::priority_ops_rolling_hash(&l1_tx_hashes);
     let l2_logs_local_root = commitment::l2_to_l1_logs_root(&l2_to_l1_encoded_logs);
     // For protocol v30, multichain_root folds in as zero (derived above); for
     // v31+ it is the authenticated MessageRoot aggregation root.
-    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &derived_multichain_root);
+    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &derived_interop.multichain_root);
 
     let da_commitment = match meta.da_commitment_scheme {
         0 | 1 => B256::ZERO,                                          // None / EmptyNoDA
@@ -360,7 +385,7 @@ fn run_execution_and_commit(
         &l2_logs_root_hash,
         &meta.upgrade_tx_hash,
         &interop_roots_rolling_hash,
-        derived_sl_chain_id,
+        derived_interop.sl_chain_id,
     );
 
     // The top-level public input commits the chain config from AtlasV4 on
