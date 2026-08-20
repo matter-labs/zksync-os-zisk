@@ -63,51 +63,137 @@ pub fn block_hashes_blake(previous_255_hashes: &[B256], current_block_hash: &B25
 pub const L2_TO_L1_LOG_SIZE: usize = 88;
 const L2_TO_L1_TREE_HEIGHT: usize = 14;
 
+/// Root of a fixed-height binary keccak merkle tree whose leaves are `leaves`,
+/// padded up to `2^height` with the empty leaf. `empty_subtree_hashes[i]` is
+/// the root of an empty subtree of height `i` (index 0 is the empty leaf), and
+/// its length sets `height = len - 1`.
+///
+/// Mirrors native `merkle_root_in_place`
+/// (`zk_ee/src/common_structs/merkle_tree.rs`): the node hash is
+/// `keccak256(left ‖ right)` with no domain tag, and a missing right sibling at
+/// fold level `level` takes `empty_subtree_hashes[level]`.
+fn fixed_height_keccak_root(leaves: &[B256], empty_subtree_hashes: &[B256]) -> B256 {
+    let height = empty_subtree_hashes.len() - 1;
+    // The fold silently returns a subtree root (not the true root) once the
+    // leaves exceed the tree capacity, so reject that case rather than commit a
+    // wrong root that only cross-prover disagreement would catch.
+    assert!(
+        leaves.len() <= 1usize << height,
+        "leaf count {} exceeds the height-{height} tree capacity {}",
+        leaves.len(),
+        1usize << height,
+    );
+    if leaves.is_empty() {
+        return empty_subtree_hashes[height];
+    }
+
+    let mut nodes = leaves.to_vec();
+    let mut count = nodes.len();
+    for level in 0..height {
+        let pairs = (count + 1) / 2;
+        for i in 0..pairs {
+            let left = nodes[i * 2];
+            let right = if i * 2 + 1 < count {
+                nodes[i * 2 + 1]
+            } else {
+                empty_subtree_hashes[level]
+            };
+            nodes[i] = keccak_compress(&left, &right);
+        }
+        count = pairs;
+    }
+    nodes[0]
+}
+
+/// The empty-subtree hashes of a keccak tree of `height` over `empty_leaf`,
+/// under the recurrence `entry[i] = keccak256(entry[i-1] ‖ entry[i-1])`.
+fn empty_subtree_hashes(empty_leaf: B256, height: usize) -> Vec<B256> {
+    let mut hashes = Vec::with_capacity(height + 1);
+    hashes.push(empty_leaf);
+    for level in 1..=height {
+        let prev = hashes[level - 1];
+        hashes.push(keccak_compress(&prev, &prev));
+    }
+    hashes
+}
+
 /// Compute the L2→L1 logs merkle root (Keccak binary tree, height 14).
 /// Each leaf is keccak256 of an 88-byte encoded L2ToL1Log.
 /// Empty leaves are keccak256([0u8; 88]).
 pub fn l2_to_l1_logs_root(encoded_logs: &[[u8; L2_TO_L1_LOG_SIZE]]) -> B256 {
-    // The fixed-height fold silently returns a subtree root (not the true root)
-    // once the leaves exceed the tree capacity, so reject that case rather than
-    // commit a wrong root that only cross-prover disagreement would catch.
-    assert!(
-        encoded_logs.len() <= 1 << L2_TO_L1_TREE_HEIGHT,
-        "L2->L1 log count {} exceeds the height-{L2_TO_L1_TREE_HEIGHT} tree capacity {}",
-        encoded_logs.len(),
-        1usize << L2_TO_L1_TREE_HEIGHT,
-    );
-    let empty_leaf = keccak256(&[0u8; L2_TO_L1_LOG_SIZE]);
-    let mut empty_hashes = vec![empty_leaf];
-    for _ in 0..L2_TO_L1_TREE_HEIGHT {
-        let prev = *empty_hashes.last().unwrap();
-        empty_hashes.push(keccak_compress(&prev, &prev));
-    }
+    let empty_hashes = empty_subtree_hashes(keccak256(&[0u8; L2_TO_L1_LOG_SIZE]), L2_TO_L1_TREE_HEIGHT);
+    let leaves: Vec<B256> = encoded_logs.iter().map(|log| keccak256(log)).collect();
+    fixed_height_keccak_root(&leaves, &empty_hashes)
+}
 
-    if encoded_logs.is_empty() {
-        return empty_hashes[L2_TO_L1_TREE_HEIGHT];
-    }
+/// Height of the chain batch root tree: capacity `2^3 == 8` leaves, of which
+/// four are live and four are reserved.
+const CHAIN_BATCH_ROOT_TREE_HEIGHT: usize = 3;
 
-    let mut hashes: Vec<B256> = encoded_logs.iter().map(|log| keccak256(log)).collect();
-    let mut non_default_count = hashes.len();
+/// Empty-subtree hashes of the chain batch root tree, where entry `i` is the
+/// root of an empty subtree of height `i` over the all-zero reserved leaf.
+/// `chain_batch_root_empty_hashes_match_the_recurrence` locks the table.
+const CHAIN_BATCH_ROOT_EMPTY_SUBTREE_HASHES: [[u8; 32]; CHAIN_BATCH_ROOT_TREE_HEIGHT + 1] = [
+    [0u8; 32],
+    [
+        0xad, 0x32, 0x28, 0xb6, 0x76, 0xf7, 0xd3, 0xcd, 0x42, 0x84, 0xa5, 0x44, 0x3f, 0x17, 0xf1,
+        0x96, 0x2b, 0x36, 0xe4, 0x91, 0xb3, 0x0a, 0x40, 0xb2, 0x40, 0x58, 0x49, 0xe5, 0x97, 0xba,
+        0x5f, 0xb5,
+    ],
+    [
+        0xb4, 0xc1, 0x19, 0x51, 0x95, 0x7c, 0x6f, 0x8f, 0x64, 0x2c, 0x4a, 0xf6, 0x1c, 0xd6, 0xb2,
+        0x46, 0x40, 0xfe, 0xc6, 0xdc, 0x7f, 0xc6, 0x07, 0xee, 0x82, 0x06, 0xa9, 0x9e, 0x92, 0x41,
+        0x0d, 0x30,
+    ],
+    [
+        0x21, 0xdd, 0xb9, 0xa3, 0x56, 0x81, 0x5c, 0x3f, 0xac, 0x10, 0x26, 0xb6, 0xde, 0xc5, 0xdf,
+        0x31, 0x24, 0xaf, 0xba, 0xdb, 0x48, 0x5c, 0x9b, 0xa5, 0xa3, 0xe3, 0x39, 0x8a, 0x04, 0xb7,
+        0xba, 0x85,
+    ],
+];
 
-    for level in 0..L2_TO_L1_TREE_HEIGHT {
-        let pairs = (non_default_count + 1) / 2;
-        for i in 0..pairs {
-            let left = hashes[i * 2];
-            let right = if i * 2 + 1 < non_default_count {
-                hashes[i * 2 + 1]
-            } else {
-                empty_hashes[level]
-            };
-            hashes[i] = keccak_compress(&left, &right);
+/// The chain batch root a spec commits as the `l2_logs_tree_root` field of its
+/// batch output.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChainBatchRootLayout {
+    /// AtlasV1 through AtlasV3: `keccak256(l2_logs_root ‖ multichain_root)`.
+    TwoPreimageKeccak,
+    /// AtlasV4: a fixed height-3, eight-leaf keccak merkle tree.
+    HeightThreeMerkle,
+}
+
+/// The chain batch root, mirroring native `compute_chain_batch_root`
+/// (`.../zk/post_tx_op/mod.rs`).
+///
+/// The AtlasV4 tree holds four live leaves — the L2→L1 logs root, the
+/// multichain root, and the interop commitment tree root at the batch begin and
+/// at the batch end — followed by four reserved zero leaves. The earlier specs
+/// hash the first two leaves and nothing else, so the two forms never coincide:
+/// even an all-zero input differs.
+pub fn chain_batch_root(
+    layout: ChainBatchRootLayout,
+    l2_logs_root: &B256,
+    multichain_root: &B256,
+    commitment_tree_root_begin: &B256,
+    commitment_tree_root_end: &B256,
+) -> B256 {
+    match layout {
+        ChainBatchRootLayout::TwoPreimageKeccak => keccak_compress(l2_logs_root, multichain_root),
+        ChainBatchRootLayout::HeightThreeMerkle => {
+            let empty_hashes: Vec<B256> = CHAIN_BATCH_ROOT_EMPTY_SUBTREE_HASHES
+                .iter()
+                .map(|entry| B256::from(*entry))
+                .collect();
+            fixed_height_keccak_root(
+                &[
+                    *l2_logs_root,
+                    *multichain_root,
+                    *commitment_tree_root_begin,
+                    *commitment_tree_root_end,
+                ],
+                &empty_hashes,
+            )
         }
-        non_default_count = pairs;
-    }
-
-    if non_default_count > 0 {
-        hashes[0]
-    } else {
-        empty_hashes[L2_TO_L1_TREE_HEIGHT]
     }
 }
 
@@ -464,6 +550,97 @@ mod tests {
         );
 
         assert_ne!(keccak256(&three), keccak256(&four));
+    }
+
+    /// The hardcoded empty-subtree table must reproduce the recurrence over the
+    /// all-zero reserved leaf, mirroring native's
+    /// `chain_batch_root_empty_hashes_match_recurrence`.
+    #[test]
+    fn chain_batch_root_empty_hashes_match_the_recurrence() {
+        let derived = empty_subtree_hashes(B256::ZERO, CHAIN_BATCH_ROOT_TREE_HEIGHT);
+        for (level, entry) in CHAIN_BATCH_ROOT_EMPTY_SUBTREE_HASHES.iter().enumerate() {
+            assert_eq!(B256::from(*entry), derived[level], "level {level}");
+        }
+    }
+
+    /// Native's own trace of the height-3 fold
+    /// (`.../zk/post_tx_op/mod.rs`, `chain_batch_root_is_height3_merkle`):
+    /// four live leaves, four reserved zero leaves.
+    #[test]
+    fn chain_batch_root_is_a_height_three_merkle_tree() {
+        let a = B256::repeat_byte(1);
+        let b = B256::repeat_byte(2);
+        let c = B256::repeat_byte(3);
+        let d = B256::repeat_byte(4);
+        let z = B256::ZERO;
+
+        // Independent recomputation with the last four leaves zero.
+        let level1 = [
+            keccak_compress(&a, &b),
+            keccak_compress(&c, &d),
+            keccak_compress(&z, &z),
+            keccak_compress(&z, &z),
+        ];
+        let level2 = [
+            keccak_compress(&level1[0], &level1[1]),
+            keccak_compress(&level1[2], &level1[3]),
+        ];
+        assert_eq!(
+            chain_batch_root(ChainBatchRootLayout::HeightThreeMerkle, &a, &b, &c, &d),
+            keccak_compress(&level2[0], &level2[1]),
+        );
+    }
+
+    /// A chain that runs no interop at all still moves to a different value:
+    /// the tree adds three keccak calls on top of the two-preimage form, so the
+    /// all-zero input is well defined, non-zero, and distinct from the earlier
+    /// specs' root. There is no opt-out.
+    #[test]
+    fn chain_batch_root_layouts_never_coincide() {
+        let z = B256::ZERO;
+        let tree = chain_batch_root(ChainBatchRootLayout::HeightThreeMerkle, &z, &z, &z, &z);
+        assert_ne!(tree, B256::ZERO);
+        assert_ne!(
+            tree,
+            chain_batch_root(ChainBatchRootLayout::TwoPreimageKeccak, &z, &z, &z, &z),
+        );
+
+        let logs = B256::repeat_byte(0x11);
+        let multichain = B256::repeat_byte(0x22);
+        assert_ne!(
+            chain_batch_root(
+                ChainBatchRootLayout::HeightThreeMerkle,
+                &logs,
+                &multichain,
+                &z,
+                &z,
+            ),
+            chain_batch_root(
+                ChainBatchRootLayout::TwoPreimageKeccak,
+                &logs,
+                &multichain,
+                &z,
+                &z,
+            ),
+        );
+    }
+
+    /// The two-preimage form is the plain keccak of the two roots, which is
+    /// what the released v30 and v31 lines commit.
+    #[test]
+    fn two_preimage_chain_batch_root_hashes_the_two_roots() {
+        let logs = B256::repeat_byte(0x11);
+        let multichain = B256::repeat_byte(0x22);
+        assert_eq!(
+            chain_batch_root(
+                ChainBatchRootLayout::TwoPreimageKeccak,
+                &logs,
+                &multichain,
+                &B256::repeat_byte(0x33),
+                &B256::repeat_byte(0x44),
+            ),
+            keccak_two(&logs, &multichain),
+        );
     }
 
     #[test]

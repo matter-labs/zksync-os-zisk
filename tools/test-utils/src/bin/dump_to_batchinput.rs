@@ -1109,6 +1109,7 @@ fn validate(d: &DDump, bi: &BatchInput) -> bool {
                     d.chain_id,
                     d.chain_config_fri,
                     d.chain_config_max_tx_gas_limit,
+                    d.chain_config_pubdata_content,
                 );
                 ok &= check(
                     "chain_config_hash",
@@ -1338,7 +1339,7 @@ mod tests {
             // value, not the legacy witness scalar.
             0,
         );
-        let ccfg = commitment::chain_config_hash(37, false, 1 << 24);
+        let ccfg = commitment::chain_config_hash(37, false, 1 << 24, 0);
         // A v31 batch commits the three-word public input: released native on
         // that line carries no chain-config word.
         let pi = commitment::batch_public_input_hash(&sb, &sa, None, &bo);

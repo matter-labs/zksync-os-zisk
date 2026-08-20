@@ -355,9 +355,33 @@ fn run_execution_and_commit(
 
     let priority_ops_hash = commitment::priority_ops_rolling_hash(&l1_tx_hashes);
     let l2_logs_local_root = commitment::l2_to_l1_logs_root(&l2_to_l1_encoded_logs);
-    // For protocol v30, multichain_root folds in as zero (derived above); for
-    // v31+ it is the authenticated MessageRoot aggregation root.
-    let l2_logs_root_hash = commitment::keccak_two(&l2_logs_local_root, &derived_interop.multichain_root);
+    // The chain batch root: AtlasV4 folds four leaves into a height-3 keccak
+    // tree, so a consumer can authenticate an interop commitment tree root
+    // against it with a few hashes. AtlasV1 through AtlasV3 hash the logs root
+    // and the multichain root alone. For protocol v30, multichain_root folds in
+    // as zero (derived above); for v31+ it is the authenticated MessageRoot
+    // aggregation root.
+    let chain_batch_root_layout = if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        commitment::ChainBatchRootLayout::HeightThreeMerkle
+    } else {
+        commitment::ChainBatchRootLayout::TwoPreimageKeccak
+    };
+    // The two roots are derived for exactly the specs whose layout carries
+    // them, so the zero fallback only ever reaches the two-preimage form, which
+    // reads neither.
+    let commitment_tree_roots = derived_interop.commitment_tree_roots.unwrap_or(
+        interop::InteropCommitmentTreeRoots {
+            begin: B256::ZERO,
+            end: B256::ZERO,
+        },
+    );
+    let l2_logs_root_hash = commitment::chain_batch_root(
+        chain_batch_root_layout,
+        &l2_logs_local_root,
+        &derived_interop.multichain_root,
+        &commitment_tree_roots.begin,
+        &commitment_tree_roots.end,
+    );
 
     let da_commitment = match meta.da_commitment_scheme {
         0 | 1 => B256::ZERO,                                          // None / EmptyNoDA
