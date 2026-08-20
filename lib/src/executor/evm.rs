@@ -16,6 +16,7 @@ use crate::block_header;
 use crate::block_roots;
 use crate::types::*;
 use super::proven_db::ProvenDB;
+use super::system_hooks;
 use super::tx::build_proven_tx;
 
 /// EIP-4844 blob transactions. Native's transaction dispatch compiles the
@@ -216,7 +217,8 @@ where
             blk.gas_limit = block.gas_limit;
             blk.prevrandao = Some(block.prev_randao);
         })
-        .build_zk();
+        .build_zk()
+        .with_precompiles(system_hooks::ZKsyncOsPrecompiles::new_with_spec(spec_id));
 
     // AtlasV4 is the first spec whose block header carries a receipts root, so
     // it is the only one that builds receipt leaves. It is also the first spec

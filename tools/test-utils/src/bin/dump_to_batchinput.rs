@@ -428,7 +428,8 @@ fn tracking_run(
             blk.gas_limit = block.gas_limit;
             blk.prevrandao = Some(block.prev_randao);
         })
-        .build_zk();
+        .build_zk()
+        .with_precompiles(executor::system_hooks::ZKsyncOsPrecompiles::new_with_spec(spec_id));
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
         evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
