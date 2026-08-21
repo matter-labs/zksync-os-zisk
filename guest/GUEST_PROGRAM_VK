@@ -5,20 +5,19 @@
 # identical to the prover daemon's public-values prefix and the server's
 # `prover_api.zisk_vks[].program_vk` expectation.
 #
-# STALE: the value below belongs to the PREVIOUS guest ELF. The three-word
-# batch-public-input fix rotated the ELF to sha256
-# 80b841c76445dd3c411cc1f11447cc85285521541378821442aef1f7262da932 (the
-# recorded hash in GUEST_ELF_SHA256); re-derive on a prover box and replace
-# this value before pinning the new guest in the server tripwire or on L1.
-#
-# Derived with cargo-zisk 0.18.0 on 2026-08-18 from the container ELF with
-# sha256 81c0a04e266b8c3149a25d101579e5f38874e26f81ed6dd40a8eb4bd4979f267:
+# Derived with cargo-zisk 0.18.0 on 2026-08-21 by the
+# derive-program-vk workflow (run https://github.com/matter-labs/zksync-os-zisk/actions/runs/32482547202)
+# from the container ELF with sha256
+# 80b841c76445dd3c411cc1f11447cc85285521541378821442aef1f7262da932:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 #
 # The same run re-derived the aggregator programVK from its unchanged ELF and
 # reproduced the recorded value, which shows the setup carries no toolchain
 # drift.
 #
-# Root hash limbs: [426946317103461375, 5802275556545228987,
-#                   1425716418516836576, 16106317095152047070]
-0x05ecd169d11cf3ff5085d2e07ccf70bb13c92987642360e0df8522102856d3de
+# Root hash limbs: [4964041227937550138, 274322046808006668,
+#                   7278902840845780907, 5104543111746565868]
+0x44e3d132399c8f3a03ce9672ba0ca00c6503db918731c7ab46d6faea445236ec
+
+# History: 0x05ecd169d11cf3ff5085d2e07ccf70bb13c92987642360e0df8522102856d3de
+# (retired 2026-08-21 by this rotation).
