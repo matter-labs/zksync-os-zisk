@@ -202,8 +202,10 @@ mod proof_file {
         words.extend_from_slice(&program_vk);
         words.extend(
             publics_data
-                .chunks_exact(4)
-                .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|c| u32::from_le_bytes(*c) as u64),
         );
         words.extend_from_slice(&body);
         words.extend_from_slice(&zisk_vk);

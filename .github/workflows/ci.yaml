@@ -92,7 +92,14 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19.9
-      - run: cargo clippy --all-targets -- -D warnings -A unexpected_cfgs
+      # chunks_exact_to_as_chunks is a new clippy 1.98 nit. Three of its hits
+      # are in the byte-frozen production source (the widen/pack helpers and
+      # the binding-digest assembly), so the rewrite waits for the next VK
+      # rotation. It joins the allowed set.
+      - run: >
+          cargo clippy --all-targets -- -D warnings
+          -A unexpected_cfgs
+          -A clippy::chunks_exact_to_as_chunks
         working-directory: guest-aggregator
       - run: cargo test
         working-directory: guest-aggregator

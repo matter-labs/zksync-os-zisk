@@ -749,8 +749,10 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         proof_file
             .publics
             .data
-            .chunks_exact(4)
-            .map(|c| u32::from_le_bytes(c.try_into().unwrap()) as u64),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| u32::from_le_bytes(*c) as u64),
     );
     words.extend_from_slice(&proof);
     words.extend_from_slice(&zisk_vk);
