@@ -59,6 +59,17 @@ jobs:
             libsecp256k1-dev libsodium-dev libpqxx-dev nasm libopenmpi-dev \
             openmpi-bin openmpi-common libclang-dev clang gcc-riscv64-unknown-elf
 
+      # `cargo-zisk toolchain install` (run by ziskup) links the ZiSK Rust
+      # toolchain into rustup and errors out when the rustup binary itself is
+      # absent, which it is on this runner image. No default toolchain: only
+      # the link target is needed.
+      - name: install rustup
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       # ziskup installs cargo-zisk and downloads the STARK proving key
       # (~26 GB) to ~/.zisk/provingKey. CPU variant: program-setup needs the
       # key, not a GPU. The toolchain version is pinned; the calibration gate
