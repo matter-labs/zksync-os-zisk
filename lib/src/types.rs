@@ -5,6 +5,13 @@ use serde::{Deserialize, Serialize};
 
 /// Current `BatchInput` wire-format version.
 ///
+/// **v4**: AtlasV4 support. The struct layout is unchanged, but the
+/// input-builder contract is not: an AtlasV4 block must carry the EIP-2935
+/// history contract's account preimage, its account-properties proof, and a
+/// proof of the history slot the block writes. The bump makes an old server
+/// paired with a new guest fail with the named version error rather than a
+/// missing-proof panic.
+///
 /// **v3**: adds `BatchMeta.interop_proofs` — authenticated storage proofs that
 /// let the guest DERIVE `sl_chain_id` (SystemContext `0x800b` slot 0, post-state)
 /// and `multichain_root` (MessageRoot `0x10005` aggregation slots, post-state)
@@ -27,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// does not understand before touching the rest of the payload, so a skew
 /// fails with a named error instead of a positional misparse. A version bump
 /// implies a guest rebuild and therefore a VK rotation.
-pub const BATCH_INPUT_VERSION: u32 = 3;
+pub const BATCH_INPUT_VERSION: u32 = 4;
 
 use crate::merkle::{BatchTreeUpdate, StorageProof};
 
@@ -69,9 +76,12 @@ pub struct BatchInput {
     /// read it before the rest of the payload.
     pub version: u32,
     pub chain_id: u64,
-    /// ZKsync spec version (AtlasV1 = 0, AtlasV2 = 1).
+    /// ZKsync OS state transition function tier: AtlasV1 = 0, AtlasV2 = 1,
+    /// AtlasV3 = 2, AtlasV4 = 3. This is the single source of truth for every
+    /// version-dependent formula the guest computes.
     pub spec_id: u8,
-    /// Protocol version minor (30 or 31) — determines batch hash format.
+    /// L1 protocol version minor. Cross-checked against `spec_id` for
+    /// consistency; it selects no formula of its own.
     pub protocol_version_minor: u32,
     pub blocks: Vec<BlockInput>,
     /// Batch-level metadata for commitment computation.

@@ -236,7 +236,7 @@ is caught at the layer that notices first:
 Current values, with ZiSK v0.18.0:
 
 ```text
-guest ELF sha256      = 81c0a04e266b8c3149a25d101579e5f38874e26f81ed6dd40a8eb4bd4979f267
+guest ELF sha256      = 5eb51c53e560adb7c3511e173b8d57a2b5cf14c13e6baf57fd94eda5cffa144a
 guest programVK       = pending derivation on a prover box (guest/GUEST_PROGRAM_VK)
 aggregator ELF sha256 = f96f9285ca87083f322569d72fd379b67b1ee2ea3286c078c26e313acd27e7ae
 aggregator programVK  = 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254

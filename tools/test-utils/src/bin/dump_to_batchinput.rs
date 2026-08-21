@@ -169,6 +169,7 @@ fn zk_spec(spec_id: u8) -> ZkSpecId {
         0 => ZkSpecId::AtlasV1,
         1 => ZkSpecId::AtlasV2,
         2 => ZkSpecId::AtlasV3,
+        3 => ZkSpecId::AtlasV4,
         x => panic!("unknown spec_id {x}"),
     }
 }
@@ -256,10 +257,11 @@ struct RecordingDb {
     read_accounts: RefCell<BTreeSet<Address>>,
 }
 
-impl revm::DatabaseRef for RecordingDb {
-    type Error = RecErr;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+impl RecordingDb {
+    /// Read an account's pre-state properties and record the two reads the
+    /// guest's `ProvenDB::basic_ref` authenticates: the account itself and its
+    /// account-properties flat key, whose proof carries the account's existence.
+    fn read_account_props(&self, address: Address) -> Result<Option<AccountProperties>, RecErr> {
         self.read_accounts.borrow_mut().insert(address);
         let fk = derive_account_properties_key(&address.into_array());
         self.read_slots.borrow_mut().insert(fk);
@@ -270,30 +272,42 @@ impl revm::DatabaseRef for RecordingDb {
                         "no preimage for account {address} props hash {hash}"
                     ))
                 })?;
-                let props = AccountProperties::decode(preimage)
-                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))?;
-                let code_hash = if props.observable_bytecode_hash.is_zero() {
-                    if props.nonce == 0 && props.balance == [0u8; 32] {
-                        B256::ZERO
-                    } else {
-                        KECCAK_EMPTY
-                    }
-                } else {
-                    props.observable_bytecode_hash
-                };
-                let code = self.code.get(&code_hash).map(|c| {
-                    revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c))
-                });
-                Ok(Some(revm::state::AccountInfo {
-                    nonce: props.nonce,
-                    balance: U256::from_be_bytes(props.balance),
-                    code_hash,
-                    code,
-                    account_id: None,
-                }))
+                AccountProperties::decode(preimage)
+                    .map(Some)
+                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))
             }
             _ => Ok(None),
         }
+    }
+}
+
+impl revm::DatabaseRef for RecordingDb {
+    type Error = RecErr;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+        let Some(props) = self.read_account_props(address)? else {
+            return Ok(None);
+        };
+        let code_hash = if props.observable_bytecode_hash.is_zero() {
+            if props.nonce == 0 && props.balance == [0u8; 32] {
+                B256::ZERO
+            } else {
+                KECCAK_EMPTY
+            }
+        } else {
+            props.observable_bytecode_hash
+        };
+        let code = self
+            .code
+            .get(&code_hash)
+            .map(|c| revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c)));
+        Ok(Some(revm::state::AccountInfo {
+            nonce: props.nonce,
+            balance: U256::from_be_bytes(props.balance),
+            code_hash,
+            code,
+            account_id: None,
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<revm::state::Bytecode, RecErr> {
@@ -326,6 +340,58 @@ impl revm::DatabaseRef for RecordingDb {
     }
 }
 
+/// The EIP-2935 history contract and the size of its ring, as
+/// `executor::eip2935` states them.
+const HISTORY_STORAGE_ADDRESS: Address =
+    revm::primitives::address!("0000f90827f1c53a10cb7a02335b175320002935");
+const HISTORY_SERVE_WINDOW: u64 = 8191;
+
+/// Mirror of executor::eip2935::apply_pre_block_write for the tracking pass.
+///
+/// The step runs before the block's first transaction, so a run of the
+/// transactions alone observes neither of its two reads, and the witness comes
+/// out without the history contract's account-properties proof and without the
+/// ring slot's proof — both of which the guest requires. Performing the write
+/// here also puts its value in the overlay, so a transaction that reads the ring
+/// slot observes what the guest observes.
+fn tracking_pre_block_write(
+    block_number: u64,
+    cache_db: &mut revm::database::CacheDB<RecordingDb>,
+) {
+    use revm::DatabaseRef;
+
+    let props = cache_db
+        .db
+        .read_account_props(HISTORY_STORAGE_ADDRESS)
+        .expect("history contract pre-state");
+    // Native's gate is `is_contract()`: the account holds code and carries no
+    // EIP-7702 delegation.
+    let is_contract = props.is_some_and(|p| {
+        p.observable_bytecode_len > 0
+            && (p.versioning >> 56) as u8
+                != zksync_os_zisk_lib::account_props::DELEGATED_STATUS_BYTE
+    });
+    if !is_contract {
+        return;
+    }
+
+    let slot = U256::from((block_number - 1) % HISTORY_SERVE_WINDOW);
+    cache_db
+        .storage_ref(HISTORY_STORAGE_ADDRESS, slot)
+        .expect("history contract ring slot");
+    let parent_hash = cache_db
+        .db
+        .block_hash_ref(block_number - 1)
+        .expect("RecordingDb::block_hash_ref is infallible");
+    cache_db
+        .insert_account_storage(
+            HISTORY_STORAGE_ADDRESS,
+            slot,
+            U256::from_be_bytes(parent_hash.0),
+        )
+        .expect("history contract pre-state");
+}
+
 /// Mirror of executor::evm::run_evm_block for the tracking pass (records
 /// reads). Transactions are built by the guest's own
 /// `executor::tx::build_proven_tx`, so tracking and guest execution can
@@ -335,13 +401,16 @@ fn tracking_run(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut revm::database::CacheDB<RecordingDb>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) {
     use revm::ExecuteCommitEvm;
-    use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext};
+    use zksync_os_revm::{zk_context, ZkBuilder};
 
-    let mut evm = <ZkContext<_>>::default()
-        .with_db(cache_db)
+    if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        tracking_pre_block_write(block.number, cache_db);
+    }
+
+    let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
@@ -357,12 +426,12 @@ fn tracking_run(
         .build_zk();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
-        evm.0.ctx.chain.set_tx_number(tx_idx as u16);
+        evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
         let (tx, _tx_hash, _tx_type) =
             executor::tx::build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         match evm.transact_commit(tx) {
             Ok(_result) => {
-                let _ = evm.0.ctx.chain.take_logs();
+                let _ = evm.0.ctx.journaled_state.take_l2_to_l1_logs();
             }
             Err(e) => panic!("tracking tx {tx_idx} failed: {e:?}"),
         }
@@ -682,7 +751,10 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
     };
     let mut cache = revm::database::CacheDB::new(rec);
     // Resolve the per-tx gas cap the same way `build_batch_input` does below.
-    let max_tx_gas_limit = resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit);
+    // Only a spec that applies EIP-7825 passes it to the transaction builder.
+    let max_tx_gas_limit = ZkSpecId::AtlasV4
+        .is_enabled_in(spec)
+        .then(|| resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit));
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
     }));
@@ -1167,7 +1239,7 @@ mod tests {
         let l2_logs_root =
             commitment::keccak_two(&commitment::l2_to_l1_logs_root(&[]), &B256::ZERO);
         let bo = commitment::batch_output_hash_native(
-            true, // v31 layout
+            commitment::BatchOutputLayout::V31,
             37,
             42,
             42,
@@ -1186,7 +1258,9 @@ mod tests {
             0,
         );
         let ccfg = commitment::chain_config_hash(37, false, 1 << 24);
-        let pi = commitment::batch_public_input_hash(&sb, &sa, &ccfg, &bo);
+        // A v31 batch commits the three-word public input: released native on
+        // that line carries no chain-config word.
+        let pi = commitment::batch_public_input_hash(&sb, &sa, None, &bo);
 
         let zero = "00".repeat(32);
         let guards = format!(
@@ -1286,5 +1360,37 @@ mod tests {
         let (recovered, value) = proof.verify(&missing).expect("verify");
         assert_eq!(recovered, root);
         assert!(value.is_none());
+    }
+
+    /// Every AtlasV4 block authenticates the EIP-2935 history contract before
+    /// it runs a transaction, and it does so even where the contract holds no
+    /// code — the gate itself reads the account. The tracking pass must
+    /// therefore record the account and its account-properties key, which is
+    /// the key whose proof carries the account's existence, against a pre-state
+    /// that holds no history contract at all.
+    #[test]
+    fn tracking_records_the_eip2935_history_account_read() {
+        let rec = RecordingDb {
+            storage: HashMap::new(),
+            preimages: HashMap::new(),
+            code: HashMap::new(),
+            block_hashes: HashMap::new(),
+            read_slots: RefCell::new(BTreeSet::new()),
+            read_accounts: RefCell::new(BTreeSet::new()),
+        };
+        let mut cache = revm::database::CacheDB::new(rec);
+        tracking_pre_block_write(1, &mut cache);
+        assert!(cache
+            .db
+            .read_accounts
+            .borrow()
+            .contains(&HISTORY_STORAGE_ADDRESS));
+        assert!(cache
+            .db
+            .read_slots
+            .borrow()
+            .contains(&derive_account_properties_key(
+                &HISTORY_STORAGE_ADDRESS.into_array()
+            )));
     }
 }

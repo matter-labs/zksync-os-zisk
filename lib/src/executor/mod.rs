@@ -4,6 +4,7 @@
 //! recovers the expected state root. Values come FROM the proofs, not from
 //! a separate data path.
 
+mod eip2935;
 mod evm;
 mod interop;
 mod proven_db;
@@ -18,7 +19,35 @@ use revm::primitives::B256;
 use zksync_os_revm::ZkSpecId;
 
 use crate::commitment;
+use crate::commitment::BatchOutputLayout;
 use crate::types::*;
+
+/// The lowest L1 protocol minor an AtlasV4 batch may carry.
+///
+/// The 0.4.0 tree names 32 and marks the value a draft, and the server still
+/// routes minor 32 to the AtlasV3 execution version, so AtlasV3 accepts 32 as
+/// well. Once the release fixes the protocol version, narrow the AtlasV3 arm of
+/// the cross-check to 31 and pin AtlasV4 to exactly this value, so the two
+/// ranges stop overlapping.
+const ATLAS_V4_MIN_PROTOCOL_MINOR: u32 = 32;
+
+/// Ergs charged per unit of gas (zksync-os `evm_interpreter::ERGS_PER_GAS`).
+/// Gas is metered in ergs, so a gas limit above `u64::MAX / ERGS_PER_GAS`
+/// overflows the erg counter.
+const ERGS_PER_GAS: u64 = 256;
+
+/// The largest block gas limit native accepts (`zk_ee` `MAX_BLOCK_GAS_LIMIT`).
+const MAX_BLOCK_GAS_LIMIT: u64 = u64::MAX / ERGS_PER_GAS;
+
+/// The largest per-transaction gas limit native accepts (`zk_ee`
+/// `MAX_TX_GAS_LIMIT`).
+const MAX_TX_GAS_LIMIT: u64 = MAX_BLOCK_GAS_LIMIT;
+
+/// The EIP-7825 single-transaction gas limit, which is both the default
+/// chain-config per-transaction cap and the floor for any configured value
+/// (`zk_ee` `DEFAULT_MAX_TX_GAS_LIMIT`). A chain may raise the cap above
+/// Ethereum's limit but must not set it below.
+const DEFAULT_MAX_TX_GAS_LIMIT: u64 = 1 << 24;
 
 /// Execute a batch with full merkle proof verification and compute the
 /// BatchPublicInput hash matching the server/L1 format.
@@ -56,22 +85,26 @@ fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
         0 => ZkSpecId::AtlasV1,
         1 => ZkSpecId::AtlasV2,
         2 => ZkSpecId::AtlasV3,
+        3 => ZkSpecId::AtlasV4,
         _ => panic!("unknown spec_id: {}", input.spec_id),
     };
-    // `spec_id` (EVM spec + tx-rolling-hash seed) and `protocol_version_minor`
-    // (batch-output layout + multichain-root gate) are two independent witness
-    // knobs; native never emits an inconsistent pair. Cross-check them so an
-    // operator cannot combine, say, an AtlasV2 seed with the v31 output layout.
-    // AtlasV3 is the v31 line; AtlasV1/V2 are v30.
-    let is_v3 = matches!(spec_id, ZkSpecId::AtlasV3);
-    assert_eq!(
-        is_v3,
-        input.protocol_version_minor >= 31,
-        "inconsistent spec_id/protocol_version_minor: spec_id={} (AtlasV3={is_v3}), minor={}",
-        input.spec_id,
-        input.protocol_version_minor,
+    // `spec_id` is the ZKsync OS state transition function tier and the single
+    // source of truth for every formula the guest computes.
+    // `protocol_version_minor` is the L1 protocol version, a separate axis.
+    // Native never emits a pair that disagrees, so reject an inconsistent pair
+    // and keep an operator from combining one spec's execution rules with
+    // another spec's commitment layout.
+    let minor_ok = match spec_id {
+        ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => input.protocol_version_minor <= 30,
+        ZkSpecId::AtlasV3 => matches!(input.protocol_version_minor, 31 | 32),
+        ZkSpecId::AtlasV4 => input.protocol_version_minor >= ATLAS_V4_MIN_PROTOCOL_MINOR,
+    };
+    assert!(
+        minor_ok,
+        "inconsistent spec_id/protocol_version_minor: spec_id={} ({spec_id:?}), minor={}",
+        input.spec_id, input.protocol_version_minor,
     );
-    validate_block_sequence(input);
+    validate_block_sequence(input, spec_id);
     spec_id
 }
 
@@ -128,11 +161,18 @@ fn run_execution_and_commit(
     // the execution journal as well: it decides which code encoding native
     // wrote for an account that ends the batch holding no code.
     let mut deployed_accounts: HashSet<revm::primitives::Address> = HashSet::new();
+    // EIP-7825 caps a transaction's own gas limit from AtlasV4 on. AtlasV1
+    // through AtlasV3 bound an L2 transaction by the block gas limit alone, so
+    // the chain-config cap stays off for them: an in-guest rejection that
+    // native does not perform makes a legitimate batch unprovable.
+    let max_tx_gas_limit = ZkSpecId::AtlasV4
+        .is_enabled_in(spec_id)
+        .then_some(meta.max_tx_gas_limit);
     for block in &input.blocks {
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
         let (result, state_effects) = evm::execute_block_proven(
-            input.chain_id, spec_id, block, &mut cache_db, meta.max_tx_gas_limit,
+            input.chain_id, spec_id, block, &mut cache_db, max_tx_gas_limit,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
         // so a later block's BLOCKHASH read resolves to this authenticated value.
@@ -266,8 +306,8 @@ fn run_execution_and_commit(
     // reproduces those reads against the server-supplied slot proofs (`interop`),
     // so `multichain_root`/`sl_chain_id` are DERIVED, not inherited. A proof
     // inconsistent with the pinned root fails there, rejecting a forged scalar.
-    let is_v31 = input.protocol_version_minor >= 31;
-    let (derived_multichain_root, derived_sl_chain_id) = if is_v31 {
+    let commits_interop = ZkSpecId::AtlasV3.is_enabled_in(spec_id);
+    let (derived_multichain_root, derived_sl_chain_id) = if commits_interop {
         let proofs = meta.interop_proofs.as_ref().expect(
             "v31 batch is missing interop_proofs: the server must supply the \
              sl_chain_id / multichain_root slot proofs",
@@ -301,13 +341,14 @@ fn run_execution_and_commit(
         _ => panic!("unsupported DA commitment scheme: {}", meta.da_commitment_scheme),
     };
 
-    // Batch output hash — released-line layouts, gated on the protocol minor
-    // exactly like the native `public_input_hash`: v31 packs the layer-2 tx
-    // count and the settlement-layer chain id, v30 does not. Both are
-    // chain_id-prefixed; the draft-0.4.0 chain_id-less layout returns at the
-    // AtlasV4 bump.
+    // Batch output hash — the layout of the spec that executed the batch.
+    let batch_output_layout = match spec_id {
+        ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => BatchOutputLayout::V30,
+        ZkSpecId::AtlasV3 => BatchOutputLayout::V31,
+        ZkSpecId::AtlasV4 => BatchOutputLayout::AtlasV4,
+    };
     let batch_hash = commitment::batch_output_hash_native(
-        input.protocol_version_minor >= 31,
+        batch_output_layout,
         input.chain_id,
         input.blocks.first().unwrap().timestamp,
         last_block.timestamp,
@@ -322,24 +363,31 @@ fn run_execution_and_commit(
         derived_sl_chain_id,
     );
 
-    // Top-level PI commits to the chain config (draft-0.4.0 `BatchPublicInput::hash`).
-    let chain_config_hash = commitment::chain_config_hash(
-        input.chain_id,
-        meta.fri_proof_verification_enabled,
-        meta.max_tx_gas_limit,
-    );
+    // The top-level public input commits the chain config from AtlasV4 on
+    // (`BatchPublicInput::hash`). AtlasV1 through AtlasV3 hash three words:
+    // native on those lines carries no `chain_config_hash` field, so a fourth
+    // word would commit a value the first prover never computes, and L1 could
+    // not gate the two lanes against each other.
+    let chain_config_hash = ZkSpecId::AtlasV4.is_enabled_in(spec_id).then(|| {
+        commitment::chain_config_hash(
+            input.chain_id,
+            meta.fri_proof_verification_enabled,
+            meta.max_tx_gas_limit,
+        )
+    });
     let commitment = commitment::batch_public_input_hash(
         &state_before,
         &state_after,
-        &chain_config_hash,
+        chain_config_hash.as_ref(),
         &batch_hash,
     );
     (output, commitment, state_before, state_after, batch_hash)
 }
 
-fn validate_block_sequence(input: &BatchInput) {
+fn validate_block_sequence(input: &BatchInput, spec_id: ZkSpecId) {
     let meta = &input.batch_meta;
     assert!(!input.blocks.is_empty(), "batch must contain at least one block");
+    validate_atlas_v4_block_invariants(input, spec_id);
     assert!(
         input.blocks[0].number == meta.block_number_before + 1,
         "first block number {} must follow block_number_before {}",
@@ -364,6 +412,53 @@ fn validate_block_sequence(input: &BatchInput) {
         assert!(w[1].timestamp >= w[0].timestamp, "block timestamps must be non-decreasing");
     }
     validate_expected_tree_roots(input);
+}
+
+/// The block-level and chain-config invariants native checks once per block in
+/// `metadata_op`, plus the EIP-2935 block-number rule. All are AtlasV4 rules:
+/// `ChainConfig` and the pre-block EIP-2935 step exist only on that line, and an
+/// in-guest rejection an older native never performs would make a legitimate
+/// batch unprovable.
+///
+/// - `ChainConfig::validate`: the EIP-7825 per-transaction cap may be raised
+///   above Ethereum's limit but never lowered below it. The value is committed
+///   in `chain_config_hash` and caps every L2 transaction, so a config native
+///   refuses to load must not reach either consumer.
+/// - `block_gas_limit <= MAX_BLOCK_GAS_LIMIT` and
+///   `min(block_gas_limit, max_tx_gas_limit) <= MAX_TX_GAS_LIMIT`: an over-large
+///   limit aborts the whole block in native.
+/// - The EIP-2935 pre-block step errors on block number 0, so an AtlasV4 chain
+///   has no executable block 0.
+fn validate_atlas_v4_block_invariants(input: &BatchInput, spec_id: ZkSpecId) {
+    if !ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        return;
+    }
+    let max_tx_gas_limit = input.batch_meta.max_tx_gas_limit;
+    assert!(
+        max_tx_gas_limit >= DEFAULT_MAX_TX_GAS_LIMIT,
+        "chain max_tx_gas_limit {max_tx_gas_limit} is below the EIP-7825 \
+         single-transaction gas limit {DEFAULT_MAX_TX_GAS_LIMIT}",
+    );
+    for block in &input.blocks {
+        assert!(
+            block.number >= 1,
+            "block 0 is not executable at AtlasV4: the EIP-2935 pre-block step \
+             errors on block number 0",
+        );
+        assert!(
+            block.gas_limit <= MAX_BLOCK_GAS_LIMIT,
+            "block {} gas limit {} exceeds the protocol maximum {MAX_BLOCK_GAS_LIMIT}",
+            block.number,
+            block.gas_limit,
+        );
+        let individual_tx_gas_limit = block.gas_limit.min(max_tx_gas_limit);
+        assert!(
+            individual_tx_gas_limit <= MAX_TX_GAS_LIMIT,
+            "block {} per-transaction gas limit {individual_tx_gas_limit} exceeds \
+             the protocol maximum {MAX_TX_GAS_LIMIT}",
+            block.number,
+        );
+    }
 }
 
 /// SOUNDNESS: every storage/account read is authenticated against the
@@ -622,7 +717,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "goes before the previous batch")]
     fn rejects_first_block_before_previous_batch() {
-        validate_block_sequence(&batch(0, 100, vec![block_at(1, 99)]));
+        validate_block_sequence(&batch(0, 100, vec![block_at(1, 99)]), ZkSpecId::AtlasV3);
     }
 
     /// A compliant batch still passes: the first block timestamp equals the
@@ -630,7 +725,124 @@ mod tests {
     /// later block keeps the timestamp non-decreasing across the boundary.
     #[test]
     fn accepts_first_block_at_or_after_previous_batch() {
-        validate_block_sequence(&batch(0, 100, vec![block_at(1, 100)]));
-        validate_block_sequence(&batch(0, 100, vec![block_at(1, 101), block_at(2, 101)]));
+        validate_block_sequence(&batch(0, 100, vec![block_at(1, 100)]), ZkSpecId::AtlasV3);
+        validate_block_sequence(
+            &batch(0, 100, vec![block_at(1, 101), block_at(2, 101)]),
+            ZkSpecId::AtlasV3,
+        );
+    }
+
+    /// A batch carrying the `(spec_id, protocol_version_minor)` pair, otherwise
+    /// compliant, for the dispatch cross-check.
+    fn dispatch_batch(spec_id: u8, protocol_version_minor: u32) -> BatchInput {
+        let mut input = batch(0, 0, vec![block_at(1, 1)]);
+        input.spec_id = spec_id;
+        input.protocol_version_minor = protocol_version_minor;
+        input
+    }
+
+    /// Every wire spec byte native emits resolves, and each resolves to its own
+    /// tier.
+    #[test]
+    fn resolves_every_known_spec_byte() {
+        for (byte, minor, expected) in [
+            (0u8, 30u32, ZkSpecId::AtlasV1),
+            (1, 30, ZkSpecId::AtlasV2),
+            (2, 31, ZkSpecId::AtlasV3),
+            (2, 32, ZkSpecId::AtlasV3),
+            (3, 32, ZkSpecId::AtlasV4),
+            (3, 33, ZkSpecId::AtlasV4),
+        ] {
+            assert_eq!(
+                resolve_spec_and_validate(&dispatch_batch(byte, minor)),
+                expected,
+                "spec byte {byte} with minor {minor}",
+            );
+        }
+    }
+
+    /// A spec byte no release emits is rejected rather than mapped to a
+    /// neighbour.
+    #[test]
+    #[should_panic(expected = "unknown spec_id: 4")]
+    fn rejects_an_unknown_spec_byte() {
+        resolve_spec_and_validate(&dispatch_batch(4, 32));
+    }
+
+    /// An AtlasV4 batch claiming a protocol minor below the AtlasV4 range is
+    /// rejected: the pair would combine AtlasV4 execution rules with an older
+    /// line's L1 protocol version.
+    #[test]
+    #[should_panic(expected = "inconsistent spec_id/protocol_version_minor")]
+    fn rejects_atlas_v4_below_its_protocol_minor() {
+        resolve_spec_and_validate(&dispatch_batch(3, 31));
+    }
+
+    /// An AtlasV3 batch claiming a protocol minor above the AtlasV3 range is
+    /// rejected. The previous cross-check accepted every minor at or above 31
+    /// for AtlasV3.
+    #[test]
+    #[should_panic(expected = "inconsistent spec_id/protocol_version_minor")]
+    fn rejects_atlas_v3_above_its_protocol_minor() {
+        resolve_spec_and_validate(&dispatch_batch(2, 33));
+    }
+
+    /// An AtlasV1 or AtlasV2 batch claiming a v31 protocol minor is rejected.
+    #[test]
+    #[should_panic(expected = "inconsistent spec_id/protocol_version_minor")]
+    fn rejects_atlas_v2_with_a_v31_protocol_minor() {
+        resolve_spec_and_validate(&dispatch_batch(1, 31));
+    }
+
+    /// The wire-format version the previous guest understood is rejected with
+    /// the named error, so a server that predates the AtlasV4 input contract
+    /// cannot feed this guest.
+    #[test]
+    #[should_panic(expected = "unsupported BatchInput wire-format version 3")]
+    fn rejects_the_previous_wire_format_version() {
+        let mut input = dispatch_batch(2, 31);
+        input.version = 3;
+        resolve_spec_and_validate(&input);
+    }
+
+    /// AtlasV4 has no executable block 0: native's EIP-2935 pre-block step
+    /// errors there.
+    #[test]
+    #[should_panic(expected = "block 0 is not executable at AtlasV4")]
+    fn rejects_block_zero_at_atlas_v4() {
+        let mut input = dispatch_batch(3, 32);
+        input.batch_meta.block_number_before = u64::MAX; // block 0 follows it
+        input.blocks = vec![block_at(0, 1)];
+        resolve_spec_and_validate(&input);
+    }
+
+    /// A chain config that sets the EIP-7825 per-transaction cap below
+    /// Ethereum's limit is one native refuses to load.
+    #[test]
+    #[should_panic(expected = "is below the EIP-7825 single-transaction gas limit")]
+    fn rejects_a_chain_cap_below_the_eip7825_limit() {
+        let mut input = dispatch_batch(3, 32);
+        input.batch_meta.max_tx_gas_limit = (1 << 24) - 1;
+        resolve_spec_and_validate(&input);
+    }
+
+    /// A block gas limit above the protocol maximum aborts the block in native,
+    /// so the guest must not prove it.
+    #[test]
+    #[should_panic(expected = "exceeds the protocol maximum")]
+    fn rejects_a_block_gas_limit_above_the_protocol_maximum() {
+        let mut input = dispatch_batch(3, 32);
+        input.blocks[0].gas_limit = MAX_BLOCK_GAS_LIMIT + 1;
+        resolve_spec_and_validate(&input);
+    }
+
+    /// The block-level limits are AtlasV4 rules, so an older spec keeps its
+    /// previous behaviour.
+    #[test]
+    fn block_gas_limit_ceiling_does_not_reach_older_specs() {
+        let mut input = dispatch_batch(2, 31);
+        input.blocks[0].gas_limit = MAX_BLOCK_GAS_LIMIT + 1;
+        input.batch_meta.max_tx_gas_limit = 0;
+        assert_eq!(resolve_spec_and_validate(&input), ZkSpecId::AtlasV3);
     }
 }

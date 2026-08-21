@@ -7,12 +7,18 @@ tree root, state commitments, per-account after-images), and executes each
 case in `ziskemu` with the pinned guest ELF.
 
 **Steady state** (established 2026-08-07 against the 0.3.0/v31 line,
-guest ELF `81c0a04e…`):
+guest ELF `0222b690…`):
 10,362 cases → 10,336 OK, 0 panics, 26 waived (`corpus-waivers.tsv`).
 `corpus-emu.sh` exits 0 exactly when a run reproduces this: only documented
 waivers remain. Any other outcome is a regression or a new finding. The count
 spans 35 of the 36 chunks; `static_state_tests` needs a run of its own (see
 **Known sharp edges**).
+
+The AtlasV4/0.4.0 line has its own steady state to establish. Its runs take
+guest ELF `5eb51c53…`, which wires the EIP-152, EIP-4844 point-evaluation
+and EIP-2537 precompiles that AtlasV4 activates. Its
+`prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008 cases → 2,008
+OK, 0 panics, 0 waived.
 
 ## Architecture
 
@@ -60,7 +66,7 @@ input.bin ──▶ ziskemu + guest ELF ──▶ clean exit or attributed panic
 6. **Environment overrides** — every location the runner uses is an env var
    (see the header of `corpus-emu.sh`): `ZKOS_DUMP_WORKTREE`,
    `ZKOS_FIXTURES`, `ZISK_TESTUTILS_DIR`, `ZISK_GUEST_ELF`, `ZISKEMU`,
-   `CORPUS_OUT`, `CARGO_TARGET_DIR`, `EMU_JOBS`.
+   `CORPUS_OUT`, `CARGO_TARGET_DIR`, `EMU_JOBS`, `OK_MIN_PERCENT`.
 
 ## Running
 
@@ -71,8 +77,12 @@ tools/corpus-emu.sh istanbul/eip152_blake2 ...  # targeted families
 
 - Chunks are resumable: a chunk with an existing results file is skipped;
   delete `$CORPUS_OUT/chunks/<chunk>.tsv` to re-run it.
-- The run ends with a waiver reconciliation against `corpus-waivers.tsv`;
-  exit 0 means steady state reproduced.
+- The run ends with a waiver reconciliation against `corpus-waivers.tsv`
+  and an emulation-coverage check; exit 0 means steady state reproduced.
+- Coverage holds the OK share to `OK_MIN_PERCENT` (default 90). The waiver
+  reconciliation counts guest panics, so a run whose reader rejected every
+  case reports zero panics with every row waived — total failure that reads
+  as success. The floor is what makes such a run fail.
 - A quick post-bump sanity pass: run three or four small families
   (`istanbul/eip1344_chainid byzantium/eip196_ec_add_mul
   cancun/eip1153_tstore`) before committing to `--all`.
@@ -111,12 +121,13 @@ emulation status, detail.
   testnet replays.
 - ziskos/toolchain bumps: the guest's x=0 P-256 tripwire test signals when
   that workaround can be dropped (the underlying hint bug is fixed on the
-  ZiSK 1.0 line); re-run the p256 family then.
+  ZiSK 1.0 line); re-run the p256 family then. The two BLS12-381 tripwires
+  give the same signal for the cofactor screen and the map-to-curve software
+  route; re-run the eip2537 family then.
 - At the AtlasV4/0.4.0 guest bump: re-establish steady state against the
   0.4.0 line — its semantics drift from v31 (blake2s-merkle header
   tx/receipt roots, Pectra fee/precompile semantics), so expect a fresh
-  divergence-triage round and re-visit the blake2f/KZG/bls stub coverage
-  question.
+  divergence-triage round.
 
 ## Known sharp edges
 

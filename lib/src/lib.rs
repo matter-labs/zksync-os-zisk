@@ -1,5 +1,6 @@
 pub mod account_props;
 pub mod block_header;
+pub mod block_roots;
 pub mod commitment;
 pub mod crypto;
 pub mod executor;

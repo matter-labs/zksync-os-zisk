@@ -57,8 +57,9 @@ mod abi_layout {
 ///
 /// Only `gas_used_override` and `force_fail` are taken from TxInput.
 /// `block_gas_limit` caps system transactions, whose own gas limit is zero.
-/// `max_tx_gas_limit` is the chain-config per-tx cap; with `block_gas_limit`
-/// it bounds every L2 transaction's gas limit (see `build_l2_tx`).
+/// `max_tx_gas_limit` is the chain-config EIP-7825 per-tx cap; `None` means the
+/// spec applies no such cap, and the block gas limit is the only bound on an L2
+/// transaction (see `build_l2_tx`).
 ///
 /// Public so host-side witness builders (the dump-to-BatchInput reader) can
 /// run their read-discovery pass through the exact same tx construction the
@@ -66,7 +67,7 @@ mod abi_layout {
 pub fn build_proven_tx(
     input: &TxInput,
     block_gas_limit: u64,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) -> (ZKsyncTx<TxEnv>, B256, u8) {
     match &input.auth {
         TxAuth::L1 { tx_hash, abi_encoded } | TxAuth::Upgrade { tx_hash, abi_encoded } => {
@@ -75,9 +76,11 @@ pub fn build_proven_tx(
         // The effective per-tx cap native enforces for L2 transactions is the
         // smaller of the block gas limit and the chain-config `max_tx_gas_limit`
         // (`System::get_individual_tx_gas_limit`).
-        TxAuth::L2 { signed_bytes } => {
-            build_l2_tx(input, signed_bytes, block_gas_limit.min(max_tx_gas_limit))
-        }
+        TxAuth::L2 { signed_bytes } => build_l2_tx(
+            input,
+            signed_bytes,
+            max_tx_gas_limit.map_or(block_gas_limit, |cap| block_gas_limit.min(cap)),
+        ),
         TxAuth::System { tx_hash, encoded_2718 } => {
             build_system_tx(input, tx_hash, encoded_2718, block_gas_limit)
         }
@@ -186,11 +189,14 @@ fn build_l2_tx(
     // max_tx_gas_limit)`. L1, upgrade and system transactions take other paths
     // that do not apply this cap, so only the L2 path enforces it here.
     // `max_tx_gas_limit` is committed into `chain_config_hash`; without this
-    // check the guest would execute a transaction that native rejects.
+    // check the guest would execute a transaction that native rejects. On a
+    // spec that carries no EIP-7825 cap the caller passes the block gas limit,
+    // which native still enforces.
     assert!(
         gas_limit <= individual_tx_gas_limit,
         "L2 tx gas limit {gas_limit} exceeds the per-tx cap {individual_tx_gas_limit} \
-         (the smaller of the block gas limit and the chain max_tx_gas_limit)"
+         (the block gas limit, narrowed by the chain max_tx_gas_limit on a spec \
+          that applies EIP-7825)"
     );
     let gas_price = envelope.max_fee_per_gas();
     let gas_priority_fee = envelope.max_priority_fee_per_gas();
@@ -516,7 +522,7 @@ mod tests {
     fn rejects_l2_gas_limit_over_max_tx_cap() {
         let input = l2_input(signed_l2_tx(MAX_TX_GAS_LIMIT + 1));
         // Block gas limit is huge, so the chain cap is the binding bound.
-        build_proven_tx(&input, u64::MAX, MAX_TX_GAS_LIMIT);
+        build_proven_tx(&input, u64::MAX, Some(MAX_TX_GAS_LIMIT));
     }
 
     /// The effective cap is the SMALLER of the block gas limit and the chain
@@ -527,7 +533,7 @@ mod tests {
     fn rejects_l2_gas_limit_over_block_gas_limit() {
         let input = l2_input(signed_l2_tx(2_000_000));
         // Block gas limit is the binding bound here.
-        build_proven_tx(&input, 1_000_000, MAX_TX_GAS_LIMIT);
+        build_proven_tx(&input, 1_000_000, Some(MAX_TX_GAS_LIMIT));
     }
 
     /// A transaction whose gas limit equals the cap is accepted: the relation
@@ -536,7 +542,69 @@ mod tests {
     fn accepts_l2_gas_limit_at_cap() {
         let input = l2_input(signed_l2_tx(MAX_TX_GAS_LIMIT));
         // Building must not panic: the tx sits exactly at the cap.
-        let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, MAX_TX_GAS_LIMIT);
+        let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, Some(MAX_TX_GAS_LIMIT));
         assert_eq!(tx_type, 0, "legacy L2 tx is type 0");
+    }
+
+    /// A spec without EIP-7825 applies no chain-config cap: a transaction above
+    /// `max_tx_gas_limit` but inside the block gas limit is accepted. Native on
+    /// the released v30 and v31 lines has no `ChainConfig::max_tx_gas_limit`, so
+    /// an in-guest rejection there would make a legitimate batch unprovable.
+    #[test]
+    fn accepts_l2_gas_limit_over_chain_cap_without_eip7825() {
+        let input = l2_input(signed_l2_tx(MAX_TX_GAS_LIMIT + 1));
+        let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, None);
+        assert_eq!(tx_type, 0, "legacy L2 tx is type 0");
+    }
+
+    /// The block gas limit bounds an L2 transaction on every spec, so it still
+    /// rejects an over-large transaction when no EIP-7825 cap applies.
+    #[test]
+    #[should_panic(expected = "exceeds the per-tx cap")]
+    fn rejects_l2_gas_limit_over_block_gas_limit_without_eip7825() {
+        let input = l2_input(signed_l2_tx(2_000_000));
+        build_proven_tx(&input, 1_000_000, None);
+    }
+
+    /// The type byte this builder reports enters every AtlasV4 receipt leaf, so
+    /// it must equal native's own class byte. The L2 path takes it from the
+    /// envelope, whose discriminants are the EIP type numbers; the L1 and
+    /// upgrade paths take it from the hash-authenticated ABI encoding; the
+    /// system path is the protocol constant.
+    #[test]
+    fn transaction_type_bytes_match_the_native_classes() {
+        use alloy_consensus::TxType;
+
+        assert_eq!(TxType::Legacy as u8, 0);
+        assert_eq!(TxType::Eip2930 as u8, 1);
+        assert_eq!(TxType::Eip1559 as u8, 2);
+        assert_eq!(TxType::Eip4844 as u8, 3);
+        assert_eq!(TxType::Eip7702 as u8, 4);
+        assert_eq!(SYSTEM_TX_TYPE, 0x7d);
+
+        // The plumbing: a legacy envelope reports 0.
+        let (_tx, _hash, tx_type) = build_proven_tx(&l2_input(signed_l2_tx(21_000)), u64::MAX, None);
+        assert_eq!(tx_type, 0);
+
+        // The L1 and upgrade paths report the ABI's `txType` word verbatim.
+        for claimed in [0x7fu8, 0x7e] {
+            let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+            abi[31] = 0x20; // outer offset
+            abi[32 + 31] = claimed; // txType
+            let dyn_base = 19u32 * 32;
+            for j in 0..5u32 {
+                let off = 32 + (14 + j as usize) * 32;
+                abi[off + 28..off + 32].copy_from_slice(&(dyn_base + j * 32).to_be_bytes());
+            }
+            let tx_hash = crate::hash::keccak256(&abi);
+            let input = TxInput {
+                chain_id: Some(1),
+                gas_used_override: None,
+                force_fail: false,
+                auth: TxAuth::L1 { tx_hash, abi_encoded: abi },
+            };
+            let (_tx, _hash, tx_type) = build_proven_tx(&input, u64::MAX, None);
+            assert_eq!(tx_type, claimed);
+        }
     }
 }

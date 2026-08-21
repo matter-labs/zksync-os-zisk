@@ -1,12 +1,13 @@
 //! Block header hash computation (RLP encoding + Keccak256).
 //!
 //! Computes the ZKsync OS block header hash using the same Ethereum block
-//! header format as `basic_bootloader::block_header::BlockHeader` on the
-//! released zksync-os lines (read from the v0.0.29 sources, verified against
-//! live node headers): `transactions_root` carries the keccak rolling hash
-//! of the block's tx hashes; state root, receipts root and bloom stay zero.
-//! The draft-0.4.0 line switches to blake2s merkle roots for txs/receipts —
-//! reintroduce that format version-gated when the server adopts it.
+//! header format as `basic_bootloader::block_header::BlockHeader`. The RLP
+//! field list, the field order and the keccak wrapper are the same on every
+//! ZKsync OS line; only the two tree-root field VALUES depend on the spec.
+//! Up to AtlasV3, `transactions_root` carries the keccak rolling hash of the
+//! block's tx hashes and `receipts_root` is zero. From AtlasV4 both are
+//! depth-32 Blake2s Merkle roots (see `crate::block_roots`). State root and
+//! bloom are zero on every line.
 
 use alloy_primitives::B256;
 

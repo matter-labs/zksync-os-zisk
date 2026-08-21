@@ -24,6 +24,12 @@
 //!   unused.
 //! - EIP-7702 delegation: code = `0xef0100 || address` (23 bytes), no
 //!   artifacts, same hashing; clearing a delegation zeroes every field.
+//!
+//! The 124-byte leaf and every field offset are the same on the v0.3.x and
+//! 0.4.x lines. What AtlasV4 changes is the pubdata diff compression, which
+//! drops `artifacts_len` from the published encoding and publishes only the
+//! unpadded code. The guest treats `BatchMeta::pubdata` as an opaque blob and
+//! only hashes it, so that change reaches nothing here.
 
 use crate::merkle::AccountProperties;
 use blake2::{Blake2s256, Digest};

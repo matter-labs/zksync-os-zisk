@@ -111,19 +111,28 @@ pub fn l2_to_l1_logs_root(encoded_logs: &[[u8; L2_TO_L1_LOG_SIZE]]) -> B256 {
     }
 }
 
-/// Released-line batch output hash layouts, mirroring the native
-/// `PendingBatchInfo::public_input_hash` (zksync-os-server `batch_info.rs`,
-/// abi-packed):
-/// - **v30** (AtlasV1/V2): `(chain_id, first_ts, last_ts, da_scheme,
-///   da_commitment, n_l1_txs, priority_ops_hash, l2_to_l1_logs_root,
-///   upgrade_tx_hash, dependency_roots_rolling_hash)` — no layer-2 tx count,
-///   no settlement-layer chain id.
-/// - **v31** (AtlasV3): inserts `n_l2_txs` after `n_l1_txs` and appends
-///   `sl_chain_id`.
-/// The draft-0.4.0 chain_id-less layout returns at the AtlasV4 bump.
+/// The batch-output preimage layout a spec commits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BatchOutputLayout {
+    /// AtlasV1 and AtlasV2 (protocol v30): `(chain_id, first_ts, last_ts,
+    /// da_scheme, da_commitment, n_l1_txs, priority_ops_hash,
+    /// l2_to_l1_logs_root, upgrade_tx_hash, interop_roots_rolling_hash)`.
+    V30,
+    /// AtlasV3 (protocol v31): inserts `n_l2_txs` after `n_l1_txs` and appends
+    /// `sl_chain_id`.
+    V31,
+    /// AtlasV4: the AtlasV3 field list without the leading `chain_id` word. The
+    /// chain identity moves up into `chain_config_hash` in the top-level batch
+    /// public input.
+    AtlasV4,
+}
+
+/// Batch output hash, mirroring the native `BatchOutput::hash`
+/// (basic_bootloader `.../zk/post_tx_op/public_input.rs`, abi-packed) of the
+/// spec that executed the batch. See [`BatchOutputLayout`] for the field lists.
 #[allow(clippy::too_many_arguments)]
 pub fn batch_output_hash_native(
-    v31_layout: bool,
+    layout: BatchOutputLayout,
     chain_id: u64,
     first_block_timestamp: u64,
     last_block_timestamp: u64,
@@ -137,10 +146,13 @@ pub fn batch_output_hash_native(
     interop_roots_rolling_hash: &B256,
     settlement_layer_chain_id: u64,
 ) -> B256 {
+    let v31_tail = layout != BatchOutputLayout::V30;
     let mut data = Vec::with_capacity(336);
-    // chain_id as U256 BE
-    data.extend_from_slice(&[0u8; 24]);
-    data.extend_from_slice(&chain_id.to_be_bytes());
+    if layout != BatchOutputLayout::AtlasV4 {
+        // chain_id as U256 BE
+        data.extend_from_slice(&[0u8; 24]);
+        data.extend_from_slice(&chain_id.to_be_bytes());
+    }
     data.extend_from_slice(&first_block_timestamp.to_be_bytes());
     data.extend_from_slice(&last_block_timestamp.to_be_bytes());
     data.extend_from_slice(&[0u8; 31]);
@@ -149,7 +161,7 @@ pub fn batch_output_hash_native(
     // number_of_layer_1_txs as U256 BE (24 zero bytes + u64 BE)
     data.extend_from_slice(&[0u8; 24]);
     data.extend_from_slice(&number_of_layer1_txs.to_be_bytes());
-    if v31_layout {
+    if v31_tail {
         // number_of_layer_2_txs as U256 BE
         data.extend_from_slice(&[0u8; 24]);
         data.extend_from_slice(&number_of_layer2_txs.to_be_bytes());
@@ -158,7 +170,7 @@ pub fn batch_output_hash_native(
     data.extend_from_slice(l2_to_l1_logs_root_hash.as_slice());
     data.extend_from_slice(upgrade_tx_hash.as_slice());
     data.extend_from_slice(interop_roots_rolling_hash.as_slice());
-    if v31_layout {
+    if v31_tail {
         // settlement_layer_chain_id as U256 BE
         data.extend_from_slice(&[0u8; 24]);
         data.extend_from_slice(&settlement_layer_chain_id.to_be_bytes());
@@ -217,20 +229,30 @@ pub fn da_commitment_blobs(versioned_hashes: &[B256]) -> B256 {
     keccak256(&data)
 }
 
-/// Full batch public input hash, matching zksync-os draft-0.4.0
-/// `BatchPublicInput::hash` (basic_bootloader .../zk/post_tx_op/public_input.rs):
-/// Keccak256(state_before || state_after || chain_config_hash || batch_output_hash)
+/// Full batch public input hash, matching the native `BatchPublicInput::hash`
+/// (basic_bootloader .../zk/post_tx_op/public_input.rs) of the spec that
+/// executed the batch.
+///
+/// - AtlasV1 through AtlasV3 (`chain_config_hash = None`): three words,
+///   `keccak256(state_before ‖ state_after ‖ batch_output_hash)`.
+/// - AtlasV4 (`chain_config_hash = Some(..)`): four words, with the chain-config
+///   commitment as the third.
+///
+/// The caller passes the option so the layout choice stays a single explicit
+/// decision at the spec gate.
 pub fn batch_public_input_hash(
     state_before: &B256,
     state_after: &B256,
-    chain_config_hash: &B256,
+    chain_config_hash: Option<&B256>,
     batch_output_hash: &B256,
 ) -> B256 {
-    let mut data = [0u8; 128];
-    data[..32].copy_from_slice(state_before.as_slice());
-    data[32..64].copy_from_slice(state_after.as_slice());
-    data[64..96].copy_from_slice(chain_config_hash.as_slice());
-    data[96..128].copy_from_slice(batch_output_hash.as_slice());
+    let mut data = Vec::with_capacity(128);
+    data.extend_from_slice(state_before.as_slice());
+    data.extend_from_slice(state_after.as_slice());
+    if let Some(chain_config_hash) = chain_config_hash {
+        data.extend_from_slice(chain_config_hash.as_slice());
+    }
+    data.extend_from_slice(batch_output_hash.as_slice());
     keccak256(&data)
 }
 
@@ -245,6 +267,131 @@ mod tests {
                 .parse()
                 .unwrap();
         assert_eq!(priority_ops_rolling_hash(&[]), expected);
+    }
+
+    /// Native's own golden vector for the AtlasV4 batch output
+    /// (`.../zk/post_tx_op/public_input.rs`, `batch_output_hash_golden_vector`):
+    /// first timestamp 1, last timestamp 2, DA scheme
+    /// `BlobsAndPubdataKeccak256` (3), zero pubdata commitment, 3 layer-1 txs,
+    /// 4 layer-2 txs, zero priority hash, zero logs root, zero upgrade hash,
+    /// zero interop rolling hash and settlement-layer chain id 9. The chain id
+    /// is absent from the preimage, so any value must give the same hash.
+    #[test]
+    fn atlas_v4_batch_output_matches_the_native_golden_vector() {
+        let expected: B256 =
+            "0x1c24f398aa0701f9348912ecca748ba93bfb84bfe4f283c16514311419f4f658"
+                .parse()
+                .unwrap();
+        for chain_id in [0u64, 37, u64::MAX] {
+            assert_eq!(
+                batch_output_hash_native(
+                    BatchOutputLayout::AtlasV4,
+                    chain_id,
+                    1,
+                    2,
+                    3,
+                    &B256::ZERO,
+                    3,
+                    4,
+                    &B256::ZERO,
+                    &B256::ZERO,
+                    &B256::ZERO,
+                    &B256::ZERO,
+                    9,
+                ),
+                expected,
+            );
+        }
+    }
+
+    /// The three layouts are distinct, and the v30 and v31 preimages keep the
+    /// chain-id prefix. The lengths pin the field counts: v30 is 336 bytes, v31
+    /// adds the layer-2 count and the settlement chain id, and AtlasV4 is v31
+    /// without the chain-id word.
+    #[test]
+    fn batch_output_layouts_are_distinct() {
+        let hash = |layout| {
+            batch_output_hash_native(
+                layout,
+                37,
+                1,
+                2,
+                3,
+                &B256::ZERO,
+                3,
+                4,
+                &B256::ZERO,
+                &B256::ZERO,
+                &B256::ZERO,
+                &B256::ZERO,
+                9,
+            )
+        };
+        let v30 = hash(BatchOutputLayout::V30);
+        let v31 = hash(BatchOutputLayout::V31);
+        let v4 = hash(BatchOutputLayout::AtlasV4);
+        assert_ne!(v30, v31);
+        assert_ne!(v31, v4);
+        assert_ne!(v30, v4);
+
+        // The chain id reaches the v30 and v31 preimages and no other field
+        // moves, so a different chain id must move both hashes.
+        let other = |layout| {
+            batch_output_hash_native(
+                layout,
+                38,
+                1,
+                2,
+                3,
+                &B256::ZERO,
+                3,
+                4,
+                &B256::ZERO,
+                &B256::ZERO,
+                &B256::ZERO,
+                &B256::ZERO,
+                9,
+            )
+        };
+        assert_ne!(v30, other(BatchOutputLayout::V30));
+        assert_ne!(v31, other(BatchOutputLayout::V31));
+    }
+
+    /// The two public-input layouts are the plain concatenations native hashes,
+    /// and they differ. AtlasV1 through AtlasV3 hash three words; AtlasV4 adds
+    /// the chain-config commitment as the third of four.
+    #[test]
+    fn public_input_layouts_are_three_and_four_words() {
+        let state_before = B256::repeat_byte(0x11);
+        let state_after = B256::repeat_byte(0x22);
+        let chain_config = B256::repeat_byte(0x33);
+        let batch_output = B256::repeat_byte(0x44);
+
+        let mut three = Vec::new();
+        three.extend_from_slice(state_before.as_slice());
+        three.extend_from_slice(state_after.as_slice());
+        three.extend_from_slice(batch_output.as_slice());
+        assert_eq!(
+            batch_public_input_hash(&state_before, &state_after, None, &batch_output),
+            keccak256(&three),
+        );
+
+        let mut four = Vec::new();
+        four.extend_from_slice(state_before.as_slice());
+        four.extend_from_slice(state_after.as_slice());
+        four.extend_from_slice(chain_config.as_slice());
+        four.extend_from_slice(batch_output.as_slice());
+        assert_eq!(
+            batch_public_input_hash(
+                &state_before,
+                &state_after,
+                Some(&chain_config),
+                &batch_output,
+            ),
+            keccak256(&four),
+        );
+
+        assert_ne!(keccak256(&three), keccak256(&four));
     }
 
     #[test]
