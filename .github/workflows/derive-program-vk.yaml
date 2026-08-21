@@ -1,0 +1,191 @@
+name: Derive guest programVK
+
+# Derives the guest programVK (ROM merkle root) on a proving-key-capable
+# runner and opens a draft PR updating guest/GUEST_PROGRAM_VK when the value
+# rotated. The aggregator ELF acts as a calibration gate: its unchanged VK
+# must reproduce the recorded value, which proves both that the toolchain
+# carries no drift and that the extraction is parsed correctly — before the
+# guest value is trusted.
+#
+# TESTING TRIGGER: pull_request while this workflow is being developed —
+# workflow_dispatch cannot target a workflow that is not on main yet.
+# Switch to workflow_dispatch before merging to main.
+on:
+  pull_request:
+    paths:
+      - .github/workflows/derive-program-vk.yaml
+      - .github/scripts/derive-vk.sh
+
+concurrency:
+  group: derive-program-vk-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pushing the rotation branch and opening the PR use the org bot token, so
+# the default token stays read-only.
+permissions:
+  contents: read
+
+env:
+  ZISK_VERSION: "0.18.0"
+
+jobs:
+  derive:
+    name: derive on a proving-key runner
+    runs-on: matterlabs-ci-runner-high-performance
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      # Both scripts fail on a hash mismatch against the recorded
+      # GUEST_ELF_SHA256, so a VK can never be derived for the wrong binary.
+      - name: rebuild both guest ELFs and verify the recorded hashes
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
+
+      # ziskup installs cargo-zisk and downloads the STARK proving key
+      # (~26 GB) to ~/.zisk/provingKey. CPU variant: program-setup needs the
+      # key, not a GPU. The toolchain version is pinned; the calibration gate
+      # below catches any residual distribution drift.
+      - name: install ZiSK toolchain and the STARK proving key
+        run: |
+          curl -sSfL "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/install.sh" -o /tmp/ziskup-install.sh
+          bash /tmp/ziskup-install.sh -v "${ZISK_VERSION}" --provingkey --cpu -y
+          echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+
+      - name: calibration gate — the unchanged aggregator VK must reproduce
+        run: |
+          .github/scripts/derive-vk.sh out/zksync-os-zisk-guest-aggregator /tmp/vk-aggregator
+          derived="$(cat /tmp/vk-aggregator/vk.hex)"
+          recorded="$(grep -E '^0x[0-9a-f]{64}$' guest-aggregator/GUEST_PROGRAM_VK | head -1)"
+          echo "derived:  $derived"
+          echo "recorded: $recorded"
+          if [[ "$derived" != "$recorded" ]]; then
+            echo "ERROR: the aggregator programVK did not reproduce. Either the" >&2
+            echo "toolchain drifted from the one that produced the recorded pins," >&2
+            echo "or the extraction is wrong. Nothing derived in this run can be" >&2
+            echo "trusted." >&2
+            exit 1
+          fi
+
+      - name: derive the guest programVK
+        id: derive
+        run: |
+          .github/scripts/derive-vk.sh out/zksync-os-zisk-guest /tmp/vk-guest
+          {
+            echo "vk_hex=$(cat /tmp/vk-guest/vk.hex)"
+            echo "vk_limbs=$(cat /tmp/vk-guest/vk.limbs)"
+            echo "elf_sha=$(cut -d' ' -f1 < guest/GUEST_ELF_SHA256)"
+            echo "recorded_hex=$(grep -E '^0x[0-9a-f]{64}$' guest/GUEST_PROGRAM_VK | head -1)"
+            echo "cargo_zisk_version=$(cargo-zisk --version | head -1)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: write the job summary
+        run: |
+          {
+            echo "## Guest programVK derivation"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| guest ELF sha256 | \`${{ steps.derive.outputs.elf_sha }}\` |"
+            echo "| derived programVK | \`${{ steps.derive.outputs.vk_hex }}\` |"
+            echo "| root hash limbs | \`[${{ steps.derive.outputs.vk_limbs }}]\` |"
+            echo "| recorded programVK | \`${{ steps.derive.outputs.recorded_hex }}\` |"
+            echo "| toolchain | \`${{ steps.derive.outputs.cargo_zisk_version }}\` |"
+            echo ""
+            echo "Calibration: the aggregator programVK reproduced its recorded value."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: upload the program-setup logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: program-setup-logs
+          path: |
+            /tmp/vk-aggregator/program-setup.log
+            /tmp/vk-guest/program-setup.log
+
+      - name: stop if the recorded value is already current
+        id: rotation
+        run: |
+          if [[ "${{ steps.derive.outputs.vk_hex }}" == "${{ steps.derive.outputs.recorded_hex }}" ]]; then
+            echo "No rotation needed: guest/GUEST_PROGRAM_VK already records the derived value."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: rewrite guest/GUEST_PROGRAM_VK
+        if: steps.rotation.outputs.needed == 'true'
+        run: |
+          vk_hex="${{ steps.derive.outputs.vk_hex }}"
+          limbs="${{ steps.derive.outputs.vk_limbs }}"
+          elf_sha="${{ steps.derive.outputs.elf_sha }}"
+          previous="${{ steps.derive.outputs.recorded_hex }}"
+          today="$(date -u +%F)"
+          limbs_first="$(echo "$limbs" | cut -d',' -f1-2 | sed 's/^ *//')"
+          limbs_second="$(echo "$limbs" | cut -d',' -f3-4 | sed 's/^ *//')"
+          cat > guest/GUEST_PROGRAM_VK <<VKEOF
+          # programVK (ZiSK ROM merkle root) of the reproducible guest ELF.
+          # The value covers the ROM image only, so two ELFs that differ outside the
+          # ROM image share it.
+          # Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
+          # identical to the prover daemon's public-values prefix and the server's
+          # \`prover_api.zisk_vks[].program_vk\` expectation.
+          #
+          # Derived with cargo-zisk ${ZISK_VERSION} on ${today} by the
+          # derive-program-vk workflow (run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+          # from the container ELF with sha256
+          # ${elf_sha}:
+          #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+          #
+          # The same run re-derived the aggregator programVK from its unchanged ELF and
+          # reproduced the recorded value, which shows the setup carries no toolchain
+          # drift.
+          #
+          # Root hash limbs: [${limbs_first},
+          #                   ${limbs_second}]
+          ${vk_hex}
+
+          # History: ${previous}
+          # (retired ${today} by this rotation).
+          VKEOF
+          git diff --stat guest/GUEST_PROGRAM_VK
+
+      - name: open a draft PR with the rotation
+        if: steps.rotation.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE }}
+        run: |
+          elf_prefix="$(echo "${{ steps.derive.outputs.elf_sha }}" | cut -c1-12)"
+          branch="derive-program-vk/${elf_prefix}"
+          git config user.name "zksync-admin-bot"
+          git config user.email "zksync-admin-bot@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add guest/GUEST_PROGRAM_VK
+          git commit -m "chore(guest): record the programVK for ELF ${elf_prefix}
+
+          Derived by the derive-program-vk workflow on a proving-key runner.
+          The aggregator programVK reproduced its recorded value in the same
+          run, so the toolchain carries no drift."
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}" "$branch"
+          gh pr create --draft --head "$branch" --base main \
+            --title "chore(guest): record the programVK for ELF ${elf_prefix}" \
+            --body "$(cat <<PREOF
+          Automated programVK rotation, derived on \`matterlabs-ci-runner-high-performance\` by the derive-program-vk workflow ([run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})).
+
+          | | |
+          |---|---|
+          | guest ELF sha256 | \`${{ steps.derive.outputs.elf_sha }}\` |
+          | derived programVK | \`${{ steps.derive.outputs.vk_hex }}\` |
+          | root hash limbs | \`[${{ steps.derive.outputs.vk_limbs }}]\` |
+          | replaces | \`${{ steps.derive.outputs.recorded_hex }}\` |
+          | toolchain | \`${{ steps.derive.outputs.cargo_zisk_version }}\` |
+
+          Calibration: the aggregator programVK reproduced its recorded value in the same run.
+
+          Downstream (do not merge in isolation — the tripwires refuse mixed generations): the server \`prover_api.zisk_vks\` entry for 0.31.0, the \`ZISK_PROGRAM_VK\` CI variable, and \`inner_program_vk\` in era-contracts \`tools/verifier-gen/data/ZiSK_vk.json\` all take this value.
+          PREOF
+          )" || {
+            echo "PR creation failed (a PR for this branch may already exist); the value is in the job summary." >&2
+            gh pr list --head "$branch" --state open || true
+          }
