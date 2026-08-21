@@ -12,9 +12,13 @@
 //! - `multichain_root` ← MessageRoot (`0x10005`) slot `0x04` (aggregation-tree
 //!   height) then `nodes[height][0]`. Read at POST-batch state
 //!   (`tree_root_after`); nonzero only when this chain is a settlement layer.
+//! - the interop commitment tree root ← L2InteropCommitmentTree (`0x10012`)
+//!   slot 0 (tree height) then `_nodes[height][0]`. Read TWICE, at the
+//!   PRE-batch state and at the POST-batch state, because the chain batch root
+//!   carries both snapshots as leaves.
 //!
 //! The guest's `ProvenDB` only serves slots the server proved during ordinary
-//! execution, so the server supplies these three slot proofs explicitly
+//! execution, so the server supplies these slot proofs explicitly
 //! (`types::InteropSlotProofs`). This module reproduces the native reads against
 //! them and hands the results back to the commitment path, which uses the
 //! derived values in place of the untrusted `BatchMeta` scalars. A proof whose
@@ -22,14 +26,15 @@
 //! so a forged scalar cannot survive.
 //!
 //! Slot-derivation reference: `read_multichain_root` /
-//! `calculate_multichain_root_slot` (native) and the server mirror
+//! `calculate_multichain_root_slot` and `read_interop_commitment_tree_root` /
+//! `calculate_imt_root_slot` (native), and the server mirror
 //! `lib/storage_api/src/read_multichain_root.rs`.
 
 use revm::primitives::{B256, U256};
 
 use crate::hash::keccak256;
 use crate::merkle::{self, StorageProof};
-use crate::types::InteropSlotProofs;
+use crate::types::{InteropCommitmentTreeProofs, InteropSlotProofs};
 
 /// SystemContext, address `0x800b`.
 const SYSTEM_CONTEXT_ADDRESS: [u8; 20] = [
@@ -41,6 +46,12 @@ const SYSTEM_CONTEXT_ADDRESS: [u8; 20] = [
 const MESSAGE_ROOT_ADDRESS: [u8; 20] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x01, 0x00, 0x05,
+];
+
+/// L2InteropCommitmentTree, address `0x10012`.
+const INTEROP_COMMITMENT_TREE_ADDRESS: [u8; 20] = [
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x01, 0x00, 0x12,
 ];
 
 /// Verify one interop slot proof recovers `expected_root` for `flat_key`, and
@@ -86,36 +97,125 @@ pub(super) fn derive_sl_chain_id(proof: &StorageProof, tree_root_after: &B256) -
 /// settlement layer has these slots absent (`NonExisting`) ⇒ 0.
 pub(super) fn derive_multichain_root(proofs: &InteropSlotProofs, tree_root_after: &B256) -> B256 {
     const AGG_TREE_HEIGHT_SLOT: B256 = B256::with_last_byte(0x04);
+    const AGG_TREE_NODES_SLOT: u8 = 0x06;
 
-    let height_key = merkle::derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &AGG_TREE_HEIGHT_SLOT);
-    let height = verify_slot(
+    derive_merkle_engine_root(
+        &MESSAGE_ROOT_ADDRESS,
+        &AGG_TREE_HEIGHT_SLOT,
+        AGG_TREE_NODES_SLOT,
         &proofs.multichain_height,
-        &height_key,
+        &proofs.multichain_root,
         tree_root_after,
-        "multichain height",
+        "multichain",
+    )
+}
+
+/// The interop batch scalars the guest derives from authenticated slot proofs,
+/// in place of the untrusted `BatchMeta` witness values.
+pub(super) struct DerivedInteropValues {
+    /// Commitment to the L2→L1 logs of the chains that settle on this one.
+    pub multichain_root: B256,
+    /// The chain this one settles on.
+    pub sl_chain_id: u64,
+    /// The interop commitment tree root at both batch boundaries. `None` for a
+    /// spec whose chain batch root carries neither root.
+    pub commitment_tree_roots: Option<InteropCommitmentTreeRoots>,
+}
+
+/// The interop commitment tree root at the two batch boundaries.
+pub(super) struct InteropCommitmentTreeRoots {
+    /// The root before the batch's first block ran.
+    pub begin: B256,
+    /// The root after the batch's last block ran.
+    pub end: B256,
+}
+
+/// Reproduce native `read_interop_commitment_tree_root` at both batch
+/// boundaries: read the tree height (L2InteropCommitmentTree `0x10012` slot 0),
+/// derive `_nodes[height][0]` from the `_nodes` base slot 2, and read it.
+///
+/// The begin root is authenticated against the PRE-batch tree root and the end
+/// root against the POST-batch tree root, which is where native takes the two
+/// snapshots (`block_flow/zk/pre_tx_loop` before the first block's first
+/// transaction, and the post-transaction operation after the last block).
+/// Native's begin read precedes the EIP-2935 pre-block write, and that write
+/// only touches the history contract, so the pre-batch state is the exact
+/// anchor. A chain with no commitment tree deployed has both slots absent
+/// (`NonExisting`) ⇒ root 0.
+pub(super) fn derive_interop_commitment_tree_roots(
+    proofs: &InteropCommitmentTreeProofs,
+    tree_root_before: &B256,
+    tree_root_after: &B256,
+) -> InteropCommitmentTreeRoots {
+    const COMMITMENT_TREE_HEIGHT_SLOT: B256 = B256::ZERO;
+    const COMMITMENT_TREE_NODES_SLOT: u8 = 0x02;
+
+    let read_at = |height_proof, root_proof, anchor, what| {
+        derive_merkle_engine_root(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            &COMMITMENT_TREE_HEIGHT_SLOT,
+            COMMITMENT_TREE_NODES_SLOT,
+            height_proof,
+            root_proof,
+            anchor,
+            what,
+        )
+    };
+    InteropCommitmentTreeRoots {
+        begin: read_at(
+            &proofs.height_begin,
+            &proofs.root_begin,
+            tree_root_before,
+            "commitment tree begin",
+        ),
+        end: read_at(
+            &proofs.height_end,
+            &proofs.root_end,
+            tree_root_after,
+            "commitment tree end",
+        ),
+    }
+}
+
+/// Read the root of a solidity `FullMerkle` engine held in `address`: take the
+/// tree height from `height_slot`, derive `_nodes[height][0]` from
+/// `nodes_base_slot`, and read that. Both reads are authenticated against
+/// `anchor_root`, and an absent slot reads as zero.
+#[allow(clippy::too_many_arguments)]
+fn derive_merkle_engine_root(
+    address: &[u8; 20],
+    height_slot: &B256,
+    nodes_base_slot: u8,
+    height_proof: &StorageProof,
+    root_proof: &StorageProof,
+    anchor_root: &B256,
+    what: &str,
+) -> B256 {
+    let height_key = merkle::derive_flat_storage_key(address, height_slot);
+    let height = verify_slot(
+        height_proof,
+        &height_key,
+        anchor_root,
+        &format!("{what} height"),
     )
     .unwrap_or(B256::ZERO);
 
-    let root_slot = calculate_multichain_root_slot(&height);
-    let root_key = merkle::derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &root_slot);
-    verify_slot(
-        &proofs.multichain_root,
-        &root_key,
-        tree_root_after,
-        "multichain root",
-    )
-    .unwrap_or(B256::ZERO)
+    let root_slot = nodes_root_slot(nodes_base_slot, &height);
+    let root_key = merkle::derive_flat_storage_key(address, &root_slot);
+    verify_slot(root_proof, &root_key, anchor_root, &format!("{what} root")).unwrap_or(B256::ZERO)
 }
 
-/// Storage slot of `nodes[height][0]` in MessageRoot (`0x10005`).
+/// Storage slot of `_nodes[height][0]` for a solidity `FullMerkle` engine whose
+/// `_nodes` dynamic array lives at `nodes_base_slot`.
 ///
-/// The `_nodes` dynamic array lives at contract slot 6; solidity addresses
-/// `_nodes[height][0]` as `keccak256( keccak256(6) + height )` (the inner index
-/// 0 adds nothing). This mirrors native `calculate_multichain_root_slot` and the
-/// server's `n_dim_array_key_in_layout(0x06, [height, 0])`.
-fn calculate_multichain_root_slot(height: &B256) -> B256 {
-    const AGG_TREE_NODES_SLOT: B256 = B256::with_last_byte(0x06);
-    let base = U256::from_be_bytes(keccak256(AGG_TREE_NODES_SLOT.as_slice()).0);
+/// Solidity addresses `_nodes[height][0]` as
+/// `keccak256( keccak256(nodes_base_slot) + height )` (the inner index 0 adds
+/// nothing). This mirrors native `calculate_multichain_root_slot` (base slot 6,
+/// MessageRoot) and `calculate_imt_root_slot` (base slot 2,
+/// L2InteropCommitmentTree), and the server's
+/// `n_dim_array_key_in_layout(base, [height, 0])`.
+fn nodes_root_slot(nodes_base_slot: u8, height: &B256) -> B256 {
+    let base = U256::from_be_bytes(keccak256(B256::with_last_byte(nodes_base_slot).as_slice()).0);
     let nodes_height_array_slot = base.wrapping_add(U256::from_be_bytes(height.0));
     keccak256(&nodes_height_array_slot.to_be_bytes::<32>())
 }
@@ -131,7 +231,7 @@ mod tests {
     /// server (`read_multichain_root::test_calculate_multichain_root_slot_*`).
     #[test]
     fn multichain_root_slot_matches_reference_vectors() {
-        let vec_for = |h: u8| calculate_multichain_root_slot(&B256::with_last_byte(h));
+        let vec_for = |h: u8| nodes_root_slot(0x06, &B256::with_last_byte(h));
         assert_eq!(
             vec_for(1),
             "0x768c3a22b1e4688c94525eb9bc2cf1ce7601fc9e871dc6e10fc44f0f06340ce1"
@@ -256,7 +356,16 @@ mod tests {
         merkle::derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &B256::with_last_byte(0x04))
     }
     fn root_key_for(height: &B256) -> B256 {
-        merkle::derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &calculate_multichain_root_slot(height))
+        merkle::derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &nodes_root_slot(0x06, height))
+    }
+    fn imt_height_key() -> B256 {
+        merkle::derive_flat_storage_key(&INTEROP_COMMITMENT_TREE_ADDRESS, &B256::ZERO)
+    }
+    fn imt_root_key_for(height: &B256) -> B256 {
+        merkle::derive_flat_storage_key(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            &nodes_root_slot(0x02, height),
+        )
     }
 
     /// `sl_chain_id` reads the value stored at `0x800b` slot 0.
@@ -293,6 +402,7 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: non_existing(&leaves, &sib, &height_key()),
             multichain_root: non_existing(&leaves, &sib, &root_key_for(&B256::ZERO)),
+            commitment_tree: None,
         };
         assert_eq!(derive_multichain_root(&proofs, &root), B256::ZERO);
     }
@@ -310,6 +420,7 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: existing(&leaves, &sib, &hkey),
             multichain_root: existing(&leaves, &sib, &rkey),
+            commitment_tree: None,
         };
         assert_eq!(derive_multichain_root(&proofs, &root), agg_root);
     }
@@ -330,7 +441,104 @@ mod tests {
             sl_chain_id: non_existing(&leaves, &sib, &sl_key()),
             multichain_height: existing(&leaves, &sib, &hkey),
             multichain_root: forged_root,
+            commitment_tree: None,
         };
         assert!(std::panic::catch_unwind(|| derive_multichain_root(&proofs, &root)).is_err());
+    }
+
+    /// The interop commitment tree root slot must match the vectors native pins
+    /// against the solidity storage-layout lock test
+    /// (`.../post_tx_op::test_calculate_imt_root_slot_tree_height_*`).
+    #[test]
+    fn interop_commitment_tree_root_slot_matches_reference_vectors() {
+        assert_eq!(
+            nodes_root_slot(0x02, &B256::ZERO),
+            "0x1ab0c6948a275349ae45a06aad66a8bd65ac18074615d53676c09b67809099e0"
+                .parse::<B256>()
+                .unwrap()
+        );
+        assert_eq!(
+            nodes_root_slot(0x02, &B256::with_last_byte(4)),
+            "0xcc034019b449ad16908580172ec972745a229ec6575a8d785eaa22043f92c453"
+                .parse::<B256>()
+                .unwrap()
+        );
+    }
+
+    /// A chain with no commitment tree deployed has both `0x10012` slots absent
+    /// at both boundaries ⇒ both roots read as zero.
+    #[test]
+    fn interop_commitment_tree_roots_zero_when_not_deployed() {
+        let filler = B256::repeat_byte(0x11);
+        let (root, leaves, sib) = build_tree(&[(filler, B256::repeat_byte(0x22))]);
+        let proofs = InteropCommitmentTreeProofs {
+            height_begin: non_existing(&leaves, &sib, &imt_height_key()),
+            root_begin: non_existing(&leaves, &sib, &imt_root_key_for(&B256::ZERO)),
+            height_end: non_existing(&leaves, &sib, &imt_height_key()),
+            root_end: non_existing(&leaves, &sib, &imt_root_key_for(&B256::ZERO)),
+        };
+        let roots = derive_interop_commitment_tree_roots(&proofs, &root, &root);
+        assert_eq!(roots.begin, B256::ZERO);
+        assert_eq!(roots.end, B256::ZERO);
+    }
+
+    /// The begin root is read at the PRE-batch state and the end root at the
+    /// POST-batch state, so a batch that inserted a leaf reports two different
+    /// values. Anchoring both at one state would silently commit the same root
+    /// twice.
+    #[test]
+    fn interop_commitment_tree_roots_read_at_their_own_anchors() {
+        let hkey = imt_height_key();
+        let height_begin = B256::with_last_byte(2);
+        let height_end = B256::with_last_byte(3);
+        let root_begin_value = B256::repeat_byte(0xa1);
+        let root_end_value = B256::repeat_byte(0xb2);
+
+        let (root_before, before_leaves, before_sib) = build_tree(&[
+            (hkey, height_begin),
+            (imt_root_key_for(&height_begin), root_begin_value),
+        ]);
+        let (root_after, after_leaves, after_sib) = build_tree(&[
+            (hkey, height_end),
+            (imt_root_key_for(&height_end), root_end_value),
+        ]);
+
+        let proofs = InteropCommitmentTreeProofs {
+            height_begin: existing(&before_leaves, &before_sib, &hkey),
+            root_begin: existing(
+                &before_leaves,
+                &before_sib,
+                &imt_root_key_for(&height_begin),
+            ),
+            height_end: existing(&after_leaves, &after_sib, &hkey),
+            root_end: existing(&after_leaves, &after_sib, &imt_root_key_for(&height_end)),
+        };
+        let roots = derive_interop_commitment_tree_roots(&proofs, &root_before, &root_after);
+        assert_eq!(roots.begin, root_begin_value);
+        assert_eq!(roots.end, root_end_value);
+    }
+
+    /// A forged commitment tree root (proof value inconsistent with the pinned
+    /// state root) is rejected.
+    #[test]
+    fn interop_commitment_tree_root_forgery_rejected() {
+        let hkey = imt_height_key();
+        let height = B256::with_last_byte(2);
+        let rkey = imt_root_key_for(&height);
+        let (root, leaves, sib) = build_tree(&[(hkey, height), (rkey, B256::repeat_byte(0xa1))]);
+        let mut forged = existing(&leaves, &sib, &rkey);
+        if let StorageProof::Existing(e) = &mut forged {
+            e.value = B256::repeat_byte(0xff); // claim a different tree root
+        }
+        let proofs = InteropCommitmentTreeProofs {
+            height_begin: existing(&leaves, &sib, &hkey),
+            root_begin: forged,
+            height_end: existing(&leaves, &sib, &hkey),
+            root_end: existing(&leaves, &sib, &rkey),
+        };
+        assert!(std::panic::catch_unwind(|| derive_interop_commitment_tree_roots(
+            &proofs, &root, &root
+        ))
+        .is_err());
     }
 }

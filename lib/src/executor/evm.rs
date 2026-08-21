@@ -9,12 +9,33 @@ use revm::database::CacheDB;
 use revm::primitives::{B256, U256};
 use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm};
 use revm::primitives::Address;
-use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext, ZkSpecId};
+use zksync_os_revm::{zk_context, ZkBuilder, ZkSpecId};
 
+use super::eip2935;
 use crate::block_header;
+use crate::block_roots;
 use crate::types::*;
 use super::proven_db::ProvenDB;
+use super::system_hooks;
 use super::tx::build_proven_tx;
+
+/// EIP-4844 blob transactions. Native's transaction dispatch compiles the
+/// type-3 arm only under a cargo feature no shipped build enables, so every
+/// released binary rejects the encoding.
+const BLOB_TX_TYPE: u8 = 3;
+
+/// What one block's execution produced.
+struct BlockExecution {
+    tx_results: Vec<TxOutput>,
+    /// Transaction hashes in execution order: the transaction-tree leaves, and
+    /// the terms of the rolling hash on a spec that uses one.
+    tx_hashes: Vec<B256>,
+    /// Receipt leaves in execution order. Empty on a spec whose block header
+    /// carries no receipts root.
+    receipt_leaves: Vec<B256>,
+    l2_to_l1_logs: Vec<L2ToL1LogEntry>,
+    state_effects: BlockStateEffects,
+}
 
 /// The state effects of one block that batch-level write-map verification needs.
 pub(super) struct BlockStateEffects {
@@ -35,24 +56,8 @@ pub(super) fn execute_block_proven(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<ProvenDB>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) -> (BlockResult, BlockStateEffects) {
-    let (tx_results, tx_hashes, computed_l2_to_l1_logs, state_effects) =
-        run_evm_block(chain_id, spec_id, block, cache_db, max_tx_gas_limit);
-
-    let total_gas_used: u64 = tx_results.iter().map(|t| t.gas_used).sum();
-    // Native commits transactions as a keccak rolling hash over the tx hashes
-    // and keeps receipts_root zero in the header. The seed changed with the
-    // zksync-os v0.3.x line: zero before AtlasV3, keccak256([]) from AtlasV3.
-    let rolling_hash_seed = if ZkSpecId::AtlasV3.is_enabled_in(spec_id) {
-        block_header::KECCAK_EMPTY
-    } else {
-        B256::ZERO
-    };
-    let tx_root = block_header::transactions_rolling_hash(&tx_hashes, rolling_hash_seed);
-    let receipts_root = B256::ZERO;
-
-
     // Parent hash = the previous block's hash, taken from the AUTHENTICATED
     // block-hash map, never from the unauthenticated witness `block.block_hashes`.
     //
@@ -76,6 +81,40 @@ pub(super) fn execute_block_proven(
         B256::ZERO
     };
 
+    // AtlasV4 runs the EIP-2935 pre-block write before the block's first
+    // transaction. It contributes one storage change to the batch write set, so
+    // it precedes the execution writes in the last-value merge.
+    let eip2935_write = if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        eip2935::apply_pre_block_write(block.number, &parent_hash, cache_db)
+    } else {
+        None
+    };
+
+    let exec = run_evm_block(chain_id, spec_id, block, cache_db, max_tx_gas_limit);
+
+    let total_gas_used: u64 = exec.tx_results.iter().map(|t| t.gas_used).sum();
+    // AtlasV4 carries a real `transactions_root` and a real `receipts_root`,
+    // each a depth-32 Blake2s Merkle root over the block's leaves. Before it,
+    // native commits transactions as a keccak rolling hash over the tx hashes
+    // and keeps `receipts_root` zero. The rolling-hash seed changed with the
+    // zksync-os v0.3.x line: zero before AtlasV3, keccak256([]) from AtlasV3.
+    let (tx_root, receipts_root) = if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        (
+            block_roots::block_tx_tree_root(&exec.tx_hashes),
+            block_roots::block_tx_tree_root(&exec.receipt_leaves),
+        )
+    } else {
+        let rolling_hash_seed = if ZkSpecId::AtlasV3.is_enabled_in(spec_id) {
+            block_header::KECCAK_EMPTY
+        } else {
+            B256::ZERO
+        };
+        (
+            block_header::transactions_rolling_hash(&exec.tx_hashes, rolling_hash_seed),
+            B256::ZERO,
+        )
+    };
+
 
     let computed_header_hash = block_header::compute_block_header_hash(
         &parent_hash,
@@ -90,6 +129,21 @@ pub(super) fn execute_block_proven(
         block.base_fee,
     );
 
+    // The sealed header hash is mandatory at AtlasV4. The leaf set of the two
+    // Merkle roots is the set of transactions the witness lists, and the guest
+    // models none of native's block limits, so it cannot reproduce native's own
+    // decision to drop a transaction that pushes a block past one. Comparing the
+    // computed header hash against the sealed one is what ties the leaf set to
+    // the block native sealed. This does not make the leaf set sound on its own:
+    // it makes it consistent with a witness-supplied header hash. An optional
+    // check would let an operator send a zero hash and skip it.
+    assert!(
+        !ZkSpecId::AtlasV4.is_enabled_in(spec_id) || !block.block_header_hash.is_zero(),
+        "AtlasV4 block {} must carry the sealed block_header_hash: it is the only \
+         check that ties the transaction and receipt tree leaves to the block \
+         native sealed",
+        block.number,
+    );
     // If a block_header_hash was provided in input, verify it matches our computation
     if !block.block_header_hash.is_zero() {
         assert_eq!(
@@ -109,11 +163,23 @@ pub(super) fn execute_block_proven(
         BlockResult {
             block_number: block.number,
             computed_block_header_hash: computed_header_hash,
-            tx_results,
-            l2_to_l1_logs: computed_l2_to_l1_logs,
+            tx_results: exec.tx_results,
+            l2_to_l1_logs: exec.l2_to_l1_logs,
         },
-        state_effects,
+        merge_pre_block_write(eip2935_write, exec.state_effects),
     )
+}
+
+/// Put the pre-block write ahead of the block's execution writes, so a
+/// transaction that writes the same slot wins the batch-level last-value merge.
+fn merge_pre_block_write(
+    pre_block_write: Option<((Address, U256), U256)>,
+    mut state_effects: BlockStateEffects,
+) -> BlockStateEffects {
+    if let Some(write) = pre_block_write {
+        state_effects.storage_writes.insert(0, write);
+    }
+    state_effects
 }
 
 /// Execute a block's transactions in the EVM and return tx results + L2→L1 logs.
@@ -123,16 +189,25 @@ fn run_evm_block<DB: DatabaseRef>(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut CacheDB<DB>,
-    max_tx_gas_limit: u64,
-) -> (Vec<TxOutput>, Vec<B256>, Vec<L2ToL1LogEntry>, BlockStateEffects)
+    max_tx_gas_limit: Option<u64>,
+) -> BlockExecution
 where
     DB::Error: core::fmt::Debug,
 {
-    let mut evm = <ZkContext<_>>::default()
-        .with_db(cache_db)
+    let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
+            // Native applies the EIP-7825 per-transaction gas cap in the L2
+            // validation path alone, and its value is
+            // `min(block_gas_limit, chain_config.max_tx_gas_limit)`, which a
+            // chain admin may raise above Ethereum's 2^24. L1, upgrade and
+            // system transactions take paths that apply no cap at all. REVM's
+            // Osaka default would instead cap every transaction at 2^24, which
+            // rejects an upgrade transaction native accepts and rejects an L2
+            // transaction on a chain that raised its configured cap.
+            // `build_proven_tx` applies native's rule.
+            cfg.tx_gas_limit_cap = Some(u64::MAX);
         })
         .modify_block_chained(|blk| {
             blk.number = U256::from(block.number);
@@ -142,10 +217,21 @@ where
             blk.gas_limit = block.gas_limit;
             blk.prevrandao = Some(block.prev_randao);
         })
-        .build_zk();
+        .build_zk()
+        .with_precompiles(system_hooks::ZKsyncOsPrecompiles::new_with_spec(spec_id));
 
+    // AtlasV4 is the first spec whose block header carries a receipts root, so
+    // it is the only one that builds receipt leaves. It is also the first spec
+    // this guest supports whose EVM version admits blob transactions, which
+    // native rejects.
+    let is_atlas_v4 = ZkSpecId::AtlasV4.is_enabled_in(spec_id);
     let mut tx_results = Vec::with_capacity(block.transactions.len());
     let mut tx_hashes = Vec::with_capacity(block.transactions.len());
+    let mut receipt_leaves =
+        Vec::with_capacity(if is_atlas_v4 { block.transactions.len() } else { 0 });
+    // The block's running gas total. Each receipt leaf commits the value the
+    // block reaches with its own transaction included.
+    let mut cumulative_gas_used: u64 = 0;
     let mut l2_to_l1_logs = Vec::new();
     // Per-block write tracking: (first value seen when a slot was first
     // changed in this block, last value it was changed to). The write SET
@@ -159,9 +245,14 @@ where
     let mut deployed_accounts: HashSet<Address> = HashSet::new();
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
-        evm.0.ctx.chain.set_tx_number(tx_idx as u16);
+        evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
 
-        let (tx, tx_hash, _tx_type) = build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
+        let (tx, tx_hash, tx_type) = build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
+        assert!(
+            !is_atlas_v4 || tx_type != BLOB_TX_TYPE,
+            "blob transactions are not enabled at AtlasV4: native's transaction \
+             dispatch rejects the type-{BLOB_TX_TYPE} encoding",
+        );
         tx_hashes.push(tx_hash);
 
         match evm.transact(tx) {
@@ -205,7 +296,7 @@ where
                 }
                 let result = result_and_state.result.clone();
                 evm.commit(result_and_state.state);
-                for log in evm.0.ctx.chain.take_logs() {
+                for log in evm.0.ctx.journaled_state.take_l2_to_l1_logs() {
                     l2_to_l1_logs.push(L2ToL1LogEntry {
                         l2_shard_id: log.l2_shard_id,
                         is_service: log.is_service,
@@ -214,6 +305,15 @@ where
                         key: log.key,
                         value: log.value,
                     });
+                }
+                cumulative_gas_used += result.tx_gas_used();
+                if is_atlas_v4 {
+                    receipt_leaves.push(block_roots::receipt_leaf(
+                        tx_type,
+                        result.is_success(),
+                        cumulative_gas_used,
+                        result.logs(),
+                    ));
                 }
                 tx_results.push(TxOutput {
                     success: result.is_success(),
@@ -231,10 +331,15 @@ where
         .map(|(key, (_, last))| (key, last))
         .collect();
 
-    (
+    BlockExecution {
         tx_results,
         tx_hashes,
+        receipt_leaves,
         l2_to_l1_logs,
-        BlockStateEffects { storage_writes, destroyed_accounts, deployed_accounts },
-    )
+        state_effects: BlockStateEffects {
+            storage_writes,
+            destroyed_accounts,
+            deployed_accounts,
+        },
+    }
 }

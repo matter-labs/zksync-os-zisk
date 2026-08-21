@@ -54,13 +54,13 @@ fn main() {
 }
 
 // `zksync-os-zisk-lib::crypto::CustomEvmCrypto` calls these C-ABI symbols on
-// the ZiSK target; they must exist for the ELF to link. Every hook the v31
-// EVM corpus exercises is wired to a real `ziskos::zisklib` backend below;
+// the ZiSK target; they must exist for the ELF to link. Every precompile an
+// active fork exposes is wired to a real `ziskos::zisklib` backend below;
 // the target-independent bodies live in `hooks`, where host-side unit tests
 // compare them bit-for-bit against REVM's `DefaultCrypto` reference.
-// Precompiles no v31 batch can invoke remain self-identifying panic-stubs:
-// a batch that hits one fails loudly under `ziskemu`, at which point the
-// stub gets a real implementation (as ecrecover and the hooks below did).
+// A symbol that no REVM precompile dispatches to stays a self-identifying
+// panic-stub: a batch that reaches one fails loudly under `ziskemu`, at
+// which point the stub gets a real implementation.
 // keccak256 is not stubbed — it routes through the tiny-keccak patch to the
 // native-keccak syscall.
 macro_rules! precompile_stub {
@@ -77,20 +77,10 @@ macro_rules! precompile_stub {
     };
 }
 
+// `secp256k1_ecdsa_verify_and_address_recover_c` covers a verify-and-recover
+// entry point that no REVM precompile reaches: ecrecover routes through
+// `secp256k1_ecdsa_address_recover_c` below.
 precompile_stub!(secp256k1_ecdsa_verify_and_address_recover_c(sig: *const u8, msg: *const u8, pk: *const u8, output: *mut u8) -> u8);
-// blake2b: unreachable at v31 per the 2026-07-10 EVM corpus run (ZKsync OS
-// does not enable the EIP-152 precompile).
-precompile_stub!(blake2b_compress_c(rounds: u32, h: *mut u64, m: *const u64, t: *const u64, f: u8));
-// KZG point evaluation: unreachable at v31 per the 2026-07-10 EVM corpus run.
-precompile_stub!(verify_kzg_proof_c(z: *const u8, y: *const u8, commitment: *const u8, proof: *const u8) -> bool);
-// bls12-381 (EIP-2537): unreachable at v31 per the 2026-07-10 EVM corpus run.
-precompile_stub!(bls12_381_g1_add_c(ret: *mut u8, a: *const u8, b: *const u8) -> u8);
-precompile_stub!(bls12_381_g1_msm_c(ret: *mut u8, pairs: *const u8, num_pairs: usize) -> u8);
-precompile_stub!(bls12_381_g2_add_c(ret: *mut u8, a: *const u8, b: *const u8) -> u8);
-precompile_stub!(bls12_381_g2_msm_c(ret: *mut u8, pairs: *const u8, num_pairs: usize) -> u8);
-precompile_stub!(bls12_381_pairing_check_c(pairs: *const u8, num_pairs: usize) -> u8);
-precompile_stub!(bls12_381_fp_to_g1_c(ret: *mut u8, fp: *const u8) -> u8);
-precompile_stub!(bls12_381_fp2_to_g2_c(ret: *mut u8, fp2: *const u8) -> u8);
 
 // ======================== wired crypto hooks ========================
 //
@@ -257,4 +247,135 @@ pub extern "C" fn secp256k1_ecdsa_address_recover_c(
     out[..12].fill(0);
     out[12..].copy_from_slice(&hash.as_slice()[12..]);
     0
+}
+
+/// BLAKE2b compression function F for the `blake2f` EVM precompile (0x09,
+/// EIP-152).
+///
+/// `h` points to the 8-word state (updated in place), `m` to the 16-word
+/// message block, `t` to the 2-word offset counter; `f` is the finalization
+/// flag (0 or 1). Backed by the ZiSK `blake2b_round` syscall via
+/// `zisklib::blake2b_compress`.
+#[no_mangle]
+pub extern "C" fn blake2b_compress_c(
+    rounds: u32,
+    h: *mut u64,
+    m: *const u64,
+    t: *const u64,
+    f: u8,
+) {
+    let h = unsafe { &mut *(h as *mut [u64; 8]) };
+    let m = unsafe { &*(m as *const [u64; 16]) };
+    let t = unsafe { &*(t as *const [u64; 2]) };
+    hooks::blake2b_compress(rounds, h, m, t, f != 0);
+}
+
+/// KZG point evaluation for the `pointEvaluation` precompile (0x0a,
+/// EIP-4844).
+///
+/// `z`/`y` point to 32-byte big-endian scalars, `commitment`/`proof` to
+/// 48-byte compressed G1 points. Returns true iff the proof holds. Backed by
+/// the bls12-381 pairing circuits via `zisklib::verify_kzg_proof`.
+#[no_mangle]
+pub extern "C" fn verify_kzg_proof_c(
+    z: *const u8,
+    y: *const u8,
+    commitment: *const u8,
+    proof: *const u8,
+) -> bool {
+    let z = unsafe { &*(z as *const [u8; 32]) };
+    let y = unsafe { &*(y as *const [u8; 32]) };
+    let commitment = unsafe { &*(commitment as *const [u8; 48]) };
+    let proof = unsafe { &*(proof as *const [u8; 48]) };
+    hooks::verify_kzg_proof(z, y, commitment, proof)
+}
+
+/// BLS12-381 G1 addition for the `BLS12_G1ADD` precompile (0x0b, EIP-2537).
+///
+/// `a`/`b` point to 96-byte big-endian affine points (x ‖ y, all zeros =
+/// infinity); `ret` receives the 96-byte sum. Returns 0 = success,
+/// 1 = success with infinity result (`ret` zeroed), 2 and above = validation
+/// error — the codes `impls.rs` maps to `PrecompileHalt`.
+#[no_mangle]
+pub extern "C" fn bls12_381_g1_add_c(ret: *mut u8, a: *const u8, b: *const u8) -> u8 {
+    let a = unsafe { &*(a as *const [u8; 96]) };
+    let b = unsafe { &*(b as *const [u8; 96]) };
+    let out = unsafe { &mut *(ret as *mut [u8; 96]) };
+    hooks::bls12_381_g1_add(a, b, out)
+}
+
+/// BLS12-381 G1 multi-scalar multiplication for the `BLS12_G1MSM` precompile
+/// (0x0c, EIP-2537).
+///
+/// `pairs` points to `num_pairs` × 128-byte elements (96-byte G1 point ‖
+/// 32-byte big-endian scalar); `ret` receives the 96-byte sum. Return codes
+/// match `bls12_381_g1_add_c`.
+#[no_mangle]
+pub extern "C" fn bls12_381_g1_msm_c(ret: *mut u8, pairs: *const u8, num_pairs: usize) -> u8 {
+    let pairs = unsafe { core::slice::from_raw_parts(pairs, num_pairs * 128) };
+    let out = unsafe { &mut *(ret as *mut [u8; 96]) };
+    hooks::bls12_381_g1_msm(pairs, out)
+}
+
+/// BLS12-381 G2 addition for the `BLS12_G2ADD` precompile (0x0d, EIP-2537).
+///
+/// `a`/`b` point to 192-byte big-endian affine points (x_c0 ‖ x_c1 ‖ y_c0 ‖
+/// y_c1, all zeros = infinity); `ret` receives the 192-byte sum. Return codes
+/// match `bls12_381_g1_add_c`.
+#[no_mangle]
+pub extern "C" fn bls12_381_g2_add_c(ret: *mut u8, a: *const u8, b: *const u8) -> u8 {
+    let a = unsafe { &*(a as *const [u8; 192]) };
+    let b = unsafe { &*(b as *const [u8; 192]) };
+    let out = unsafe { &mut *(ret as *mut [u8; 192]) };
+    hooks::bls12_381_g2_add(a, b, out)
+}
+
+/// BLS12-381 G2 multi-scalar multiplication for the `BLS12_G2MSM` precompile
+/// (0x0e, EIP-2537).
+///
+/// `pairs` points to `num_pairs` × 224-byte elements (192-byte G2 point ‖
+/// 32-byte big-endian scalar); `ret` receives the 192-byte sum. Return codes
+/// match `bls12_381_g1_add_c`.
+#[no_mangle]
+pub extern "C" fn bls12_381_g2_msm_c(ret: *mut u8, pairs: *const u8, num_pairs: usize) -> u8 {
+    let pairs = unsafe { core::slice::from_raw_parts(pairs, num_pairs * 224) };
+    let out = unsafe { &mut *(ret as *mut [u8; 192]) };
+    hooks::bls12_381_g2_msm(pairs, out)
+}
+
+/// BLS12-381 pairing check for the `BLS12_PAIRING_CHECK` precompile (0x0f,
+/// EIP-2537).
+///
+/// `pairs` points to `num_pairs` × 288-byte elements (96-byte G1 ‖ 192-byte
+/// G2). Returns 0 = product of pairings is one, 1 = it is not, 2 and above =
+/// validation error (see `impls.rs`).
+#[no_mangle]
+pub extern "C" fn bls12_381_pairing_check_c(pairs: *const u8, num_pairs: usize) -> u8 {
+    let pairs = unsafe { core::slice::from_raw_parts(pairs, num_pairs * 288) };
+    hooks::bls12_381_pairing_check(pairs)
+}
+
+/// BLS12-381 map-to-curve for the `BLS12_MAP_FP_TO_G1` precompile (0x10,
+/// EIP-2537).
+///
+/// `fp` points to a 48-byte big-endian field element; `ret` receives the
+/// 96-byte G1 point. Returns 0 = success, 1 = the input is not in the field.
+#[no_mangle]
+pub extern "C" fn bls12_381_fp_to_g1_c(ret: *mut u8, fp: *const u8) -> u8 {
+    let fp = unsafe { &*(fp as *const [u8; 48]) };
+    let out = unsafe { &mut *(ret as *mut [u8; 96]) };
+    hooks::bls12_381_fp_to_g1(fp, out)
+}
+
+/// BLS12-381 map-to-curve for the `BLS12_MAP_FP2_TO_G2` precompile (0x11,
+/// EIP-2537).
+///
+/// `fp2` points to a 96-byte Fp2 element (c0 ‖ c1, big-endian); `ret`
+/// receives the 192-byte G2 point. Returns 0 = success, 1 = an input
+/// component is not in the field.
+#[no_mangle]
+pub extern "C" fn bls12_381_fp2_to_g2_c(ret: *mut u8, fp2: *const u8) -> u8 {
+    let fp2 = unsafe { &*(fp2 as *const [u8; 96]) };
+    let out = unsafe { &mut *(ret as *mut [u8; 192]) };
+    hooks::bls12_381_fp2_to_g2(fp2, out)
 }

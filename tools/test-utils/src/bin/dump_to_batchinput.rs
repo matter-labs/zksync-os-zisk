@@ -117,6 +117,11 @@ struct DDump {
     /// this field verbatim.
     #[serde(default)]
     chain_config_max_tx_gas_limit: u64,
+    /// Chain-config pubdata content: 0 = FullPubdata, 1 = LogsOnly. The native
+    /// state-dump hook does not export the field, so a bundle without it is a
+    /// full-pubdata chain, which is the only mode the dump rig configures.
+    #[serde(default)]
+    chain_config_pubdata_content: u8,
     /// Pre-block chain position (hook commit a37838a8): both feed the
     /// pre-block ChainStateCommitment. Old bundles (chain-start blocks)
     /// lack them: block_number_before falls back to block.number - 1 and
@@ -169,6 +174,7 @@ fn zk_spec(spec_id: u8) -> ZkSpecId {
         0 => ZkSpecId::AtlasV1,
         1 => ZkSpecId::AtlasV2,
         2 => ZkSpecId::AtlasV3,
+        3 => ZkSpecId::AtlasV4,
         x => panic!("unknown spec_id {x}"),
     }
 }
@@ -256,10 +262,11 @@ struct RecordingDb {
     read_accounts: RefCell<BTreeSet<Address>>,
 }
 
-impl revm::DatabaseRef for RecordingDb {
-    type Error = RecErr;
-
-    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+impl RecordingDb {
+    /// Read an account's pre-state properties and record the two reads the
+    /// guest's `ProvenDB::basic_ref` authenticates: the account itself and its
+    /// account-properties flat key, whose proof carries the account's existence.
+    fn read_account_props(&self, address: Address) -> Result<Option<AccountProperties>, RecErr> {
         self.read_accounts.borrow_mut().insert(address);
         let fk = derive_account_properties_key(&address.into_array());
         self.read_slots.borrow_mut().insert(fk);
@@ -270,30 +277,42 @@ impl revm::DatabaseRef for RecordingDb {
                         "no preimage for account {address} props hash {hash}"
                     ))
                 })?;
-                let props = AccountProperties::decode(preimage)
-                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))?;
-                let code_hash = if props.observable_bytecode_hash.is_zero() {
-                    if props.nonce == 0 && props.balance == [0u8; 32] {
-                        B256::ZERO
-                    } else {
-                        KECCAK_EMPTY
-                    }
-                } else {
-                    props.observable_bytecode_hash
-                };
-                let code = self.code.get(&code_hash).map(|c| {
-                    revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c))
-                });
-                Ok(Some(revm::state::AccountInfo {
-                    nonce: props.nonce,
-                    balance: U256::from_be_bytes(props.balance),
-                    code_hash,
-                    code,
-                    account_id: None,
-                }))
+                AccountProperties::decode(preimage)
+                    .map(Some)
+                    .map_err(|e| RecErr(format!("account {address} props blob: {e}")))
             }
             _ => Ok(None),
         }
+    }
+}
+
+impl revm::DatabaseRef for RecordingDb {
+    type Error = RecErr;
+
+    fn basic_ref(&self, address: Address) -> Result<Option<revm::state::AccountInfo>, RecErr> {
+        let Some(props) = self.read_account_props(address)? else {
+            return Ok(None);
+        };
+        let code_hash = if props.observable_bytecode_hash.is_zero() {
+            if props.nonce == 0 && props.balance == [0u8; 32] {
+                B256::ZERO
+            } else {
+                KECCAK_EMPTY
+            }
+        } else {
+            props.observable_bytecode_hash
+        };
+        let code = self
+            .code
+            .get(&code_hash)
+            .map(|c| revm::state::Bytecode::new_raw(revm::primitives::Bytes::copy_from_slice(c)));
+        Ok(Some(revm::state::AccountInfo {
+            nonce: props.nonce,
+            balance: U256::from_be_bytes(props.balance),
+            code_hash,
+            code,
+            account_id: None,
+        }))
     }
 
     fn code_by_hash_ref(&self, code_hash: B256) -> Result<revm::state::Bytecode, RecErr> {
@@ -326,6 +345,58 @@ impl revm::DatabaseRef for RecordingDb {
     }
 }
 
+/// The EIP-2935 history contract and the size of its ring, as
+/// `executor::eip2935` states them.
+const HISTORY_STORAGE_ADDRESS: Address =
+    revm::primitives::address!("0000f90827f1c53a10cb7a02335b175320002935");
+const HISTORY_SERVE_WINDOW: u64 = 8191;
+
+/// Mirror of executor::eip2935::apply_pre_block_write for the tracking pass.
+///
+/// The step runs before the block's first transaction, so a run of the
+/// transactions alone observes neither of its two reads, and the witness comes
+/// out without the history contract's account-properties proof and without the
+/// ring slot's proof — both of which the guest requires. Performing the write
+/// here also puts its value in the overlay, so a transaction that reads the ring
+/// slot observes what the guest observes.
+fn tracking_pre_block_write(
+    block_number: u64,
+    cache_db: &mut revm::database::CacheDB<RecordingDb>,
+) {
+    use revm::DatabaseRef;
+
+    let props = cache_db
+        .db
+        .read_account_props(HISTORY_STORAGE_ADDRESS)
+        .expect("history contract pre-state");
+    // Native's gate is `is_contract()`: the account holds code and carries no
+    // EIP-7702 delegation.
+    let is_contract = props.is_some_and(|p| {
+        p.observable_bytecode_len > 0
+            && (p.versioning >> 56) as u8
+                != zksync_os_zisk_lib::account_props::DELEGATED_STATUS_BYTE
+    });
+    if !is_contract {
+        return;
+    }
+
+    let slot = U256::from((block_number - 1) % HISTORY_SERVE_WINDOW);
+    cache_db
+        .storage_ref(HISTORY_STORAGE_ADDRESS, slot)
+        .expect("history contract ring slot");
+    let parent_hash = cache_db
+        .db
+        .block_hash_ref(block_number - 1)
+        .expect("RecordingDb::block_hash_ref is infallible");
+    cache_db
+        .insert_account_storage(
+            HISTORY_STORAGE_ADDRESS,
+            slot,
+            U256::from_be_bytes(parent_hash.0),
+        )
+        .expect("history contract pre-state");
+}
+
 /// Mirror of executor::evm::run_evm_block for the tracking pass (records
 /// reads). Transactions are built by the guest's own
 /// `executor::tx::build_proven_tx`, so tracking and guest execution can
@@ -335,13 +406,16 @@ fn tracking_run(
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut revm::database::CacheDB<RecordingDb>,
-    max_tx_gas_limit: u64,
+    max_tx_gas_limit: Option<u64>,
 ) {
     use revm::ExecuteCommitEvm;
-    use zksync_os_revm::{DefaultZk, ZkBuilder, ZkContext};
+    use zksync_os_revm::{zk_context, ZkBuilder};
 
-    let mut evm = <ZkContext<_>>::default()
-        .with_db(cache_db)
+    if ZkSpecId::AtlasV4.is_enabled_in(spec_id) {
+        tracking_pre_block_write(block.number, cache_db);
+    }
+
+    let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = chain_id;
             cfg.spec = spec_id;
@@ -354,15 +428,16 @@ fn tracking_run(
             blk.gas_limit = block.gas_limit;
             blk.prevrandao = Some(block.prev_randao);
         })
-        .build_zk();
+        .build_zk()
+        .with_precompiles(executor::system_hooks::ZKsyncOsPrecompiles::new_with_spec(spec_id));
 
     for (tx_idx, tx_input) in block.transactions.iter().enumerate() {
-        evm.0.ctx.chain.set_tx_number(tx_idx as u16);
+        evm.0.ctx.journaled_state.set_tx_number(tx_idx as u16);
         let (tx, _tx_hash, _tx_type) =
             executor::tx::build_proven_tx(tx_input, block.gas_limit, max_tx_gas_limit);
         match evm.transact_commit(tx) {
             Ok(_result) => {
-                let _ = evm.0.ctx.chain.take_logs();
+                let _ = evm.0.ctx.journaled_state.take_l2_to_l1_logs();
             }
             Err(e) => panic!("tracking tx {tx_idx} failed: {e:?}"),
         }
@@ -464,81 +539,145 @@ const SYSTEM_CONTEXT_ADDRESS: [u8; 20] = [
 const MESSAGE_ROOT_ADDRESS: [u8; 20] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x05,
 ];
+/// L2InteropCommitmentTree system contract, address `0x10012`. Slot 0 holds the
+/// tree height, and `_nodes` lives at contract slot 2.
+const INTEROP_COMMITMENT_TREE_ADDRESS: [u8; 20] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x12,
+];
 
-/// Storage slot of `nodes[height][0]` in MessageRoot (`0x10005`). This mirrors
-/// lib `executor::interop::calculate_multichain_root_slot`: `_nodes` lives at
-/// contract slot 6, and `_nodes[height][0]` resolves to
-/// `keccak256(keccak256(6) + height)`.
-fn multichain_root_slot(height: &B256) -> B256 {
-    let base = U256::from_be_bytes(keccak256(B256::with_last_byte(0x06).as_slice()).0);
+/// Storage slot of `_nodes[height][0]` for a `FullMerkle` engine whose `_nodes`
+/// dynamic array lives at `nodes_base_slot`. This mirrors lib
+/// `executor::interop::nodes_root_slot`: solidity addresses `_nodes[height][0]`
+/// as `keccak256(keccak256(nodes_base_slot) + height)`.
+fn nodes_root_slot(nodes_base_slot: u8, height: &B256) -> B256 {
+    let base = U256::from_be_bytes(keccak256(B256::with_last_byte(nodes_base_slot).as_slice()).0);
     let slot = base.wrapping_add(U256::from_be_bytes(height.0));
     keccak256(&slot.to_be_bytes::<32>())
 }
 
-/// Build the three interop slot proofs the v31 guest authenticates
-/// (`executor::interop`). Native reads `sl_chain_id` (SystemContext `0x800b`
-/// slot 0) and the multichain root (MessageRoot `0x10005`) at the POST-batch
-/// tree, so each proof is built against the post-state tree. An absent slot
-/// yields a NonExisting proof, so a chain that is not a settlement layer (the
-/// EEST corpus case) derives `sl_chain_id` 0 and `multichain_root` 0. A present
-/// slot yields an Existing proof with the stored value, so a real settlement
-/// layer derives the true values too. This matches what native reads, so the
-/// derived scalars agree with the recorded batch-output hash.
-fn build_interop_proofs(
-    post_by_index: &[(u64, B256, B256, u64)],
-    post_levels: &[Vec<B256>],
-) -> InteropSlotProofs {
-    let key_to_leaf: HashMap<B256, (u64, B256, u64)> = post_by_index
-        .iter()
-        .map(|(idx, k, v, n)| (*k, (*idx, *v, *n)))
-        .collect();
-    let mut by_key: Vec<&(u64, B256, B256, u64)> = post_by_index.iter().collect();
-    by_key.sort_by_key(|entry| entry.1);
+/// A flat-storage tree the interop slot proofs are built against, as the
+/// `(index, key, value, next)` leaf records plus the dense level hashes.
+struct ProvableTree<'a> {
+    by_index: &'a [(u64, B256, B256, u64)],
+    levels: &'a [Vec<B256>],
+}
 
-    let prove = |fk: &B256| -> StorageProof {
+impl ProvableTree<'_> {
+    /// Prove `fk` against this tree: `Existing` with the stored value when the
+    /// leaf is present, `NonExisting` bracketed by its linked-list neighbours
+    /// otherwise.
+    fn prove(&self, fk: &B256) -> StorageProof {
         let entry_for = |idx: u64, val: B256, next: u64| SlotProofEntry {
             index: idx,
             value: val,
             next_index: next,
-            siblings: siblings_for(post_levels, idx),
+            siblings: siblings_for(self.levels, idx),
         };
-        if let Some((idx, val, next)) = key_to_leaf.get(fk) {
-            StorageProof::Existing(entry_for(*idx, *val, *next))
-        } else {
-            // Non-existence: bracket fk between its linked-list predecessor
-            // (greatest key < fk, guaranteed by the MIN guard) and successor.
-            let pos = by_key.partition_point(|e| e.1 < *fk);
-            assert!(pos > 0, "no predecessor leaf for interop key {fk}");
-            let l = by_key[pos - 1];
-            let r = &post_by_index[l.3 as usize];
-            assert!(r.1 > *fk, "post-state linked list inconsistent around {fk}");
-            StorageProof::NonExisting {
-                left_neighbor: NeighborProofEntry {
-                    entry: entry_for(l.0, l.2, l.3),
-                    leaf_key: l.1,
-                },
-                right_neighbor: NeighborProofEntry {
-                    entry: entry_for(r.0, r.2, r.3),
-                    leaf_key: r.1,
-                },
-            }
+        if let Some((idx, _, val, next)) = self.by_index.iter().find(|(_, k, _, _)| k == fk) {
+            return StorageProof::Existing(entry_for(*idx, *val, *next));
         }
-    };
+        // Non-existence: bracket fk between its linked-list predecessor
+        // (greatest key < fk, guaranteed by the MIN guard) and successor.
+        let l = self
+            .by_index
+            .iter()
+            .filter(|e| e.1 < *fk)
+            .max_by_key(|e| e.1)
+            .unwrap_or_else(|| panic!("no predecessor leaf for interop key {fk}"));
+        let r = &self.by_index[l.3 as usize];
+        assert!(r.1 > *fk, "tree linked list inconsistent around {fk}");
+        StorageProof::NonExisting {
+            left_neighbor: NeighborProofEntry {
+                entry: entry_for(l.0, l.2, l.3),
+                leaf_key: l.1,
+            },
+            right_neighbor: NeighborProofEntry {
+                entry: entry_for(r.0, r.2, r.3),
+                leaf_key: r.1,
+            },
+        }
+    }
 
-    // The multichain-root slot depends on the height read first (native reads
-    // height, then derives nodes[height][0]); an absent height reads as 0.
+    /// The value stored at `fk`, or zero when the leaf is absent.
+    fn value_at(&self, fk: &B256) -> B256 {
+        self.by_index
+            .iter()
+            .find(|(_, k, _, _)| k == fk)
+            .map(|(_, _, v, _)| *v)
+            .unwrap_or(B256::ZERO)
+    }
+
+    /// The two proofs of a `FullMerkle` engine's root: the height slot, then the
+    /// `_nodes[height][0]` slot the height selects.
+    fn prove_merkle_engine_root(
+        &self,
+        address: &[u8; 20],
+        height_slot: B256,
+        nodes_base_slot: u8,
+    ) -> (StorageProof, StorageProof) {
+        let height_key = derive_flat_storage_key(address, &height_slot);
+        let height = self.value_at(&height_key);
+        let root_key = derive_flat_storage_key(address, &nodes_root_slot(nodes_base_slot, &height));
+        (self.prove(&height_key), self.prove(&root_key))
+    }
+}
+
+/// Build the interop slot proofs the guest authenticates (`executor::interop`).
+///
+/// Native reads `sl_chain_id` (SystemContext `0x800b` slot 0) and the multichain
+/// root (MessageRoot `0x10005`) at the POST-batch tree, so those proofs are
+/// built against the post-state tree. The interop commitment tree (`0x10012`)
+/// root is read once before the batch's first block and once after its last, so
+/// its proofs are built against the pre-state tree and the post-state tree
+/// respectively.
+///
+/// An absent slot yields a NonExisting proof, so a chain that is not a
+/// settlement layer and carries no commitment tree (the EVM test-corpus case)
+/// derives `sl_chain_id` 0, `multichain_root` 0 and both commitment tree roots
+/// 0. A present slot yields an Existing proof with the stored value, so a real
+/// settlement layer derives the true values too. This matches what native
+/// reads, so the derived scalars agree with the recorded batch-output hash.
+fn build_interop_proofs(
+    pre: &ProvableTree,
+    post: &ProvableTree,
+    commits_interop_commitment_tree: bool,
+) -> InteropSlotProofs {
+    const MULTICHAIN_HEIGHT_SLOT: B256 = B256::with_last_byte(0x04);
+    const MULTICHAIN_NODES_SLOT: u8 = 0x06;
+    const COMMITMENT_TREE_HEIGHT_SLOT: B256 = B256::ZERO;
+    const COMMITMENT_TREE_NODES_SLOT: u8 = 0x02;
+
     let sl_key = derive_flat_storage_key(&SYSTEM_CONTEXT_ADDRESS, &B256::ZERO);
-    let height_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &B256::with_last_byte(0x04));
-    let height = key_to_leaf
-        .get(&height_key)
-        .map(|(_, v, _)| *v)
-        .unwrap_or(B256::ZERO);
-    let root_key = derive_flat_storage_key(&MESSAGE_ROOT_ADDRESS, &multichain_root_slot(&height));
+    let (multichain_height, multichain_root) = post.prove_merkle_engine_root(
+        &MESSAGE_ROOT_ADDRESS,
+        MULTICHAIN_HEIGHT_SLOT,
+        MULTICHAIN_NODES_SLOT,
+    );
+
+    let commitment_tree = commits_interop_commitment_tree.then(|| {
+        let (height_begin, root_begin) = pre.prove_merkle_engine_root(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            COMMITMENT_TREE_HEIGHT_SLOT,
+            COMMITMENT_TREE_NODES_SLOT,
+        );
+        let (height_end, root_end) = post.prove_merkle_engine_root(
+            &INTEROP_COMMITMENT_TREE_ADDRESS,
+            COMMITMENT_TREE_HEIGHT_SLOT,
+            COMMITMENT_TREE_NODES_SLOT,
+        );
+        InteropCommitmentTreeProofs {
+            height_begin,
+            root_begin,
+            height_end,
+            root_end,
+        }
+    });
 
     InteropSlotProofs {
-        sl_chain_id: prove(&sl_key),
-        multichain_height: prove(&height_key),
-        multichain_root: prove(&root_key),
+        sl_chain_id: post.prove(&sl_key),
+        multichain_height,
+        multichain_root,
+        commitment_tree,
     }
 }
 
@@ -682,7 +821,10 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
     };
     let mut cache = revm::database::CacheDB::new(rec);
     // Resolve the per-tx gas cap the same way `build_batch_input` does below.
-    let max_tx_gas_limit = resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit);
+    // Only a spec that applies EIP-7825 passes it to the transaction builder.
+    let max_tx_gas_limit = ZkSpecId::AtlasV4
+        .is_enabled_in(spec)
+        .then(|| resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit));
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
     }));
@@ -823,9 +965,10 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
 
     // v31 batches carry authenticated interop slot proofs; the guest derives
     // sl_chain_id / multichain_root from them and ignores the witness scalars.
-    // v30 carries none (its batch-output layout commits neither scalar). The
-    // proofs are read at the POST-batch tree, so build the post-state tree
-    // from the dump's full post leaves.
+    // v30 carries none (its batch-output layout commits neither scalar). An
+    // AtlasV4 batch additionally carries the interop commitment tree proofs at
+    // both batch boundaries. The post-state proofs need the post-state tree
+    // built from the dump's full post leaves.
     let interop_proofs = if d.protocol_version_minor >= 31 {
         let mut post_by_index: Vec<(u64, B256, B256, u64)> = d
             .post
@@ -852,7 +995,17 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
             hb256(&d.tree_root_after),
             "dense post-state root != tree_root_after"
         );
-        Some(build_interop_proofs(&post_by_index, &post_levels))
+        Some(build_interop_proofs(
+            &ProvableTree {
+                by_index: &pre_by_index,
+                levels: &levels,
+            },
+            &ProvableTree {
+                by_index: &post_by_index,
+                levels: &post_levels,
+            },
+            ZkSpecId::AtlasV4.is_enabled_in(spec),
+        ))
     } else {
         None
     };
@@ -877,6 +1030,7 @@ fn build_batch_input(d: &DDump, no_header_check: bool) -> BatchInput {
         account_preimages_after,
         fri_proof_verification_enabled: d.chain_config_fri,
         max_tx_gas_limit: resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit),
+        pubdata_content: d.chain_config_pubdata_content,
         interop_proofs,
     };
 
@@ -956,6 +1110,7 @@ fn validate(d: &DDump, bi: &BatchInput) -> bool {
                     d.chain_id,
                     d.chain_config_fri,
                     d.chain_config_max_tx_gas_limit,
+                    d.chain_config_pubdata_content,
                 );
                 ok &= check(
                     "chain_config_hash",
@@ -1167,7 +1322,7 @@ mod tests {
         let l2_logs_root =
             commitment::keccak_two(&commitment::l2_to_l1_logs_root(&[]), &B256::ZERO);
         let bo = commitment::batch_output_hash_native(
-            true, // v31 layout
+            commitment::BatchOutputLayout::V31,
             37,
             42,
             42,
@@ -1185,8 +1340,10 @@ mod tests {
             // value, not the legacy witness scalar.
             0,
         );
-        let ccfg = commitment::chain_config_hash(37, false, 1 << 24);
-        let pi = commitment::batch_public_input_hash(&sb, &sa, &ccfg, &bo);
+        let ccfg = commitment::chain_config_hash(37, false, 1 << 24, 0);
+        // A v31 batch commits the three-word public input: released native on
+        // that line carries no chain-config word.
+        let pi = commitment::batch_public_input_hash(&sb, &sa, None, &bo);
 
         let zero = "00".repeat(32);
         let guards = format!(
@@ -1286,5 +1443,37 @@ mod tests {
         let (recovered, value) = proof.verify(&missing).expect("verify");
         assert_eq!(recovered, root);
         assert!(value.is_none());
+    }
+
+    /// Every AtlasV4 block authenticates the EIP-2935 history contract before
+    /// it runs a transaction, and it does so even where the contract holds no
+    /// code — the gate itself reads the account. The tracking pass must
+    /// therefore record the account and its account-properties key, which is
+    /// the key whose proof carries the account's existence, against a pre-state
+    /// that holds no history contract at all.
+    #[test]
+    fn tracking_records_the_eip2935_history_account_read() {
+        let rec = RecordingDb {
+            storage: HashMap::new(),
+            preimages: HashMap::new(),
+            code: HashMap::new(),
+            block_hashes: HashMap::new(),
+            read_slots: RefCell::new(BTreeSet::new()),
+            read_accounts: RefCell::new(BTreeSet::new()),
+        };
+        let mut cache = revm::database::CacheDB::new(rec);
+        tracking_pre_block_write(1, &mut cache);
+        assert!(cache
+            .db
+            .read_accounts
+            .borrow()
+            .contains(&HISTORY_STORAGE_ADDRESS));
+        assert!(cache
+            .db
+            .read_slots
+            .borrow()
+            .contains(&derive_account_properties_key(
+                &HISTORY_STORAGE_ADDRESS.into_array()
+            )));
     }
 }

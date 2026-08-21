@@ -595,6 +595,7 @@ mod tests {
                 account_preimages_after: vec![],
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
                 interop_proofs: None,
             },
             bytecodes: vec![(code_hash, code)],

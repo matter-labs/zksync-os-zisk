@@ -27,6 +27,7 @@
 #   ZISKEMU             ziskemu binary
 #   CORPUS_OUT          work/output directory
 #   EMU_JOBS            parallel ziskemu processes (default: nproc)
+#   OK_MIN_PERCENT      minimum share of cases the emulator must run OK
 
 set -uo pipefail
 
@@ -40,6 +41,10 @@ CORPUS_OUT="${CORPUS_OUT:-$HOME/multiprover/corpus-emu-out}"
 # parallelism to MEMORY, not cores — 8-wide OOM-killed this workstation.
 AVAIL_GB=$(awk '/MemAvailable/ {print int($2/1048576)}' /proc/meminfo)
 EMU_JOBS="${EMU_JOBS:-$(( AVAIL_GB / 9 > 0 ? AVAIL_GB / 9 : 1 ))}"
+# Steady state is every case OK bar the handful of documented waivers (26 of
+# ~10600), so a floor well above the waiver budget still leaves the verdict
+# sensitive to a lane that stops reaching the guest.
+OK_MIN_PERCENT="${OK_MIN_PERCENT:-90}"
 export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-$HOME/.local/zisk-libs/usr/lib/x86_64-linux-gnu:$HOME/.local/zisk-libs/usr/lib/x86_64-linux-gnu/openmpi/lib}"
 
 # Dedicated target dir: the main checkout's cache is in active use by
@@ -182,9 +187,10 @@ awk -F'\t' '$4=="PANIC" {print $5}' "$RESULTS" | sort | uniq -c | sort -rn | hea
 # what makes steady state machine-checkable: exit 0 == "only the documented
 # fixture-artifact waivers remain".
 WAIVERS="$(dirname "$0")/corpus-waivers.tsv"
+UNEXPECTED_FILE="$CORPUS_OUT/unexpected.txt"
 echo
 echo "=== WAIVER RECONCILIATION ($WAIVERS) ==="
-UNEXPECTED=$(awk -F'\t' -v wf="$WAIVERS" '
+awk -F'\t' -v wf="$WAIVERS" '
     BEGIN {
         nw = 0
         while ((getline line < wf) > 0) {
@@ -206,12 +212,41 @@ UNEXPECTED=$(awk -F'\t' -v wf="$WAIVERS" '
         for (i = 0; i < nw; i++)
             printf "  waived %d/%s in %s (%s)\n", wseen[i], wmax[i], wchunk[i], wid[i] > "/dev/stderr"
     }
-' "$RESULTS" 2>&1)
-echo "$UNEXPECTED" | grep -v "^UNEXPECTED:" || true
-if echo "$UNEXPECTED" | grep -q "^UNEXPECTED:"; then
+' "$RESULTS" > "$UNEXPECTED_FILE"
+VERDICT=0
+# Assert against the FILE: `echo "$big" | grep -q` returns 141 under pipefail,
+# because grep exits on its first match and the writer takes SIGPIPE — which
+# reads as "no unexpected failures" on exactly the runs that have the most.
+if grep -q "^UNEXPECTED:" "$UNEXPECTED_FILE"; then
     echo
     echo "!!! UNEXPECTED FAILURES (not covered by waivers):"
-    echo "$UNEXPECTED" | grep "^UNEXPECTED:" | head -20 | cut -c1-200
+    head -20 "$UNEXPECTED_FILE" | cut -c1-200
+    VERDICT=1
+fi
+
+# Emulation coverage. The waiver reconciliation counts guest panics, so a run
+# where the reader rejected every case reports zero panics and every row waived
+# — total failure that reads as success. A run is only meaningful when the guest
+# actually executed the corpus, so hold the OK share to a floor.
+echo
+echo "=== EMULATION COVERAGE (floor ${OK_MIN_PERCENT}% OK) ==="
+COVERAGE=$(awk -F'\t' -v floor="$OK_MIN_PERCENT" '
+    NR > 1 { total++; if ($4 == "OK") ok++; else if ($4 == "SKIPPED") skipped++ }
+    END {
+        printf "  %d cases, %d OK, %d skipped (never reached the emulator)\n",
+            total, ok, skipped
+        if (total == 0)
+            print "COVERAGE-FAIL: the run produced no cases at all"
+        else if (ok * 100 < total * floor)
+            printf "COVERAGE-FAIL: %d/%d OK is under the %d%% floor\n", ok, total, floor
+    }
+' "$RESULTS")
+echo "$COVERAGE"
+case "$COVERAGE" in
+    *COVERAGE-FAIL*) VERDICT=1 ;;
+esac
+
+if [ "$VERDICT" -ne 0 ]; then
     echo "corpus run FAILED: investigate before trusting the guest at this revision."
     exit 1
 fi

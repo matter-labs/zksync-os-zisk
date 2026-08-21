@@ -6,7 +6,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 zksync-os-zisk-lib = { path = "../lib", default-features = false }
-revm = { version = "=38.0.0", default-features = false, features = ["std"] }
+revm = { version = "=42.0.1", default-features = false, features = ["std"] }
 alloy-primitives = { version = "1", default-features = false, features = ["native-keccak"] }
 # REVM relies on deallocation to keep its live heap bounded. ZiSK's default
 # bump allocator never frees, so allocation-heavy batches eventually exhaust
