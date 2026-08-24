@@ -45,6 +45,19 @@ jobs:
           # checkout's read-only GITHUB_TOKEN override that URL credential.
           persist-credentials: false
 
+      # Keep the derivation implementation coupled to the workflow revision
+      # that was dispatched, while all reviewed ELF/pin inputs and the output
+      # PR still come from base_ref. This also lets a workflow fix be validated
+      # from its PR before that fix reaches main.
+      - name: checkout the dispatched rotation tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .rotation-tooling
+          sparse-checkout: |
+            .github/scripts/rotate-program-vk.py
+          sparse-checkout-cone-mode: false
+
       - name: validate the base branch
         run: |
           git check-ref-format --branch "$BASE_REF"
@@ -108,7 +121,7 @@ jobs:
             both) aggregator_update=(--update); inner_update=(--update) ;;
             *) echo "ERROR: invalid rotation scope: $ROTATION_SCOPE" >&2; exit 1 ;;
           esac
-          .github/scripts/rotate-program-vk.py \
+          .rotation-tooling/.github/scripts/rotate-program-vk.py \
             --kind aggregator \
             --elf out/zksync-os-zisk-guest-aggregator \
             --elf-sha-record guest-aggregator/GUEST_ELF_SHA256 \
@@ -119,7 +132,7 @@ jobs:
             --run-url "$RUN_URL" \
             --metadata /tmp/vk-aggregator/metadata.json \
             "${aggregator_update[@]}"
-          .github/scripts/rotate-program-vk.py \
+          .rotation-tooling/.github/scripts/rotate-program-vk.py \
             --kind inner \
             --elf out/zksync-os-zisk-guest \
             --elf-sha-record guest/GUEST_ELF_SHA256 \

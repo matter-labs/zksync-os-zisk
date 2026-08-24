@@ -37,11 +37,19 @@ def read_verkey(path: Path) -> tuple[list[int], str]:
     return limbs, canonical
 
 
-def read_active_vk(path: Path) -> str:
-    values = VK_PATTERN.findall(path.read_text())
-    if len(values) != 1:
-        raise ValueError(f"{path} must contain one active canonical VK")
-    return values[0]
+def read_active_vk(path: Path) -> str | None:
+    active = [
+        line.split("#", 1)[0].strip()
+        for line in path.read_text().splitlines()
+        if line.split("#", 1)[0].strip()
+    ]
+    if len(active) != 1:
+        raise ValueError(f"{path} must contain exactly one active VK record")
+    if active[0] == "PENDING":
+        return None
+    if VK_PATTERN.fullmatch(active[0]) is None:
+        raise ValueError(f"{path} must contain PENDING or one canonical VK")
+    return active[0]
 
 
 def read_recorded_sha256(path: Path) -> str:
@@ -87,7 +95,7 @@ def render_record(
     zisk_version: str,
     date: str,
     run_url: str,
-    recorded: str,
+    recorded: str | None,
     prior_history: str,
 ) -> str:
     elf_name = "zksync-os-zisk-guest-aggregator" if kind == "aggregator" else "zksync-os-zisk-guest"
@@ -106,10 +114,15 @@ def render_record(
             f"#                   {limbs[2]}, {limbs[3]}]",
             derived,
             "",
-            f"# History: {recorded}",
-            f"# (retired {date} by {run_url}).",
         ]
     )
+    if recorded is not None:
+        lines.extend(
+            [
+                f"# History: {recorded}",
+                f"# (retired {date} by {run_url}).",
+            ]
+        )
     if prior_history:
         lines.extend([prior_history])
     return "\n".join(lines) + "\n"
@@ -144,7 +157,7 @@ def main() -> None:
     limbs, derived = read_verkey(args.verkey)
     source = args.record.read_text()
     recorded = read_active_vk(args.record)
-    changed = derived != recorded
+    changed = recorded is None or derived != recorded
     updated = changed and args.update
     if updated:
         args.record.write_text(
