@@ -196,10 +196,10 @@ jobs:
         # The bot credential makes the PR a normal external event, so its
         # pull-request checks run. Events created by github.token are suppressed.
         env:
-          GH_TOKEN: ${{ secrets.ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE is required to publish the rotation PR" >&2
+            echo "ERROR: RELEASE_TOKEN is required to publish the rotation PR" >&2
             exit 1
           fi
           source_commit="$(git rev-parse HEAD)"
