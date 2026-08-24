@@ -50,6 +50,23 @@ guest repo @ `055e720` (tag 0.0.2), 4 sealed v31 batches of a
 zisk-fixture-session workflow (run 32503874362) with both programVKs
 calibrated against the pins before proving.
 
+Future rotations use this repo's dispatch-only
+`.github/workflows/fixture-session.yaml`. Its inputs are intentionally frozen
+wire-v3 AtlasV2 fixtures (spec ID 1, protocol minor 30) built by
+`tools/test-utils` — no server-sealed batches are involved. The inputs retain
+their historical bytes and execution commitments, but their proofs use the
+current guest ELF and current inner programVK; wire compatibility does not
+preserve the old programVK. Before PLONK wrapping or aggregation, the workflow
+automatically compares the native manifest commitment with the commitment
+extracted from each of the four guest proofs, in order.
+
+The separate publisher job updates this document,
+`guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
+`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin` through an automation
+PR. The corresponding two `era-contracts` test updates remain a separate PR;
+the workflow emits their machine-applicable patch and exact instructions.
+Real-batch end-to-end coverage remains in zksync-os-server's prover-tests CI.
+
 ```text
 innerProgramVK   = 0x44e3d132399c8f3a03ce9672ba0ca00c6503db918731c7ab46d6faea445236ec
 rootCVadcopFinal = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
