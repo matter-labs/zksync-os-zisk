@@ -41,6 +41,9 @@ jobs:
         with:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 0
+          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
+          # checkout's read-only GITHUB_TOKEN override that URL credential.
+          persist-credentials: false
 
       - name: validate the base branch
         run: |
