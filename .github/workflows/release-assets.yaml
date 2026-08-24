@@ -14,6 +14,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 env:
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
@@ -103,7 +105,41 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
+      - name: Binaries attestation
+        id: attestation
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: 'dist/**'
+
       - name: Upload assets to the release
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: gh release upload "${TAG}" dist/* --clobber -R "${GITHUB_REPOSITORY}"
+
+      # Appends the Binaries table to the release notes; an existing section is stripped first so re-runs stay idempotent.
+      - name: Update release notes
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          ATT_URL: ${{ steps.attestation.outputs.attestation-url }}
+        run: |
+          BODY=$(gh release view "${TAG}" --json body -q '.body' -R "${GITHUB_REPOSITORY}")
+          BODY=$(printf '%s\n' "${BODY}" | sed '/^## Binaries$/,$d')
+          DL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          HOST_TOOLS="zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz"
+          GUEST_ELFS="zksync-os-zisk-guest-elfs-${TAG}.tar.gz"
+          cat > binaries.md <<ENDBODY
+          ## Binaries
+
+          | System | Target | Asset | Attestation |
+          |:---:|:---:|:---:|:---|
+          | <img src="https://www.svgrepo.com/download/448236/linux.svg" width="50"/> | ${TARGET} (CPU) | [${HOST_TOOLS}](${DL}/${HOST_TOOLS}) | [Attestation](${ATT_URL}) |
+          | ⚙️ | ZiSK zkVM guest ELFs (riscv64) | [${GUEST_ELFS}](${DL}/${GUEST_ELFS}) | [Attestation](${ATT_URL}) |
+
+          All assets are covered by [SHA256SUMS](${DL}/SHA256SUMS):
+
+          ~~~
+          $(cat dist/SHA256SUMS)
+          ~~~
+          ENDBODY
+          printf '%s\n\n' "${BODY}" | cat - binaries.md > updated_body.md
+          gh release edit "${TAG}" --notes-file updated_body.md -R "${GITHUB_REPOSITORY}"
