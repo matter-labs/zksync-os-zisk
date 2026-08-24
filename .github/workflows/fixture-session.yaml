@@ -1,0 +1,404 @@
+name: Fixture session
+
+# Expensive and dispatch-only in steady state. A temporary pull_request trigger
+# is added for the required pre-merge GPU validation, then removed again.
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: fixture-session-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZISK_VERSION: "0.18.0"
+
+jobs:
+  prepare:
+    name: build current ELFs, frozen v3 inputs, and host tools
+    runs-on: matterlabs-ci-runner-high-performance
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      # This is intentionally first. PENDING or malformed repository pins stop
+      # on CPU before proving keys are installed or a GPU runner is requested.
+      - name: Validate canonical programVK and root records
+        id: pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          read_record() {
+            local path="$1" label="$2"
+            mapfile -t active < <(
+              sed 's/#.*//' "$path" | tr -d '[:space:]' | sed '/^$/d'
+            )
+            if [[ "${#active[@]}" -ne 1 ]]; then
+              echo "ERROR: $path must contain exactly one active $label value" >&2
+              exit 1
+            fi
+            if [[ ! "${active[0]}" =~ ^0x[0-9a-f]{64}$ ]]; then
+              echo "ERROR: $path has PENDING or malformed $label: ${active[0]}" >&2
+              exit 1
+            fi
+            printf '%s' "${active[0]}"
+          }
+          inner="$(read_record guest/GUEST_PROGRAM_VK 'inner programVK')"
+          aggregator="$(read_record guest-aggregator/GUEST_PROGRAM_VK 'aggregator programVK')"
+          root_c="$(read_record guest-aggregator/ROOT_C_VADCOP_FINAL 'rootCVadcopFinal')"
+          echo "inner=$inner" >> "$GITHUB_OUTPUT"
+          echo "aggregator=$aggregator" >> "$GITHUB_OUTPUT"
+          echo "root_c=$root_c" >> "$GITHUB_OUTPUT"
+
+      # Both scripts rebuild in the pinned container and fail unless each ELF
+      # matches its reviewed GUEST_ELF_SHA256 record.
+      - name: Build and reproduce both guest ELFs
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build host proof tools
+        working-directory: prover
+        run: cargo build --release --bin aggregator_input --bin inspect_proof
+
+      - name: Build fixture tools
+        working-directory: tools/test-utils
+        run: cargo build --release --bin gen_session_inputs --bin check_binding_digest
+
+      - name: Generate and execute four frozen wire-v3 inputs
+        run: tools/test-utils/target/release/gen_session_inputs session
+
+      - name: Assemble the immutable session bundle
+        env:
+          INNER_PROGRAM_VK: ${{ steps.pins.outputs.inner }}
+          AGGREGATOR_PROGRAM_VK: ${{ steps.pins.outputs.aggregator }}
+          ROOT_C_VADCOP_FINAL: ${{ steps.pins.outputs.root_c }}
+          SELECTED_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          SELECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p session/tools
+          inner_elf_sha256="$(sha256sum out/zksync-os-zisk-guest | awk '{print $1}')"
+          aggregator_elf_sha256="$(sha256sum out/zksync-os-zisk-guest-aggregator | awk '{print $1}')"
+          test "$inner_elf_sha256" = "$(tr -d '[:space:]' < guest/GUEST_ELF_SHA256)"
+          test "$aggregator_elf_sha256" = "$(tr -d '[:space:]' < guest-aggregator/GUEST_ELF_SHA256)"
+          jq -n \
+            --arg selected_ref "$SELECTED_REF" \
+            --arg selected_sha "$SELECTED_SHA" \
+            --arg run_url "$RUN_URL" \
+            --arg session_date "$(date -u +%F)" \
+            --arg zisk_version "$ZISK_VERSION" \
+            --arg inner_elf_sha256 "$inner_elf_sha256" \
+            --arg aggregator_elf_sha256 "$aggregator_elf_sha256" \
+            --arg inner_program_vk "$INNER_PROGRAM_VK" \
+            --arg aggregator_program_vk "$AGGREGATOR_PROGRAM_VK" \
+            --arg root_c_vadcop_final "$ROOT_C_VADCOP_FINAL" \
+            '{
+              schema_version: 1,
+              selected_ref: $selected_ref,
+              selected_sha: $selected_sha,
+              run_url: $run_url,
+              session_date: $session_date,
+              zisk_version: $zisk_version,
+              inner_elf_sha256: $inner_elf_sha256,
+              aggregator_elf_sha256: $aggregator_elf_sha256,
+              inner_program_vk: $inner_program_vk,
+              aggregator_program_vk: $aggregator_program_vk,
+              root_c_vadcop_final: $root_c_vadcop_final
+            }' > session/session-metadata.json
+          cp out/zksync-os-zisk-guest session/
+          cp out/zksync-os-zisk-guest-aggregator session/
+          cp prover/target/release/aggregator_input session/tools/
+          cp prover/target/release/inspect_proof session/tools/
+          cp tools/test-utils/target/release/check_binding_digest session/tools/
+          cp .github/scripts/apply-fixture-session.py session/tools/
+          ls -la session session/tools
+
+      - name: Upload the session bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-session-prep
+          path: session
+          if-no-files-found: error
+          retention-days: 3
+
+  prove:
+    name: prove, compare native/guest commitments, and aggregate
+    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
+    needs: prepare
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout proof script only
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Check Nvidia driver version
+        run: nvidia-smi
+
+      - name: Download the immutable session bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: zisk-session-prep
+          path: session
+
+      - name: Install ZiSK system dependencies
+        run: |
+          SUDO=""
+          [[ "$(id -u)" -eq 0 ]] || SUDO="sudo"
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update
+          $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            xz-utils jq curl build-essential qemu-system libomp-dev libgmp-dev \
+            nlohmann-json3-dev protobuf-compiler uuid-dev libgrpc++-dev \
+            libsecp256k1-dev libsodium-dev libpqxx-dev nasm libopenmpi-dev \
+            openmpi-bin openmpi-common libclang-dev clang gcc-riscv64-unknown-elf \
+            python3
+
+      - name: Install rustup
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Install ZiSK toolchain and both proving keys
+        run: |
+          curl -sSfL \
+            "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/install.sh" \
+            -o /tmp/ziskup-install.sh
+          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --gpu -y
+          echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
+          "$HOME/.zisk/bin/ziskup" setup_snark
+
+      - name: Prove and validate the complete session
+        env:
+          CARGO_ZISK: cargo-zisk
+          GUEST_ELF: ${{ github.workspace }}/session/zksync-os-zisk-guest
+          AGG_ELF: ${{ github.workspace }}/session/zksync-os-zisk-guest-aggregator
+          TOOLS_DIR: ${{ github.workspace }}/session/tools
+          SESSION_DIR: ${{ github.workspace }}/session
+        run: |
+          export ZISK_PK="$HOME/.zisk/provingKey"
+          export ZISK_SK="$HOME/.zisk/provingKeySnark"
+          chmod +x session/tools/* .github/scripts/prove-session.sh
+          .github/scripts/prove-session.sh
+
+      - name: Publish the operator summary
+        if: always()
+        run: |
+          if [[ -f session/SUMMARY.md ]]; then
+            cat session/SUMMARY.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload validated session artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-fixture-session
+          path: |
+            session/SUMMARY.md
+            session/input-manifest.json
+            session/session-metadata.json
+            session/fixture-values.json
+            session/commitment-comparison.txt
+            session/*-inspect.txt
+            session/aggregator-input.txt
+            session/binding-digest.txt
+            session/vadcop-batch-*.bin
+            session/batch1-plonk.bin
+            session/aggregated-plonk.bin
+            session/batch-*.bin
+            session/tools/apply-fixture-session.py
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: validate updates and open the fixture PR
+    needs: prove
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      BASE_REF: main
+      AUTOMATION_BRANCH: automation/fixture-session
+    steps:
+      - name: Checkout the publication base
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Download the validated session
+        uses: actions/download-artifact@v4
+        with:
+          name: zisk-fixture-session
+          path: session
+
+      - name: Apply the in-repository fixture updates
+        run: |
+          python3 session/tools/apply-fixture-session.py \
+            --values session/fixture-values.json \
+            --vadcop session/vadcop-batch-1.bin \
+            --repo-root .
+          mapfile -t changed < <(git diff --name-only)
+          expected=(
+            guest-aggregator/BINDING_VECTOR.md
+            guest-aggregator/src/lib.rs
+            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+            prover/tests/real_aggregation_vector.rs
+          )
+          if [[ "${changed[*]}" != "${expected[*]}" ]]; then
+            echo "ERROR: generated paths differ from the reviewed publication set" >&2
+            printf 'changed:  %s\nexpected: %s\n' "${changed[*]}" "${expected[*]}" >&2
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Test the updated aggregator vector
+        working-directory: guest-aggregator
+        run: cargo test
+
+      - name: Test the updated prover vector
+        working-directory: prover
+        run: cargo test --test real_aggregation_vector
+        env:
+          ZISK_AGG_SESSION_DIR: ${{ github.workspace }}/session
+
+      - name: Verify the updated real vadcop_final fixture
+        working-directory: zisk-verifier
+        run: cargo test --all-features verifies_the_real_vadcop_final_proof_file
+
+      - name: Build reviewable publication patches
+        run: |
+          set -euo pipefail
+          mkdir -p session/publication
+          git diff --binary > session/publication/zksync-os-zisk-fixture-update.patch
+          era_dir="$RUNNER_TEMP/era-contracts"
+          git clone --filter=blob:none https://github.com/matter-labs/era-contracts.git "$era_dir"
+          git -C "$era_dir" fetch origin refs/pull/2305/head
+          git -C "$era_dir" checkout --detach FETCH_HEAD
+          python3 session/tools/apply-fixture-session.py \
+            --values session/fixture-values.json \
+            --era-contracts-root "$era_dir"
+          git -C "$era_dir" diff --binary > session/publication/era-contracts-fixture-update.patch
+          era_base="$(git -C "$era_dir" rev-parse HEAD)"
+          run_url="$(jq -r .metadata.run_url session/fixture-values.json)"
+          cat > session/publication/ERA_CONTRACTS_UPDATE.md <<EOF
+          # Separate era-contracts fixture update
+
+          This patch is intentionally not applied cross-repository. It was generated against
+          matter-labs/era-contracts pull request 2305 at commit \`$era_base\` from the validated
+          ZiSK [fixture session]($run_url).
+
+          From an era-contracts checkout at that commit:
+
+          \`\`\`bash
+          git apply --index era-contracts-fixture-update.patch
+          cd l1-contracts
+          yarn build:foundry
+          yarn foundry test --match-contract MultiProofRangeVectorTest
+          yarn foundry test --match-contract ZiskVerifierRealProofTest
+          \`\`\`
+
+          Open a separate PR in matter-labs/era-contracts. Its ZiskVerifier inner programVK pin
+          must already have been rotated through the official verifier/VK flow; this patch updates
+          only the generated real-proof and range-vector tests.
+          EOF
+
+      - name: Upload publication patches and instructions
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-fixture-publication
+          path: |
+            session/fixture-values.json
+            session/publication/zksync-os-zisk-fixture-update.patch
+            session/publication/era-contracts-fixture-update.patch
+            session/publication/ERA_CONTRACTS_UPDATE.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Open or update the in-repository fixture PR
+        env:
+          GH_TOKEN: ${{ secrets.ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "ERROR: ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE is required to publish the fixture PR" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$AUTOMATION_BRANCH"
+          git add \
+            guest-aggregator/BINDING_VECTOR.md \
+            guest-aggregator/src/lib.rs \
+            prover/tests/real_aggregation_vector.rs \
+            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+          git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
+
+          if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
+            git fetch origin "refs/heads/$AUTOMATION_BRANCH:refs/remotes/origin/$AUTOMATION_BRANCH"
+            expected="$(git rev-parse "refs/remotes/origin/$AUTOMATION_BRANCH")"
+            git push --force-with-lease="refs/heads/$AUTOMATION_BRANCH:$expected" \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "HEAD:refs/heads/$AUTOMATION_BRANCH"
+          else
+            git push \
+              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+              "HEAD:refs/heads/$AUTOMATION_BRANCH"
+          fi
+
+          source_sha="$(jq -r .metadata.selected_sha session/fixture-values.json)"
+          inner_vk="$(jq -r .metadata.inner_program_vk session/fixture-values.json)"
+          body="$RUNNER_TEMP/fixture-pr.md"
+          cat > "$body" <<EOF
+          Generated by the validated [fixture-session workflow]($RUN_URL) from source commit \`$source_sha\`.
+
+          The inputs are the intentionally frozen wire-v3 AtlasV2 fixtures (spec ID 1, protocol minor 30). The proofs use the current guest and inner programVK \`$inner_vk\`. The workflow compared all four native commitments with the guest-proof commitments before PLONK wrapping and aggregation.
+
+          This PR updates only:
+
+          - \`guest-aggregator/BINDING_VECTOR.md\`
+          - \`guest-aggregator/src/lib.rs\`
+          - \`prover/tests/real_aggregation_vector.rs\`
+          - \`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin\`
+
+          The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests. The corresponding era-contracts updates remain a separate PR; the workflow artifact contains an exact patch and instructions.
+          EOF
+
+          existing="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f head="$GITHUB_REPOSITORY_OWNER:$AUTOMATION_BRANCH" \
+            -f base="$BASE_REF" -f state=open --jq '.[0].number // empty')"
+          payload="$RUNNER_TEMP/fixture-pr.json"
+          if [[ -n "$existing" ]]; then
+            jq -n \
+              --arg title "chore(fixtures): rotate ZiSK proof fixtures" \
+              --rawfile body "$body" \
+              '{title: $title, body: $body}' > "$payload"
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$existing" \
+              --input "$payload" >/dev/null
+            pr_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$existing"
+          else
+            jq -n \
+              --arg title "chore(fixtures): rotate ZiSK proof fixtures" \
+              --arg head "$AUTOMATION_BRANCH" \
+              --arg base "$BASE_REF" \
+              --rawfile body "$body" \
+              '{title: $title, head: $head, base: $base, body: $body, draft: true}' \
+              > "$payload"
+            pr_url="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
+              --input "$payload" --jq .html_url)"
+          fi
+          echo "Fixture PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
