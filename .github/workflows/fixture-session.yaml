@@ -237,6 +237,9 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
+          # checkout's GITHUB_TOKEN override that URL credential.
+          persist-credentials: false
 
       - name: Download the validated session
         uses: actions/download-artifact@v4

@@ -41,6 +41,9 @@ jobs:
         with:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 0
+          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
+          # checkout's read-only GITHUB_TOKEN override that URL credential.
+          persist-credentials: false
 
       # Keep the derivation implementation coupled to the workflow revision
       # that was dispatched, while all reviewed ELF/pin inputs and the output
