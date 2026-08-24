@@ -3,7 +3,7 @@
 # ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
 # identical to the prover daemon's public-values prefix and the server's
-# `prover_api.zisk_vks[].program_vk` expectation.
+# compiled ZiSK release manifest.
 #
 # PENDING for the container ELF with sha256
 # 306501cbb866fd73c735e01d2026911a7f5309ef301e75e63c46600ec74f1e1e

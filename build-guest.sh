@@ -11,8 +11,8 @@ set -euo pipefail
 #                               # the guest or its inputs intentionally change,
 #                               # and commit the updated GUEST_ELF_SHA256.
 #
-# The ELF lands in out/zksync-os-zisk-guest. Its programVK (the value for
-# the server's `prover_api.zisk_vks` tripwire and the L1 verifier pin) is
+# The ELF lands in out/zksync-os-zisk-guest. Its programVK (the value in the
+# server's compiled ZiSK release manifest and the L1 verifier pin) is
 # derived on a prover box with:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 # — deterministic given the ELF and the pinned cargo-zisk version.

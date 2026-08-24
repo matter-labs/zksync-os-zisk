@@ -32,6 +32,7 @@ pub struct ZiskBatchData {
 pub struct ZiskAggregationJobData {
     pub from_batch: u64,
     pub to_batch: u64,
+    pub vk_hash: String,
     pub streams: Vec<(u64, Vec<u8>)>,
 }
 
@@ -39,6 +40,7 @@ pub struct ZiskAggregationJobData {
 pub struct SequencerClient {
     base_url: Url,
     prover_id: String,
+    supported_vk_hashes: Vec<String>,
     client: reqwest::Client,
 }
 
@@ -66,6 +68,8 @@ struct AggregationBatchProof {
 struct AggregationPickResponse {
     from_batch_number: u64,
     to_batch_number: u64,
+    #[serde(default)]
+    vk_hash: String,
     proofs: Vec<AggregationBatchProof>,
 }
 
@@ -83,7 +87,11 @@ impl SequencerClient {
     /// Example URLs:
     /// - `http://localhost:3124` (no auth)
     /// - `http://user:password@sequencer.example.com:3124` (Basic Auth)
-    pub fn new(raw_url: &str, prover_id: &str) -> anyhow::Result<Self> {
+    pub fn new(
+        raw_url: &str,
+        prover_id: &str,
+        supported_vk_hashes: &[String],
+    ) -> anyhow::Result<Self> {
         let mut url = Url::parse(raw_url)?;
         let mut headers = HeaderMap::new();
 
@@ -114,6 +122,7 @@ impl SequencerClient {
         Ok(Self {
             base_url: url,
             prover_id: prover_id.to_string(),
+            supported_vk_hashes: supported_vk_hashes.to_vec(),
             client,
         })
     }
@@ -122,17 +131,40 @@ impl SequencerClient {
         self.base_url.as_str()
     }
 
+    fn pick_url(&self, endpoint: &str) -> Url {
+        let mut url = self
+            .base_url
+            .join(&format!("prover-jobs/v1/{endpoint}"))
+            .expect("a valid base URL always accepts a relative API path");
+        let mut query = url.query_pairs_mut();
+        query.append_pair("id", &self.prover_id);
+        if !self.supported_vk_hashes.is_empty() {
+            let hashes = self
+                .supported_vk_hashes
+                .iter()
+                .map(|hash| {
+                    let hash = hash
+                        .strip_prefix("0x")
+                        .or_else(|| hash.strip_prefix("0X"))
+                        .unwrap_or(hash);
+                    format!("0x{hash}")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            query.append_pair("supported_vk_hashes", &hashes);
+        }
+        drop(query);
+        url
+    }
+
     /// Pick the next assigned ZiSK batch from the server.
     ///
     /// Returns `None` if no batches are available.
     pub async fn pick_next_batch(&self) -> anyhow::Result<Option<ZiskBatchData>> {
-        let url = format!(
-            "{}prover-jobs/v1/ZiSK/pick?id={}",
-            self.base_url, self.prover_id
-        );
+        let url = self.pick_url("ZiSK/pick");
 
         let started_at = Instant::now();
-        let resp = self.client.post(&url).send().await?;
+        let resp = self.client.post(url).send().await?;
         ZISK_PROVER_METRICS.http_latency[&Method::Pick].observe(started_at.elapsed());
 
         if resp.status() == reqwest::StatusCode::NO_CONTENT
@@ -198,13 +230,10 @@ impl SequencerClient {
     pub async fn pick_next_aggregation_job(
         &self,
     ) -> anyhow::Result<Option<ZiskAggregationJobData>> {
-        let url = format!(
-            "{}prover-jobs/v1/ZiSK-AGG/pick?id={}",
-            self.base_url, self.prover_id
-        );
+        let url = self.pick_url("ZiSK-AGG/pick");
 
         let started_at = Instant::now();
-        let resp = self.client.post(&url).send().await?;
+        let resp = self.client.post(url).send().await?;
         ZISK_PROVER_METRICS.http_latency[&Method::PickAggregation].observe(started_at.elapsed());
 
         if resp.status() == reqwest::StatusCode::NO_CONTENT
@@ -233,6 +262,7 @@ impl SequencerClient {
         Ok(Some(ZiskAggregationJobData {
             from_batch,
             to_batch,
+            vk_hash: pick.vk_hash,
             streams,
         }))
     }
@@ -270,5 +300,39 @@ impl SequencerClient {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SequencerClient;
+
+    #[test]
+    fn pick_urls_advertise_complete_zisk_identities() {
+        let first = "11".repeat(32);
+        let second = "22".repeat(32);
+        let client = SequencerClient::new(
+            "http://localhost:3124",
+            "prover one",
+            &[first.clone(), second.clone()],
+        )
+        .unwrap();
+
+        for endpoint in ["ZiSK/pick", "ZiSK-AGG/pick"] {
+            let url = client.pick_url(endpoint);
+            let query: std::collections::HashMap<_, _> = url.query_pairs().collect();
+            assert_eq!(query.get("id").unwrap(), "prover one");
+            assert_eq!(
+                query.get("supported_vk_hashes").unwrap(),
+                &format!("0x{first},0x{second}")
+            );
+        }
+    }
+
+    #[test]
+    fn empty_capability_list_keeps_legacy_pick_query() {
+        let client = SequencerClient::new("http://localhost:3124", "p", &[]).unwrap();
+        let url = client.pick_url("ZiSK/pick");
+        assert_eq!(url.query(), Some("id=p"));
     }
 }

@@ -173,10 +173,10 @@ key covers every range width.
    the daemon submits that stream with empty public values — the stream
    carries its own publics.
 4. **Verification at submission** (server): the stream shape, the program-VK
-   and vadcop-VK tripwires for the batch's protocol version
-   (`prover_api.zisk_vks`), the batch commitment, and the native STARK
-   verification (`zisk-verifier`) all run before the server buffers the
-   stream as range input.
+   and vadcop-VK tripwires from the compiled release manifest for the batch's
+   protocol version, the batch commitment, and the native STARK verification
+   (`zisk-verifier`) all run before the server buffers the stream as range
+   input.
 
 ### Per batch range
 
@@ -238,10 +238,10 @@ is caught at the layer that notices first:
 
 | Value | What it is | Pinned in |
 |---|---|---|
-| guest `programVK` | ROM merkle root of `out/zksync-os-zisk-guest` | `guest/GUEST_PROGRAM_VK`, server `prover_api.zisk_vks[].program_vk` tripwire, L1 `ZiskVerifier.innerProgramVK()` |
-| aggregator `programVK` | ROM merkle root of `out/zksync-os-zisk-guest-aggregator` | `guest-aggregator/GUEST_PROGRAM_VK`, server `prover_api.zisk_aggregation.program_vk`, L1 `ZiskVerifier.aggregatorProgramVK()` |
-| `rootCVadcopFinal` | ZiSK vadcop-final circuit VK | server `prover_api.zisk_vks[].vadcop_vk`, L1 `ZiskVerifier.rootCVadcopFinal()`, binding digest |
-| ZiSK VK hash | `keccak256` over the three pins above, in that order | L1 `ZiskVerifier.verificationKeyHash()` |
+| guest `programVK` | ROM merkle root of `out/zksync-os-zisk-guest` | `guest/GUEST_PROGRAM_VK`, server release manifest, L1 `ZiskVerifier.innerProgramVK()` |
+| aggregator `programVK` | ROM merkle root of `out/zksync-os-zisk-guest-aggregator` | `guest-aggregator/GUEST_PROGRAM_VK`, server release manifest, L1 `ZiskVerifier.aggregatorProgramVK()` |
+| `rootCVadcopFinal` | ZiSK vadcop-final circuit VK | server release manifest, L1 `ZiskVerifier.rootCVadcopFinal()`, binding digest |
+| ZiSK VK hash | `keccak256` over the three pins above, in that order | server capability registry and startup check, L1 `ZiskVerifier.verificationKeyHash()` |
 
 Current values, with ZiSK v0.18.0:
 
@@ -261,13 +261,13 @@ inputs of those builds** — any change there, including formatting, rotates
 the programVKs. Rotations are deliberate: rebuild with `--record`, then run
 the manually dispatched `Rotate program VK pins` workflow against that branch.
 It re-derives both identities and opens a draft pin-update PR when required.
-Update the server tripwires, the L1 pins and the proof fixtures together from
-the reviewed release manifest.
+Update the server's versioned manifest, the L1 pins and the proof fixtures
+together from the reviewed release manifest.
 
-The server keys its per-batch tripwires by protocol version, so an upgrade
-window where two versions coexist validates each batch against its own guest
-build. Add the new version's entry to `prover_api.zisk_vks` to cover a guest
-rotation. The aggregator programVK stays a single value.
+The server maps each protocol version to a compiled ZiSK proving release, so an
+upgrade window where two versions coexist validates each batch against its own
+manifest. Adding a version is a reviewed server binary change, like adding an
+Airbender `ProvingVersion`; it is not an operator-local key override.
 
 ## Rollout ladder
 

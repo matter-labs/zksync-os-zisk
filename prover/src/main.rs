@@ -259,7 +259,8 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(exporter.start(metrics_addr));
     tracing::info!(address = %metrics_addr, "metrics server started");
 
-    let client = sequencer_client::SequencerClient::new(&args.sequencer_url, &prover_id)?;
+    let client =
+        sequencer_client::SequencerClient::new(&args.sequencer_url, &prover_id, &supported_vks)?;
     tracing::info!(url = client.url(), "connected to sequencer");
 
     let prover = prover::ZiskProver::new(
@@ -309,10 +310,24 @@ async fn main() -> anyhow::Result<()> {
         if args.aggregation {
             match client.pick_next_aggregation_job().await {
                 Ok(Some(job)) => {
+                    if !supported_vks.is_empty() {
+                        let vk_norm = normalize_vk_hash(&job.vk_hash);
+                        if job.vk_hash.is_empty() || !supported_vks.contains(&vk_norm) {
+                            tracing::warn!(
+                                from = job.from_batch,
+                                to = job.to_batch,
+                                vk_hash = %job.vk_hash,
+                                "aggregation server returned an unsupported ZiSK identity; skipping"
+                            );
+                            tokio::time::sleep(Duration::from_secs(10)).await;
+                            continue;
+                        }
+                    }
                     tracing::info!(
                         from = job.from_batch,
                         to = job.to_batch,
                         proofs = job.streams.len(),
+                        vk_hash = %job.vk_hash,
                         "picked ZiSK aggregation range"
                     );
                     let streams: Vec<Vec<u8>> =

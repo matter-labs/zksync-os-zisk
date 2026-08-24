@@ -89,7 +89,7 @@ jobs:
 
   verification-keys:
     name: ZiSK verification keys (derived and pin-verified)
-    needs: guest-elfs
+    needs: [guest-elfs, host-tools]
     runs-on: matterlabs-ci-runner-high-performance
     timeout-minutes: 180
     steps:
@@ -104,11 +104,19 @@ jobs:
           name: zksync-os-zisk-guest-elfs-${{ env.TAG }}.tar.gz
           path: guest-artifact
 
+      - name: Download host tools
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: zksync-os-zisk-prover-${{ env.TAG }}-${{ env.TARGET }}.tar.gz
+          path: host-artifact
+
       # Recheck the producer job's outputs against the reviewed pins before deriving from them.
       - name: Extract and verify both guest ELFs
         run: |
           mkdir out
           tar -xzf "guest-artifact/zksync-os-zisk-guest-elfs-${TAG}.tar.gz" -C out
+          mkdir host-tools
+          tar -xzf "host-artifact/zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz" -C host-tools
           test "$(sha256sum out/zksync-os-zisk-guest | cut -d' ' -f1)" = \
             "$(tr -d '[:space:]' < guest/GUEST_ELF_SHA256)"
           test "$(sha256sum out/zksync-os-zisk-guest-aggregator | cut -d' ' -f1)" = \
@@ -161,6 +169,9 @@ jobs:
             --aggregator-verkey /tmp/vk-aggregator/program.verkey.bin \
             --aggregator-record guest-aggregator/GUEST_PROGRAM_VK \
             --vadcop-verkey "$vadcop_verkey" \
+            --guest-archive "guest-artifact/zksync-os-zisk-guest-elfs-${TAG}.tar.gz" \
+            --prover-archive "host-artifact/zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz" \
+            --prover-service host-tools/zksync-os-zisk-prover-service \
             --output verification-keys \
             --summary "$GITHUB_STEP_SUMMARY"
           tar -czf "zksync-os-zisk-verification-keys-${TAG}.tar.gz" \
