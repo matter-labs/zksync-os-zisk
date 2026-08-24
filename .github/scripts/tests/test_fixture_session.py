@@ -66,10 +66,6 @@ def values() -> dict:
         "chained_trace": trace,
         "chained_pi": trace[-1],
         "binding_digest": digest,
-        "batch_proof": "aa" * 768,
-        "batch_public_values": inner[2:] + commitments[0][2:] + "00" * 224 + root[2:],
-        "aggregated_proof": "cc" * 768,
-        "aggregated_public_values": aggregator[2:] + digest[2:] + "00" * 224 + root[2:],
     }
 
 
@@ -104,54 +100,6 @@ class FixturePublicationTests(unittest.TestCase):
         self.assertIn(word(0x31)[2:], prover.read_text())
         self.assertIn(word(0x11)[2:], prover.read_text())
         self.assertEqual(vadcop.read_bytes(), b"new validated proof")
-
-    def test_updates_both_external_era_contracts_tests(self) -> None:
-        relative = Path("l1-contracts/test/foundry/l1/unit/concrete/Verifier")
-        directory = self.root / relative
-        directory.mkdir(parents=True)
-        range_words = [
-            "INNER_PROGRAM_VK",
-            "AGGREGATOR_PROGRAM_VK",
-            "ROOT_C_VADCOP_FINAL",
-            "COMMITMENT_1",
-            "COMMITMENT_2",
-            "COMMITMENT_3",
-            "COMMITMENT_4",
-            "CHAINED_PI",
-            "DIGEST",
-        ]
-        (directory / "MultiProofRangeVectorTest.t.sol").write_text(
-            "\n".join(
-                f"bytes32 internal constant {name} = {word(0)};" for name in range_words
-            )
-            + "\n"
-        )
-        proof_source = "\n".join(
-            [
-                'bytes internal constant BATCH_PROOF = hex"00";',
-                'bytes internal constant BATCH_PUBLIC_VALUES = hex"00";',
-                'bytes internal constant AGGREGATED_PROOF = hex"00";',
-                'bytes internal constant AGGREGATED_PUBLIC_VALUES = hex"00";',
-            ]
-            + [
-                f"bytes32 internal constant COMMITMENT_{index} = {word(0)};"
-                for index in range(1, 5)
-            ]
-        )
-        proof_path = directory / "ZiskVerifierRealProofTest.t.sol"
-        proof_path.write_text(proof_source + "\n")
-
-        fixture_session.update_era_contracts(self.root, values())
-
-        range_result = (directory / "MultiProofRangeVectorTest.t.sol").read_text()
-        proof_result = proof_path.read_text()
-        self.assertIn(word(0x31), range_result)
-        self.assertIn(word(0x41), range_result)
-        self.assertIn('hex"' + "aa" * 768 + '"', proof_result)
-        expected_publics = word(0x32)[2:] + word(0x41)[2:] + "00" * 224 + word(0x33)[2:]
-        self.assertIn('hex"' + expected_publics + '"', proof_result)
-        self.assertIn(word(0x14), proof_result)
-
 
 if __name__ == "__main__":
     unittest.main()

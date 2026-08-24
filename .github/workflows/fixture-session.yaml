@@ -279,55 +279,6 @@ jobs:
         working-directory: zisk-verifier
         run: cargo test --all-features verifies_the_real_vadcop_final_proof_file
 
-      - name: Build reviewable publication patches
-        run: |
-          set -euo pipefail
-          mkdir -p session/publication
-          git diff --binary > session/publication/zksync-os-zisk-fixture-update.patch
-          era_dir="$RUNNER_TEMP/era-contracts"
-          git clone --filter=blob:none https://github.com/matter-labs/era-contracts.git "$era_dir"
-          git -C "$era_dir" fetch origin refs/pull/2305/head
-          git -C "$era_dir" checkout --detach FETCH_HEAD
-          python3 session/tools/apply-fixture-session.py \
-            --values session/fixture-values.json \
-            --era-contracts-root "$era_dir"
-          git -C "$era_dir" diff --binary > session/publication/era-contracts-fixture-update.patch
-          era_base="$(git -C "$era_dir" rev-parse HEAD)"
-          run_url="$(jq -r .metadata.run_url session/fixture-values.json)"
-          cat > session/publication/ERA_CONTRACTS_UPDATE.md <<EOF
-          # Separate era-contracts fixture update
-
-          This patch is intentionally not applied cross-repository. It was generated against
-          matter-labs/era-contracts pull request 2305 at commit \`$era_base\` from the validated
-          ZiSK [fixture session]($run_url).
-
-          From an era-contracts checkout at that commit:
-
-          \`\`\`bash
-          git apply --index era-contracts-fixture-update.patch
-          cd l1-contracts
-          yarn build:foundry
-          yarn foundry test --match-contract MultiProofRangeVectorTest
-          yarn foundry test --match-contract ZiskVerifierRealProofTest
-          \`\`\`
-
-          Open a separate PR in matter-labs/era-contracts. Its ZiskVerifier inner programVK pin
-          must already have been rotated through the official verifier/VK flow; this patch updates
-          only the generated real-proof and range-vector tests.
-          EOF
-
-      - name: Upload publication patches and instructions
-        uses: actions/upload-artifact@v4
-        with:
-          name: zisk-fixture-publication
-          path: |
-            session/fixture-values.json
-            session/publication/zksync-os-zisk-fixture-update.patch
-            session/publication/era-contracts-fixture-update.patch
-            session/publication/ERA_CONTRACTS_UPDATE.md
-          if-no-files-found: error
-          retention-days: 14
-
       - name: Open or update the in-repository fixture PR
         env:
           GH_TOKEN: ${{ secrets.ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE }}
@@ -375,7 +326,7 @@ jobs:
           - \`prover/tests/real_aggregation_vector.rs\`
           - \`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin\`
 
-          The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests. The corresponding era-contracts updates remain a separate PR; the workflow artifact contains an exact patch and instructions.
+          The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests.
           EOF
 
           existing="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \

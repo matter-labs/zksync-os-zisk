@@ -190,11 +190,6 @@ fi
 check "binding digest (independent fold)" "${binding_digest}" \
     "$(field "${SESSION_DIR}/aggregated-inspect.txt" 'publics\[0..32\]')"
 
-batch_proof="$(sed -nE 's/^PROOF\([0-9]+\): //p' "${SESSION_DIR}/batch1-inspect.txt")"
-batch_public_values="$(sed -nE 's/^PUBLIC_VALUES\([0-9]+\): //p' "${SESSION_DIR}/batch1-inspect.txt")"
-aggregated_proof="$(sed -nE 's/^PROOF\([0-9]+\): //p' "${SESSION_DIR}/aggregated-inspect.txt")"
-aggregated_public_values="$(sed -nE 's/^PUBLIC_VALUES\([0-9]+\): //p' "${SESSION_DIR}/aggregated-inspect.txt")"
-
 jq -n \
     --slurpfile metadata "${metadata}" \
     --slurpfile input_manifest "${manifest}" \
@@ -209,10 +204,6 @@ jq -n \
     --arg a4 "${chained_trace[3]}" \
     --arg chained_pi "${chained_pi}" \
     --arg binding_digest "${binding_digest}" \
-    --arg batch_proof "${batch_proof}" \
-    --arg batch_public_values "${batch_public_values}" \
-    --arg aggregated_proof "${aggregated_proof}" \
-    --arg aggregated_public_values "${aggregated_public_values}" \
     '{
         schema_version: 1,
         metadata: $metadata[0],
@@ -222,19 +213,11 @@ jq -n \
         chained_trace: [$a1, $a2, $a3, $a4],
         chained_pi: $chained_pi,
         binding_digest: $binding_digest,
-        batch_proof: $batch_proof,
-        batch_public_values: $batch_public_values,
-        aggregated_proof: $aggregated_proof,
-        aggregated_public_values: $aggregated_public_values,
         repository_updates: [
             "guest-aggregator/BINDING_VECTOR.md",
             "guest-aggregator/src/lib.rs",
             "prover/tests/real_aggregation_vector.rs",
             "prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
-        ],
-        external_updates: [
-            "l1-contracts/test/foundry/l1/unit/concrete/Verifier/MultiProofRangeVectorTest.t.sol",
-            "l1-contracts/test/foundry/l1/unit/concrete/Verifier/ZiskVerifierRealProofTest.t.sol"
         ]
     }' > "${SESSION_DIR}/fixture-values.json"
 
@@ -283,12 +266,6 @@ echo "==> writing SUMMARY.md"
     echo "The publisher opens or updates a separate in-repository fixture PR with:"
     echo
     jq -r '.repository_updates[] | "- `" + . + "`"' "${SESSION_DIR}/fixture-values.json"
-    echo
-    echo "The two era-contracts fixture tests are not updated cross-repository. The"
-    echo "publication artifact contains an apply script, values JSON, and exact"
-    echo "instructions for a separate era-contracts PR:"
-    echo
-    jq -r '.external_updates[] | "- `" + . + "`"' "${SESSION_DIR}/fixture-values.json"
 } > "${SESSION_DIR}/SUMMARY.md"
 
 echo "session complete: ${SESSION_DIR}/SUMMARY.md"
