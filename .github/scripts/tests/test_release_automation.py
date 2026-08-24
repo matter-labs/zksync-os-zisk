@@ -124,6 +124,21 @@ class RotateProgramVkTests(unittest.TestCase):
         self.assertTrue(metadata["updated"])
         self.assertEqual(metadata["program_vk_limbs"], derived_limbs)
 
+    def test_pending_record_can_be_filled_by_authorized_rotation(self) -> None:
+        self.record.write_text(
+            "# programVK awaits the official proving-key derivation\nPENDING\n"
+        )
+        derived_limbs = [9, 10, 11, 12]
+        derived = canonical(derived_limbs)
+        metadata = self.run_rotation(derived_limbs, update=True)
+        result = self.record.read_text()
+        self.assertIn(f"\n{derived}\n", result)
+        self.assertNotIn("PENDING", result)
+        self.assertNotIn("# History: PENDING", result)
+        self.assertIsNone(metadata["recorded_program_vk"])
+        self.assertTrue(metadata["changed"])
+        self.assertTrue(metadata["updated"])
+
 
 class ReleaseSummaryTests(unittest.TestCase):
     def test_summary_contains_operator_identities(self) -> None:
