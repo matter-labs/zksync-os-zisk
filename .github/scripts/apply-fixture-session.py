@@ -11,7 +11,6 @@ from pathlib import Path
 
 
 HEX32 = re.compile(r"^0x[0-9a-f]{64}$")
-HEX_BYTES = re.compile(r"^[0-9a-f]+$")
 
 
 def replace_once(source: str, pattern: str, replacement: str, label: str) -> str:
@@ -46,16 +45,6 @@ def load_values(path: Path) -> dict:
     metadata = values["metadata"]
     for key in ("inner_program_vk", "aggregator_program_vk", "root_c_vadcop_final"):
         unprefixed(metadata[key], key)
-    for key in ("batch_proof", "batch_public_values", "aggregated_proof", "aggregated_public_values"):
-        raw = values[key]
-        if not raw or len(raw) % 2 or HEX_BYTES.fullmatch(raw) is None:
-            raise ValueError(f"{key}: expected non-empty even-length lowercase hex")
-    if len(values["batch_public_values"]) != 640:
-        raise ValueError("batch public values must contain 320 bytes")
-    if len(values["aggregated_public_values"]) != 640:
-        raise ValueError("aggregated public values must contain 320 bytes")
-    if len(values["batch_proof"]) != 1536 or len(values["aggregated_proof"]) != 1536:
-        raise ValueError("each PLONK proof must contain 768 bytes")
     manifest = values["input_manifest"]
     batches = manifest.get("batches")
     if manifest.get("schema_version") != 1 or not isinstance(batches, list) or len(batches) != 4:
@@ -72,22 +61,6 @@ def load_values(path: Path) -> dict:
             raise ValueError(f"input manifest record {index} is inconsistent")
     if trace[-1] != values["chained_pi"]:
         raise ValueError("final chained trace value differs from chained_pi")
-    inner = unprefixed(metadata["inner_program_vk"], "inner_program_vk")
-    aggregator = unprefixed(metadata["aggregator_program_vk"], "aggregator_program_vk")
-    root = unprefixed(metadata["root_c_vadcop_final"], "root_c_vadcop_final")
-    commitment = unprefixed(commitments[0], "commitment_1")
-    digest = unprefixed(values["binding_digest"], "binding_digest")
-    batch_publics = values["batch_public_values"]
-    aggregated_publics = values["aggregated_public_values"]
-    if batch_publics[:64] != inner or batch_publics[64:128] != commitment or batch_publics[-64:] != root:
-        raise ValueError("batch public values disagree with the validated identities")
-    if (
-        aggregated_publics[:64] != aggregator
-        or aggregated_publics[64:128] != digest
-        or aggregated_publics[-64:] != root
-        or set(aggregated_publics[128:-64]) != {"0"}
-    ):
-        raise ValueError("aggregated public values disagree with the validated identities")
     return values
 
 
@@ -205,9 +178,6 @@ PLONK-wrapped aggregate has wire public-values bytes `[32..64]` equal to
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
 `prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin` in a separate PR.
-The corresponding `era-contracts` test updates remain a separate PR; the
-session publication artifact contains their patch and application
-instructions.
 """
 
 
@@ -229,75 +199,14 @@ def update_repository(root: Path, values: dict, vadcop: Path) -> None:
     shutil.copyfile(vadcop, destination)
 
 
-def replace_solidity_bytes(source: str, name: str, value: str, label: str) -> str:
-    return replace_once(
-        source,
-        rf'(bytes internal constant {name}\s*=\s*hex")[0-9a-f]+(";)',
-        rf"\g<1>{value}\g<2>",
-        label,
-    )
-
-
-def replace_solidity_word(source: str, name: str, value: str, label: str) -> str:
-    return replace_once(
-        source,
-        rf'(bytes32 internal constant {name}\s*=\s*)0x[0-9a-f]{{64}}(;)',
-        rf"\g<1>{value}\g<2>",
-        label,
-    )
-
-
-def update_era_contracts(root: Path, values: dict) -> None:
-    metadata = values["metadata"]
-    relative = Path("l1-contracts/test/foundry/l1/unit/concrete/Verifier")
-    range_path = root / relative / "MultiProofRangeVectorTest.t.sol"
-    source = range_path.read_text()
-    words = {
-        "INNER_PROGRAM_VK": metadata["inner_program_vk"],
-        "AGGREGATOR_PROGRAM_VK": metadata["aggregator_program_vk"],
-        "ROOT_C_VADCOP_FINAL": metadata["root_c_vadcop_final"],
-        "CHAINED_PI": values["chained_pi"],
-        "DIGEST": values["binding_digest"],
-    }
-    words.update(
-        {f"COMMITMENT_{index}": value for index, value in enumerate(values["proved_commitments"], 1)}
-    )
-    for name, value in words.items():
-        source = replace_solidity_word(source, name, value, f"{range_path}:{name}")
-    range_path.write_text(source)
-
-    proof_path = root / relative / "ZiskVerifierRealProofTest.t.sol"
-    source = proof_path.read_text()
-    for name, key in (
-        ("BATCH_PROOF", "batch_proof"),
-        ("BATCH_PUBLIC_VALUES", "batch_public_values"),
-        ("AGGREGATED_PROOF", "aggregated_proof"),
-        ("AGGREGATED_PUBLIC_VALUES", "aggregated_public_values"),
-    ):
-        source = replace_solidity_bytes(source, name, values[key], f"{proof_path}:{name}")
-    for index, value in enumerate(values["proved_commitments"], 1):
-        source = replace_solidity_word(
-            source, f"COMMITMENT_{index}", value, f"{proof_path}:COMMITMENT_{index}"
-        )
-    proof_path.write_text(source)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--values", type=Path, required=True)
-    parser.add_argument("--vadcop", type=Path)
-    parser.add_argument("--repo-root", type=Path)
-    parser.add_argument("--era-contracts-root", type=Path)
+    parser.add_argument("--vadcop", type=Path, required=True)
+    parser.add_argument("--repo-root", type=Path, required=True)
     args = parser.parse_args()
     values = load_values(args.values)
-    if args.repo_root is None and args.era_contracts_root is None:
-        parser.error("provide --repo-root and/or --era-contracts-root")
-    if args.repo_root is not None:
-        if args.vadcop is None:
-            parser.error("--vadcop is required with --repo-root")
-        update_repository(args.repo_root, values, args.vadcop)
-    if args.era_contracts_root is not None:
-        update_era_contracts(args.era_contracts_root, values)
+    update_repository(args.repo_root, values, args.vadcop)
 
 
 if __name__ == "__main__":

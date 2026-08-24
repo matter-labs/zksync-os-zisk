@@ -63,8 +63,7 @@ extracted from each of the four guest proofs, in order.
 The separate publisher job updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
 `prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin` through an automation
-PR. The corresponding two `era-contracts` test updates remain a separate PR;
-the workflow emits their machine-applicable patch and exact instructions.
+PR.
 Real-batch end-to-end coverage remains in zksync-os-server's prover-tests CI.
 
 ```text
