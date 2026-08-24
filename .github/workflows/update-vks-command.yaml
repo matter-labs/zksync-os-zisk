@@ -11,7 +11,6 @@ concurrency:
 permissions:
   actions: write
   contents: read
-  issues: write
   pull-requests: read
 
 jobs:
@@ -70,7 +69,6 @@ jobs:
           HEAD_REF: ${{ steps.request.outputs.head_ref }}
           HEAD_SHA: ${{ steps.request.outputs.head_sha }}
           BASE_REF: ${{ steps.request.outputs.base_ref }}
-          COMMENT_ID: ${{ github.event.comment.id }}
           PR_NUMBER: ${{ github.event.issue.number }}
         run: |
           set -euo pipefail
@@ -80,10 +78,6 @@ jobs:
             --ref "$HEAD_REF" \
             -f base_ref="$BASE_REF" \
             -f rotation_scope=inner
-
-          gh api --method POST \
-            "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
-            -f content=rocket >/dev/null
 
           {
             echo "## Program VK rotation dispatched"
