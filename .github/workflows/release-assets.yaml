@@ -1,0 +1,109 @@
+name: Release assets
+
+# Uploads the guest ELFs tarball, the host tools tarball, and one SHA256SUMS to every published release (prereleases included).
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and upload assets for."
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+  TARGET: x86_64-unknown-linux-gnu
+
+defaults:
+  run:
+    shell: 'bash -ex {0}'
+
+jobs:
+  guest-elfs:
+    name: Guest ELFs (reproducible build, hash-verified)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      # Both scripts exit non-zero on a hash mismatch, so a mismatched ELF fails the job and nothing is published.
+      - name: Build both guest ELFs in the pinned containers
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
+
+      - name: Pack guest ELFs tarball
+        run: |
+          tar -czf "zksync-os-zisk-guest-elfs-${TAG}.tar.gz" \
+              -C out zksync-os-zisk-guest zksync-os-zisk-guest-aggregator
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zksync-os-zisk-guest-elfs-${{ env.TAG }}.tar.gz
+          path: zksync-os-zisk-guest-elfs-${{ env.TAG }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  host-tools:
+    name: Host tools (x86_64-unknown-linux-gnu)
+    # 22.04 keeps the glibc floor at 2.35 so the binaries run on Ubuntu 22.04 prover boxes.
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # CPU-only host daemon and debug tools; all GPU work lives in cargo-zisk, which users install via ziskup.
+      - name: Build host tools
+        working-directory: prover
+        run: cargo build --release --locked
+
+      - name: Pack host tools tarball
+        run: |
+          tar -czf "zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz" \
+              -C prover/target/release \
+              zksync-os-zisk-prover-service aggregator_input inspect_proof
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: zksync-os-zisk-prover-${{ env.TAG }}-${{ env.TARGET }}.tar.gz
+          path: zksync-os-zisk-prover-${{ env.TAG }}-${{ env.TARGET }}.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Checksum and upload to the release
+    needs: [guest-elfs, host-tools]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tarballs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: '*.tar.gz'
+          path: dist
+          merge-multiple: true
+
+      # One SHA256SUMS over all assets; downstream verifies with `sha256sum -c`.
+      - name: Write SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: gh release upload "${TAG}" dist/* --clobber -R "${GITHUB_REPOSITORY}"

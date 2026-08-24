@@ -1,0 +1,132 @@
+name: Docker build and release
+
+# Builds the zksync-os-zisk-prover image and pushes it to every registry whose credentials are present (ghcr always; Docker Hub and GAR when their secrets exist).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Tag of an image to build."
+        type: string
+        required: true
+  push:
+    branches:
+      - main
+    tags:
+      - '[0-9]*'
+  pull_request:
+    paths:
+      - 'docker/zksync-os-zisk-prover/**'
+      - '.github/workflows/stage-build.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: 'bash -ex {0}'
+
+permissions:
+  packages: write
+  contents: read
+
+env:
+  IMAGE_NAME: zksync-os-zisk-prover
+
+jobs:
+  build-image:
+    name: Build and push zksync-os-zisk-prover
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag_name || '' }}
+
+      - name: Free runner disk space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+
+      # Populates out/ for the Dockerfile; both scripts exit non-zero on a hash mismatch, failing the job before any image is built.
+      - name: Build the guest ELFs in the pinned containers
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
+
+      # Registries without credentials are dropped from the image list so login and push never fail on missing secrets.
+      - name: Detect registry credentials
+        id: registries
+        env:
+          HAS_DOCKERHUB: ${{ secrets.DOCKERHUB_USER != '' && secrets.DOCKERHUB_TOKEN != '' }}
+          HAS_GAR: ${{ secrets.GAR_CREDENTIALS != '' }}
+        run: |
+          images="ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}"
+          [[ "${HAS_DOCKERHUB}" == "true" ]] && images+=$'\n'"matterlabs/${IMAGE_NAME}"
+          [[ "${HAS_GAR}" == "true" ]] && images+=$'\n'"us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${IMAGE_NAME}"
+          {
+            echo "images<<IMAGES"
+            echo "${images}"
+            echo "IMAGES"
+            echo "has_dockerhub=${HAS_DOCKERHUB}"
+            echo "has_gar=${HAS_GAR}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        if: steps.registries.outputs.has_dockerhub == 'true'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Authenticate to Google Cloud
+        if: steps.registries.outputs.has_gar == 'true'
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          credentials_json: ${{ secrets.GAR_CREDENTIALS }}
+
+      - name: Login to Google Artifact Registry
+        if: steps.registries.outputs.has_gar == 'true'
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+
+      - name: Compute SHA tag
+        id: sha-tag
+        run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: ${{ steps.registries.outputs.images }}
+          tags: |
+            type=raw,value=${{ inputs.tag_name }},enable=${{ inputs.tag_name != '' }}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ steps.sha-tag.outputs.tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=ref,event=pr
+
+      - name: Define whether to save cache
+        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+        id: set-cache-to
+        run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      # No sccache build-args: hosted runners have no GCS credentials; the Dockerfile ARGs stay wired for self-hosted runners.
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: docker/zksync-os-zisk-prover/Dockerfile
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: ${{ github.event_name != 'pull_request' }}
+          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-prover:buildcache'
+          cache-to: ${{ steps.set-cache-to.outputs.cache-to }}

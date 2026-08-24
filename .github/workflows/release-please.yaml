@@ -1,0 +1,26 @@
+name: Release-please
+
+# Maintains the release PR from conventional commits on main and publishes the GitHub release when it merges.
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          # RELEASE_TOKEN is a PAT, so the published release fires release-assets; the MATTERLABS_BOTS_* app secrets zksync-ci-common needs are not shared here.
+          token: ${{ secrets.RELEASE_TOKEN }}
+          config-file: .github/release-please/config.json
+          manifest-file: .github/release-please/manifest.json

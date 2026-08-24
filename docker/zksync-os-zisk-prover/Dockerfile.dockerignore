@@ -1,0 +1,10 @@
+# Context for the production image only: prover sources, aggregator crate (path dep + recorded hash), guest recorded hash, verified ELFs in out/.
+.git
+**/target
+lib
+tools
+docs
+zisk-verifier
+guest/*
+!guest/GUEST_ELF_SHA256
+guest-aggregator/build
