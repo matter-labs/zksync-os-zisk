@@ -281,12 +281,12 @@ jobs:
 
       - name: Open or update the in-repository fixture PR
         env:
-          GH_TOKEN: ${{ secrets.ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE }}
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: ZKSYNC_ADMIN_BOT_ORG_REPO_WRITE is required to publish the fixture PR" >&2
+            echo "ERROR: RELEASE_TOKEN is required to publish the fixture PR" >&2
             exit 1
           fi
           git config user.name "github-actions[bot]"
