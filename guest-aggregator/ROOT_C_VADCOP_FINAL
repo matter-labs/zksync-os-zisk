@@ -1,0 +1,7 @@
+# rootCVadcopFinal for the ZiSK v0.18.0 proving-key setup.
+#
+# Unlike a programVK, this commits to ZiSK's pinned vadcop-final circuit and
+# does not rotate when either repository guest ELF changes. Fixture generation
+# reads this record as its single source of truth and proves that both emitted
+# proof forms carry it.
+0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
