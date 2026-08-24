@@ -1,0 +1,95 @@
+name: Update program VKs from PR comment
+
+on:
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: update-program-vks-pr-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  dispatch:
+    name: authorize and dispatch rotation
+    if: >-
+      github.event.issue.pull_request &&
+      github.event.comment.body == '/update-vks'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Authorize the command and resolve the PR
+        id: request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          permission="$(gh api \
+            "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" \
+            --jq .permission)"
+          case "$permission" in
+            admin|write) ;;
+            *)
+              echo "ERROR: /update-vks requires write access; $ACTOR has $permission" >&2
+              exit 1
+              ;;
+          esac
+
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          state="$(jq -r .state <<<"$pr")"
+          head_repo="$(jq -r .head.repo.full_name <<<"$pr")"
+          head_ref="$(jq -r .head.ref <<<"$pr")"
+          head_sha="$(jq -r .head.sha <<<"$pr")"
+          base_ref="$(jq -r .base.ref <<<"$pr")"
+
+          if [[ "$state" != open ]]; then
+            echo "ERROR: PR #$PR_NUMBER is not open" >&2
+            exit 1
+          fi
+          if [[ "$head_repo" != "$GITHUB_REPOSITORY" ]]; then
+            echo "ERROR: /update-vks does not execute workflow code from forks" >&2
+            exit 1
+          fi
+
+          {
+            echo "head_ref=$head_ref"
+            echo "head_sha=$head_sha"
+            echo "base_ref=$base_ref"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch program VK rotation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REF: ${{ steps.request.outputs.head_ref }}
+          HEAD_SHA: ${{ steps.request.outputs.head_sha }}
+          BASE_REF: ${{ steps.request.outputs.base_ref }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run rotate-program-vks.yaml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$HEAD_REF" \
+            -f base_ref="$BASE_REF" \
+            -f rotation_scope=inner
+
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket >/dev/null
+
+          {
+            echo "## Program VK rotation dispatched"
+            echo
+            echo "PR: #$PR_NUMBER"
+            echo "Workflow ref: \`$HEAD_REF\` at \`$HEAD_SHA\`"
+            echo "Rotation base: \`$BASE_REF\`"
+            echo "Scope: \`inner\`"
+          } >> "$GITHUB_STEP_SUMMARY"
