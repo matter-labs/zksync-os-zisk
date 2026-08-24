@@ -1,6 +1,6 @@
 name: Docker build and release
 
-# Builds the zksync-os-zisk-prover image and pushes it to every registry whose credentials are present (ghcr always; Docker Hub and GAR when their secrets exist).
+# Builds the zksync-os-zisk-prover image and pushes it to every registry whose credentials are present (ghcr always; GAR when its secret exists).
 
 on:
   workflow_dispatch:
@@ -61,7 +61,6 @@ jobs:
           HAS_GAR: ${{ secrets.GAR_CREDENTIALS != '' }}
         run: |
           images="ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}"
-          [[ "${HAS_DOCKERHUB}" == "true" ]] && images+=$'\n'"matterlabs/${IMAGE_NAME}"
           [[ "${HAS_GAR}" == "true" ]] && images+=$'\n'"us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${IMAGE_NAME}"
           {
             echo "images<<IMAGES"
@@ -78,6 +77,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub (airbender pushes only to ghcr + GAR too).
       - name: Login to Docker Hub
         if: steps.registries.outputs.has_dockerhub == 'true'
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
