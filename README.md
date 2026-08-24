@@ -100,7 +100,7 @@ key tarball with these files:
 | File in `zksync-os-zisk-verification-keys-<tag>.tar.gz` | Contents |
 |---|---|
 | `*.verkey.bin` | Raw ZiSK VK files with four little-endian u64 limbs. |
-| `zisk-release.json` | Schema-v2 identity: release and toolchain, both ELFs and VKs, vadcop root, guest/host archives, prover-service digest, and the combined ZiSK VK hash. |
+| `zisk-release.json` | Schema-v1 identity: release and toolchain, both ELFs and VKs, vadcop root, guest/host archives, prover-service digest, and the combined ZiSK VK hash. |
 
 Consumers pin a release tag, extract the verification-key tarball, and read
 the canonical keys and artifact digests from `zisk-release.json`. The manifest

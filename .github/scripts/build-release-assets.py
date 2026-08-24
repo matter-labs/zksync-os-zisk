@@ -240,7 +240,7 @@ def main() -> None:
     ).hex()
 
     manifest = {
-        "schema_version": 2,
+        "schema_version": 1,
         "release": {
             "repository": "matter-labs/zksync-os-zisk",
             "tag": args.tag,

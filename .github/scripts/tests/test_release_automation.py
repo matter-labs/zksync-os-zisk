@@ -244,7 +244,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                 },
             )
             manifest = json.loads((output / "zisk-release.json").read_text())
-            self.assertEqual(manifest["schema_version"], 2)
+            self.assertEqual(manifest["schema_version"], 1)
             self.assertEqual(
                 manifest["programs"]["inner"]["elf"],
                 {
