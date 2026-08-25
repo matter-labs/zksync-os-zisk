@@ -100,19 +100,18 @@ key tarball with these files:
 | File in `zksync-os-zisk-verification-keys-<tag>.tar.gz` | Contents |
 |---|---|
 | `*.verkey.bin` | Raw ZiSK VK files with four little-endian u64 limbs. |
-| `zisk-release.json` | ELF hashes, canonical VK values, limbs, tag, commit and ZiSK VK hash. |
+| `zisk-release.json` | Schema-v1 identity: release and toolchain, both ELFs and VKs, vadcop root, guest/host archives, prover-service digest, and the combined ZiSK VK hash. |
 
-Consumers pin a release tag, verify the release-level `SHA256SUMS`, extract
-the verification-key tarball, and read the canonical keys from
-`zisk-release.json`. The ELFs are in the adjacent
-`zksync-os-zisk-guest-elfs-<tag>.tar.gz`. The manifest associates each full
-ELF hash with the program VK derived from that ELF. The release job checks the
-derived program VKs against the two committed `GUEST_PROGRAM_VK` pins before
-it uploads any asset. Its job summary presents the ELF digests, canonical VKs,
-root limbs, toolchain version, and ZiSK VK hash before the upload step.
+Consumers pin a release tag, extract the verification-key tarball, and read
+the canonical keys and artifact digests from `zisk-release.json`. The manifest
+associates each full ELF hash with the program VK derived from that ELF and
+also pins the two release archives and the host prover binary. The release job
+checks the derived program VKs against the two committed `GUEST_PROGRAM_VK`
+pins before it uploads any asset. Its job summary presents the ELF digests,
+canonical VKs, root limbs, toolchain version, and ZiSK VK hash before upload.
 
 [docs/multiprover.md](docs/multiprover.md) covers where each pin then lands
-in the server config and in the L1 verifier.
+in the server's compiled release registry and in the L1 verifier.
 
 ## Development
 

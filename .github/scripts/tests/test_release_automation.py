@@ -167,6 +167,14 @@ class ReleaseAssetsTests(unittest.TestCase):
             aggregator_elf = root / "aggregator-elf"
             inner_elf.write_bytes(b"inner ELF")
             aggregator_elf.write_bytes(b"aggregator ELF")
+            guest_archive = root / "zksync-os-zisk-guest-elfs-1.2.3.tar.gz"
+            prover_archive = (
+                root / "zksync-os-zisk-prover-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+            )
+            prover_service = root / "zksync-os-zisk-prover-service"
+            guest_archive.write_bytes(b"guest archive")
+            prover_archive.write_bytes(b"prover archive")
+            prover_service.write_bytes(b"prover service")
 
             inner_limbs = [1, 2, 3, 4]
             aggregator_limbs = [5, 6, 7, 8]
@@ -209,6 +217,12 @@ class ReleaseAssetsTests(unittest.TestCase):
                     str(aggregator_record),
                     "--vadcop-verkey",
                     str(vadcop_verkey),
+                    "--guest-archive",
+                    str(guest_archive),
+                    "--prover-archive",
+                    str(prover_archive),
+                    "--prover-service",
+                    str(prover_service),
                     "--output",
                     str(output),
                     "--summary",
@@ -230,6 +244,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                 },
             )
             manifest = json.loads((output / "zisk-release.json").read_text())
+            self.assertEqual(manifest["schema_version"], 1)
             self.assertEqual(
                 manifest["programs"]["inner"]["elf"],
                 {
@@ -241,6 +256,22 @@ class ReleaseAssetsTests(unittest.TestCase):
             self.assertEqual(
                 manifest["programs"]["aggregator"]["program_vk"],
                 canonical(aggregator_limbs),
+            )
+            self.assertEqual(
+                manifest["artifacts"]["prover_service"],
+                {
+                    "asset": "zksync-os-zisk-prover-service",
+                    "sha256": hashlib.sha256(prover_service.read_bytes()).hexdigest(),
+                    "size": len(prover_service.read_bytes()),
+                },
+            )
+            self.assertEqual(
+                manifest["artifacts"]["guest_archive"]["asset"],
+                guest_archive.name,
+            )
+            self.assertEqual(
+                manifest["artifacts"]["prover_archive"]["asset"],
+                prover_archive.name,
             )
             self.assertTrue(summary.read_text().startswith("## ZiSK release identities"))
 

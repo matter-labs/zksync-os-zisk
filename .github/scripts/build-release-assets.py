@@ -194,6 +194,9 @@ def main() -> None:
     parser.add_argument("--aggregator-verkey", type=Path, required=True)
     parser.add_argument("--aggregator-record", type=Path, required=True)
     parser.add_argument("--vadcop-verkey", type=Path, required=True)
+    parser.add_argument("--guest-archive", type=Path, required=True)
+    parser.add_argument("--prover-archive", type=Path, required=True)
+    parser.add_argument("--prover-service", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--summary", type=Path)
     args = parser.parse_args()
@@ -254,6 +257,13 @@ def main() -> None:
             "root_c": vadcop_vk,
             "root_c_limbs": vadcop_limbs,
             "verkey": vadcop_verkey,
+        },
+        "artifacts": {
+            "guest_archive": file_entry(args.guest_archive, args.guest_archive.name),
+            "prover_archive": file_entry(args.prover_archive, args.prover_archive.name),
+            "prover_service": file_entry(
+                args.prover_service, "zksync-os-zisk-prover-service"
+            ),
         },
         "zisk_verification_key_hash": zisk_vk_hash,
         "zisk_verification_key_hash_preimage": [

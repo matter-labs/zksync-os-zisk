@@ -86,7 +86,9 @@ cargo run --release -- \
 
 ### With VK hash filtering
 
-Only prove batches matching specific verification key hashes:
+Only prove work matching specific complete ZiSK identities. The daemon sends
+these hashes on both pick endpoints so the server filters before leasing; the
+post-pick check remains as a compatibility guard for older servers.
 
 ```bash
 cargo run --release -- \
@@ -119,7 +121,7 @@ cargo run --release -- \
 | `--work-dir` | `/tmp/zisk_proofs` | Intermediate proof files (cleaned after each proof). |
 | `--poll-interval-secs` | `5` | Seconds between polls when no work available. |
 | `--iterations` | `0` | Exit after N proofs (0 = unlimited). |
-| `--supported-vk` | (none) | Accepted VK hashes. Repeatable. Empty = accept all. |
+| `--supported-vk` | (none) | Advertised combined ZiSK VK hashes. Repeatable. Empty = accept all. |
 | `--vk-hashes-file` | (none) | File with VK hashes (one per line, # comments). |
 | `--metrics-address` | `0.0.0.0:3313` | Prometheus metrics endpoint. |
 | `--prover-id` | hostname | Identity reported to the sequencer's job API; shows up in server-side assignment/reassignment logs. |
@@ -201,10 +203,9 @@ across its worker pool while the daemon stays a single thin client.
 Server side: set the sequencer's ZiSK assignment timeout comfortably above the
 worst-case proving time for your batch sizes, or jobs are reassigned mid-proof
 and the late submission is rejected as `UnknownJob` (harmless, but wasted
-work). A daemon running a stale guest build is caught by the server's VK drift
-tripwires (`zisk_lane_vk_drift`, `zisk_lane_aggregated_vk_drift`) when
-`prover_api.zisk_vks` and `prover_api.zisk_aggregation.program_vk` are
-configured.
+work). A daemon running a stale guest, aggregator or recursive setup advertises
+a different combined ZiSK hash and receives no lease. Submission still checks
+the program and vadcop VKs against the server's compiled release manifest.
 
 ## License
 
