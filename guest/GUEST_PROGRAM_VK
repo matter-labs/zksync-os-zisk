@@ -5,17 +5,12 @@
 # identical to the prover daemon's public-values prefix and the server's
 # compiled ZiSK release manifest.
 #
-# PENDING for the container ELF with sha256
-# 306501cbb866fd73c735e01d2026911a7f5309ef301e75e63c46600ec74f1e1e
-# (see GUEST_ELF_SHA256). `program-setup` needs the proving keys, so derive
-# the value on a prover box and record it here, together with the limbs:
+# Derived with cargo-zisk 0.18.0 on 2026-08-25 by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32816250957
+# from the reproducible container ELF with sha256
+# 306501cbb866fd73c735e01d2026911a7f5309ef301e75e63c46600ec74f1e1e:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
-# Until then the server tripwire and the L1 `ZiskVerifier.innerProgramVK()`
-# pin have no value to take for this ELF.
 #
-# The value this replaces belongs to the ELF sha256
-# 81c0a04e266b8c3149a25d101579e5f38874e26f81ed6dd40a8eb4bd4979f267:
-#   0x05ecd169d11cf3ff5085d2e07ccf70bb13c92987642360e0df8522102856d3de
-# Root hash limbs: [426946317103461375, 5802275556545228987,
-#                   1425716418516836576, 16106317095152047070]
-PENDING
+# Root hash limbs: [9359950528683563713, 496374717852354135,
+#                   2188493718940594110, 17820487090703344188]
+0x81e5396a2969dac106e37a2d0d1306571e5f177136a0afbef74f16978dcea23c
