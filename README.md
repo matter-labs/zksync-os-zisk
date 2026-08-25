@@ -9,7 +9,7 @@ state transition on REVM, the zkVM guests that prove it, the proving daemon,
 and the off-chain verification helpers the server calls.
 
 | Read this | For |
-|---|---|
+|    ---    | --- |
 | [docs/multiprover.md](docs/multiprover.md) | The architecture: system flow, the independence invariant, wire formats, key pinning, and the rollout ladder. |
 | [prover/README.md](prover/README.md) | Operations: the daemon, its two proving backends, every flag, the metrics, and fleet deployment. |
 | [E2E_SETUP.md](E2E_SETUP.md) | Bring-up on one machine, from toolchain install to on-chain verification. |
