@@ -671,19 +671,19 @@ mod tests {
     #[test]
     fn cross_stack_binding_vector() {
         const INNER_PROGRAM_VK: &str =
-            "44e3d132399c8f3a03ce9672ba0ca00c6503db918731c7ab46d6faea445236ec";
+            "8168c5d383a50a9c7a40561b82bf679cc6dfdab0308417b4fea653362d78d080";
         const ROOT_C_VADCOP_FINAL: &str =
             "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
         const COMMITMENTS: [&str; 4] = [
-            "5aa9a30847d37bb20955cfe6a65c916d4d0c504c8e5bb0965db8a90aba1e9938",
-            "167bf6f9edbe48835b6b60e98af53552b0126765a804b86a3d7749daf05a5f4e",
-            "8f03a8b3b8b78ef7ab5004817c9ebf211b09533b9a0ad86440396f4605ab794b",
-            "3db0606d441cb57e9c621be9052e759db43e7c5c608c6e810ce673d9a4503c45",
+            "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
+            "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
+            "d5a7b4485d1aece18348655132e73c86b23fa0f251adb173f80123d05a914f15",
+            "c5ed165443011bac65df4d0f4240de3429c033996e9fce630a631e117537cd61",
         ];
         const RANGE_PUBLIC_INPUT: &str =
-            "00000000a71a9887b866c0837965ac66c2710d8232871ba878798109a919ea01";
+            "00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5";
         const DIGEST: &str =
-            "15fd80a250aa290d7bbf88b214a78cfed6f9fc1c8a094dae82762739f1e7fbf5";
+            "f29341c341f2622ba86a21bbb36dde9742e1983e531c278fd1cee04c6f823e2c";
 
         let program_vk = vk_words(unhex32(INNER_PROGRAM_VK));
         let vadcop_vk = vk_words(unhex32(ROOT_C_VADCOP_FINAL));
