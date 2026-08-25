@@ -1,7 +1,19 @@
-# programVK awaits the official ZiSK v0.18.0 proving-key derivation for the
-# reproducible guest ELF with sha256
-# ac5b351ee31b3929fb9cb5a63ed3dfbff6609b3af04f1f3d0febfacc12d1c1f3.
-PENDING
+# programVK (ZiSK ROM merkle root) of the reproducible guest ELF.
+# The value covers the ROM image only, so two ELFs that differ outside the
+# ROM image share it.
+# Serialization: the four ROM root-hash u64 limbs, big-endian, in order —
+# identical to the prover daemon's public-values prefix and the server's
+# `prover_api.zisk_vks[].program_vk` expectation.
+#
+# Derived with cargo-zisk 0.18.0 on 2026-08-25 by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32828103104
+# from the reproducible container ELF with sha256
+# ac5b351ee31b3929fb9cb5a63ed3dfbff6609b3af04f1f3d0febfacc12d1c1f3:
+#   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+#
+# Root hash limbs: [9324920540708014748, 8809135547294377884,
+#                   14330412989579270068, 18349445223923896448]
+0x8168c5d383a50a9c7a40561b82bf679cc6dfdab0308417b4fea653362d78d080
 
 # History: 0x4b1b8e583ed8f62b9af9bb13c96e922b10acd14f897070df3fd8618058da6eb7
 # (retired 2026-08-25 when the zksync-os-revm dependency source changed from
