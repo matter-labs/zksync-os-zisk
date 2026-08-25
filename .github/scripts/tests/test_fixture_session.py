@@ -52,9 +52,9 @@ def values() -> dict:
             "batches": [
                 {
                     "input_filename": f"batch-{index}.bin",
-                    "wire_version": 3,
-                    "spec_id": 1,
-                    "protocol_version_minor": 30,
+                    "wire_version": 5,
+                    "spec_id": 3,
+                    "protocol_version_minor": 32,
                     "framed_input_sha256": f"{index}" * 64,
                     "native_commitment": commitments[index - 1],
                 }
@@ -91,8 +91,8 @@ class FixturePublicationTests(unittest.TestCase):
 
         fixture_session.update_repository(self.root, values(), source_vadcop)
 
-        self.assertIn("intentionally frozen wire-v3", doc.read_text())
-        self.assertIn("AtlasV2 fixtures", doc.read_text())
+        self.assertIn("wire-v5 protocol-v32", doc.read_text())
+        self.assertIn("AtlasV4 fixtures", doc.read_text())
         self.assertIn(word(0x31)[2:], guest.read_text())
         self.assertIn(word(0x41)[2:], guest.read_text())
         self.assertIn(word(0x31)[2:], prover.read_text())

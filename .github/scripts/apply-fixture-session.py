@@ -47,9 +47,9 @@ def load_values(path: Path) -> dict:
     for index, (record, proved) in enumerate(zip(batches, commitments), 1):
         if (
             record.get("input_filename") != f"batch-{index}.bin"
-            or record.get("wire_version") != 3
-            or record.get("spec_id") != 1
-            or record.get("protocol_version_minor") != 30
+            or record.get("wire_version") != 5
+            or record.get("spec_id") != 3
+            or record.get("protocol_version_minor") != 32
             or record.get("native_commitment") != proved
             or re.fullmatch(r"[0-9a-f]{64}", record.get("framed_input_sha256", "")) is None
         ):
@@ -104,13 +104,12 @@ def render_binding_vector(values: dict) -> str:
     return f"""## Inputs (real 4-batch aggregation session, ZiSK v0.18.0, {date})
 
 This vector was produced by [fixture-session run]({run_url}) from
-`{metadata['selected_ref']}` at `{metadata['selected_sha']}`, after multi-wire
-support landed on `main`. The inputs are intentionally frozen wire-v3
-AtlasV2 fixtures (wire version 3, spec ID 1, protocol minor 30), encoded by
-`tools/test-utils` and executed natively through the version-dispatching
-bincode entry point. The proofs use the current guest ELF and current inner
-programVK; accepting the historical input format does not preserve the old
-programVK.
+`{metadata['selected_ref']}` at `{metadata['selected_sha']}`. The inputs are
+deterministic wire-v5 protocol-v32 AtlasV4 fixtures (wire version 5, spec ID 3,
+protocol minor 32), encoded by `tools/test-utils` and executed natively through
+the version-dispatching bincode entry point. They carry the four-word public
+input shape, including `chainConfigHash`, used by the current settlement
+contracts. The proofs use the current guest ELF and current inner programVK.
 
 Native commitments from `input-manifest.json` were automatically compared,
 in batch order, with the commitments extracted from all four guest proofs

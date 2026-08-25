@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Prove a four-batch ZiSK fixture session on a GPU box. The inputs are frozen
-# wire-v3 AtlasV2 batches, while both proofs use the current repository ELFs
-# and the current canonical programVK pins carried in session-metadata.json.
+# Prove a four-batch ZiSK fixture session on a GPU box. The inputs are
+# wire-v5 protocol-v32 AtlasV4 batches, while both proofs use the current
+# repository ELFs and canonical programVK pins in session-metadata.json.
 #
 # Required environment:
 #   CARGO_ZISK, GUEST_ELF, AGG_ELF, ZISK_PK, ZISK_SK, TOOLS_DIR, SESSION_DIR
@@ -106,8 +106,8 @@ jq -e '
     .schema_version == 1 and
     (.batches | length == 4) and
     all(.batches[];
-        .wire_version == 3 and .spec_id == 1 and
-        .protocol_version_minor == 30 and
+        .wire_version == 5 and .spec_id == 3 and
+        .protocol_version_minor == 32 and
         (.input_filename | test("^batch-[1-4]\\.bin$")) and
         (.framed_input_sha256 | test("^[0-9a-f]{64}$")) and
         (.native_commitment | test("^0x[0-9a-f]{64}$")))
@@ -232,10 +232,10 @@ echo "==> writing SUMMARY.md"
     echo "| aggregator programVK | \`${aggregator_program_vk}\` | \`[${aggregator_limbs}]\` |"
     echo "| rootCVadcopFinal | \`${root_c_vadcop_final}\` | \`[${root_limbs}]\` |"
     echo
-    echo "Inputs are intentionally frozen wire-v3 AtlasV2 fixtures: wire version"
-    echo "\`3\`, spec ID \`1\`, protocol minor \`30\`. They are proved by the"
-    echo "current inner guest ELF and current inner programVK above; compatibility"
-    echo "with historical input bytes does not preserve the old programVK."
+    echo "Inputs are deterministic wire-v5 protocol-v32 AtlasV4 fixtures: wire"
+    echo "version \`5\`, spec ID \`3\`, protocol minor \`32\`. They carry the"
+    echo "four-word public-input shape used by the current settlement contracts and"
+    echo "are proved by the current inner guest ELF and inner programVK above."
     echo
     echo "| Input | Framed SHA-256 | Native commitment | Proved commitment | Result |"
     echo "|---|---|---|---|---|"

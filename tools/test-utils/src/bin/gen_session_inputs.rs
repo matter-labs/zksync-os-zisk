@@ -1,15 +1,15 @@
 //! Generate the four framed guest inputs for a fixture session
 //! (.github/workflows/fixture-session.yaml) without a server: each input is
-//! the minimal proven batch from `lib/src/test_proven.rs`
-//! (`export_proven_input_for_emulator`), rebuilt here through lib's public
-//! API because lib/ is byte-frozen. The four batches differ only in the L1
-//! transaction's `value` word, which changes the tx hash and therefore the
-//! batch commitment. The forced-fail deposit refunds `value` to the sender,
-//! so each input carries the matching after-preimage and a one-write
-//! `BatchTreeUpdate` over the minimal tree.
+//! a minimal proven AtlasV4 batch rebuilt through lib's public API because
+//! lib/ is byte-frozen. The four batches differ only in the L1 transaction's
+//! `value` word, which changes the tx hash and therefore the batch commitment.
+//! The forced-fail deposit exercises the priority-operation commitment without
+//! adding execution writes, keeping the authenticated state fixture minimal.
 //!
-//! These are intentionally frozen wire-v3 AtlasV2 inputs. Every encoded batch
-//! is decoded and executed through the version-dispatching bincode entry point
+//! These are wire-v5 protocol-v32 AtlasV4 inputs. They include the v5 chain
+//! config, authenticated interop-boundary reads, the authenticated EIP-2935
+//! no-contract case and a sealed AtlasV4 block header. Every encoded batch is
+//! decoded and executed through the version-dispatching bincode entry point
 //! before it is written, so a schema or execution regression fails here
 //! instead of after a GPU prove.
 //!
@@ -19,29 +19,31 @@
 use alloy_primitives::{Address, B256, U256};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zksync_os_zisk_lib::block_header::compute_block_header_hash;
+use zksync_os_zisk_lib::block_roots::{block_tx_tree_root, receipt_leaf};
 use zksync_os_zisk_lib::commitment::block_hashes_blake;
 use zksync_os_zisk_lib::executor;
 use zksync_os_zisk_lib::merkle::{
-    blake2s, derive_account_properties_key, empty_subtree_hash, hash_leaf, AccountProperties,
-    TREE_DEPTH,
+    blake2s, derive_account_properties_key, derive_flat_storage_key, empty_subtree_hash, hash_leaf,
+    AccountProperties, NeighborProofEntry, SlotProofEntry, StorageProof, TreeLeaf, TREE_DEPTH,
 };
-use zksync_os_zisk_lib::wire::{
-    self,
-    v3::{
-        BatchInput, BatchMeta, BatchTreeUpdate, BlockInput, L2ToL1LogEntry, SlotProofEntry,
-        StorageProof, TreeLeaf, TxAuth, TxInput, WriteOp,
-    },
+use zksync_os_zisk_lib::types::{
+    BatchInput, BatchMeta, BlockInput, InteropCommitmentTreeProofs, InteropSlotProofs,
+    L2ToL1LogEntry, TxAuth, TxInput, BATCH_INPUT_VERSION, PUBDATA_CONTENT_FULL,
 };
+use zksync_os_zisk_lib::wire;
 
-const FIXTURE_SPEC_ID: u8 = 1;
-const FIXTURE_PROTOCOL_VERSION_MINOR: u32 = 30;
+const FIXTURE_SPEC_ID: u8 = 3;
+const FIXTURE_PROTOCOL_VERSION_MINOR: u32 = 32;
+const FIXTURE_BLOCK_NUMBER: u64 = 6;
+const FIXTURE_TIMESTAMP: u64 = 1_700_000_000;
+const FIXTURE_BASE_FEE: u64 = 250_000_000;
+const FIXTURE_BLOCK_GAS_LIMIT: u64 = 80_000_000;
+const FIXTURE_MAX_TX_GAS_LIMIT: u64 = 1 << 24;
 
 // This account-state nonce is public, deterministic test-vector data, not a
 // nonce used by a cryptographic primitive.
 const FIXTURE_ACCOUNT_NONCE: u64 = 0;
-
-const HISTORICAL_BATCH_1: &str =
-    include_str!("../../../../lib/testdata/wire-v3-session-batch-1.hex");
 
 #[derive(Serialize)]
 struct InputManifest {
@@ -66,25 +68,166 @@ fn compress(lhs: &B256, rhs: &B256) -> B256 {
     blake2s(&buf)
 }
 
-/// Minimal merkle tree: MIN_GUARD (idx 0), MAX_GUARD (idx 1), one data leaf
-/// (idx 2). Returns (root, leaf_count, siblings for leaf 2).
-fn build_minimal_tree(data_key: &B256, data_value: &B256) -> (B256, u64, Vec<B256>) {
-    let leaf0 = hash_leaf(&B256::ZERO, &B256::ZERO, 2);
-    let leaf1 = hash_leaf(&B256::repeat_byte(0xff), &B256::ZERO, 1);
-    let leaf2 = hash_leaf(data_key, data_value, 1);
+/// Dense Merkle tree over MIN/MAX guards plus the supplied data leaves. The
+/// returned leaves keep their dense indices, while their linked-list pointers
+/// follow key order.
+fn build_dense_tree(data: &[(B256, B256)]) -> (B256, Vec<(u64, TreeLeaf)>, Vec<Vec<B256>>) {
+    let mut records = vec![
+        (0, B256::ZERO, B256::ZERO),
+        (1, B256::repeat_byte(0xff), B256::ZERO),
+    ];
+    records.extend(
+        data.iter()
+            .enumerate()
+            .map(|(index, (key, value))| (2 + index as u64, *key, *value)),
+    );
 
-    let node_01 = compress(&leaf0, &leaf1);
-    let node_23 = compress(&leaf2, &empty_subtree_hash(0));
-    let mut current = compress(&node_01, &node_23);
-    for d in 2..TREE_DEPTH {
-        current = compress(&current, &empty_subtree_hash(d));
+    let mut order: Vec<usize> = (0..records.len()).collect();
+    order.sort_by_key(|&index| records[index].1);
+    let mut next_indices = vec![0; records.len()];
+    for adjacent in order.windows(2) {
+        next_indices[adjacent[0]] = records[adjacent[1]].0;
+    }
+    next_indices[*order.last().expect("tree contains guard leaves")] = 1;
+
+    let leaves: Vec<(u64, TreeLeaf)> = records
+        .iter()
+        .zip(&next_indices)
+        .map(|((index, key, value), next_index)| {
+            (
+                *index,
+                TreeLeaf {
+                    key: *key,
+                    value: *value,
+                    next_index: *next_index,
+                },
+            )
+        })
+        .collect();
+
+    let mut levels = vec![leaves
+        .iter()
+        .map(|(_, leaf)| hash_leaf(&leaf.key, &leaf.value, leaf.next_index))
+        .collect::<Vec<_>>()];
+    while levels.last().expect("leaf level exists").len() > 1 {
+        let depth = levels.len() - 1;
+        let current = levels.last().expect("current tree level exists");
+        let next = (0..current.len().div_ceil(2))
+            .map(|index| {
+                let left = current[2 * index];
+                let right = current
+                    .get(2 * index + 1)
+                    .copied()
+                    .unwrap_or_else(|| empty_subtree_hash(depth as u8));
+                compress(&left, &right)
+            })
+            .collect();
+        levels.push(next);
     }
 
-    let mut siblings = vec![empty_subtree_hash(0), node_01];
-    for d in 2..TREE_DEPTH {
-        siblings.push(empty_subtree_hash(d));
+    let mut root = levels.last().expect("root level exists")[0];
+    for depth in (levels.len() - 1)..TREE_DEPTH as usize {
+        root = compress(&root, &empty_subtree_hash(depth as u8));
     }
-    (current, 3, siblings)
+
+    let siblings = (0..leaves.len() as u64)
+        .map(|leaf_index| {
+            (0..TREE_DEPTH as usize)
+                .map(|depth| {
+                    let sibling_index = ((leaf_index >> depth) ^ 1) as usize;
+                    levels
+                        .get(depth)
+                        .and_then(|level| level.get(sibling_index))
+                        .copied()
+                        .unwrap_or_else(|| empty_subtree_hash(depth as u8))
+                })
+                .collect()
+        })
+        .collect();
+    (root, leaves, siblings)
+}
+
+fn non_existence_proof(
+    leaves: &[(u64, TreeLeaf)],
+    siblings: &[Vec<B256>],
+    key: &B256,
+) -> StorageProof {
+    let (left_index, left) = leaves
+        .iter()
+        .filter(|(_, leaf)| leaf.key < *key)
+        .max_by_key(|(_, leaf)| leaf.key)
+        .expect("MIN guard brackets every fixture key");
+    let (right_index, right) = leaves
+        .iter()
+        .find(|(index, _)| *index == left.next_index)
+        .expect("linked-list successor exists");
+    let entry = |index: u64, leaf: &TreeLeaf| SlotProofEntry {
+        index,
+        value: leaf.value,
+        next_index: leaf.next_index,
+        siblings: siblings[index as usize].clone(),
+    };
+    StorageProof::NonExisting {
+        left_neighbor: NeighborProofEntry {
+            entry: entry(*left_index, left),
+            leaf_key: left.key,
+        },
+        right_neighbor: NeighborProofEntry {
+            entry: entry(*right_index, right),
+            leaf_key: right.key,
+        },
+    }
+}
+
+fn interop_slot_keys() -> (B256, B256, B256) {
+    const SYSTEM_CONTEXT: [u8; 20] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x80, 0x0b,
+    ];
+    const MESSAGE_ROOT: [u8; 20] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x05,
+    ];
+    let settlement_layer_chain_id = derive_flat_storage_key(&SYSTEM_CONTEXT, &B256::ZERO);
+    let height = derive_flat_storage_key(&MESSAGE_ROOT, &B256::with_last_byte(0x04));
+    let nodes_base = alloy_primitives::keccak256(B256::with_last_byte(0x06));
+    let root_slot = alloy_primitives::keccak256(nodes_base);
+    (
+        settlement_layer_chain_id,
+        height,
+        derive_flat_storage_key(&MESSAGE_ROOT, &root_slot),
+    )
+}
+
+fn commitment_tree_slot_keys() -> (B256, B256) {
+    const COMMITMENT_TREE: [u8; 20] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01, 0x00, 0x12,
+    ];
+    let height = derive_flat_storage_key(&COMMITMENT_TREE, &B256::ZERO);
+    let nodes_base = alloy_primitives::keccak256(B256::with_last_byte(0x02));
+    let root_slot = alloy_primitives::keccak256(nodes_base);
+    (
+        height,
+        derive_flat_storage_key(&COMMITMENT_TREE, &root_slot),
+    )
+}
+
+fn interop_proofs_nonsettlement(
+    leaves: &[(u64, TreeLeaf)],
+    siblings: &[Vec<B256>],
+) -> InteropSlotProofs {
+    let (settlement_layer_chain_id, multichain_height, multichain_root) = interop_slot_keys();
+    let (commitment_tree_height, commitment_tree_root) = commitment_tree_slot_keys();
+
+    InteropSlotProofs {
+        sl_chain_id: non_existence_proof(leaves, siblings, &settlement_layer_chain_id),
+        multichain_height: non_existence_proof(leaves, siblings, &multichain_height),
+        multichain_root: non_existence_proof(leaves, siblings, &multichain_root),
+        commitment_tree: Some(InteropCommitmentTreeProofs {
+            height_begin: non_existence_proof(leaves, siblings, &commitment_tree_height),
+            root_begin: non_existence_proof(leaves, siblings, &commitment_tree_root),
+            height_end: non_existence_proof(leaves, siblings, &commitment_tree_height),
+            root_end: non_existence_proof(leaves, siblings, &commitment_tree_root),
+        }),
+    }
 }
 
 fn encode_account_props(fixture_account_nonce: u64, balance: U256) -> Vec<u8> {
@@ -126,68 +269,50 @@ fn build_batch_input(value: U256) -> BatchInput {
     let sender_props_hash = AccountProperties::hash(&sender_props);
     let sender_flat_key = derive_account_properties_key(&sender.into_array());
 
-    let (tree_root, leaf_count, siblings) =
-        build_minimal_tree(&sender_flat_key, &sender_props_hash);
+    let (tree_root, leaves, siblings) = build_dense_tree(&[(sender_flat_key, sender_props_hash)]);
+    let leaf_count = leaves.len() as u64;
     let proof = StorageProof::Existing(SlotProofEntry {
         index: 2,
         value: sender_props_hash,
-        next_index: 1,
-        siblings,
+        next_index: leaves[2].1.next_index,
+        siblings: siblings[2].clone(),
     });
 
-    // The failed deposit refunds `value` to reserved[1] (= sender), so the
-    // post-state carries the credited balance.
-    let sender_props_after = encode_account_props(FIXTURE_ACCOUNT_NONCE, balance_before + value);
-    let sender_props_after_hash = AccountProperties::hash(&sender_props_after);
-    let tree_update = BatchTreeUpdate {
-        operations: vec![WriteOp::Update { index: 2 }],
-        entries: vec![(sender_flat_key, sender_props_after_hash)],
-        // All three pre-state leaves: leaf 2 is written, the guards anchor
-        // its level-1 sibling; everything beyond leaf_count is provably empty.
-        sorted_leaves: vec![
-            (
-                0,
-                TreeLeaf {
-                    key: B256::ZERO,
-                    value: B256::ZERO,
-                    next_index: 2,
-                },
-            ),
-            (
-                1,
-                TreeLeaf {
-                    key: B256::repeat_byte(0xff),
-                    value: B256::ZERO,
-                    next_index: 1,
-                },
-            ),
-            (
-                2,
-                TreeLeaf {
-                    key: sender_flat_key,
-                    value: sender_props_hash,
-                    next_index: 1,
-                },
-            ),
-        ],
-        intermediate_hashes: vec![],
-        leaf_count_before: leaf_count,
-    };
+    // The forced-fail path has no state writes, so the same authenticated tree
+    // supplies the before/after interop-boundary proofs.
+    let interop_proofs = Some(interop_proofs_nonsettlement(&leaves, &siblings));
 
     let abi = l1_abi(sender, recipient, value);
     let l1_tx_hash = alloy_primitives::keccak256(&abi);
+    let parent_hash = B256::repeat_byte(0x77);
+    let history_address: Address = "0x0000f90827f1c53a10cb7a02335b175320002935"
+        .parse()
+        .expect("fixture history address is valid");
+    let history_key = derive_account_properties_key(&history_address.into_array());
+    let block_header_hash = compute_block_header_hash(
+        &parent_hash,
+        &sender.into_array(),
+        &block_tx_tree_root(&[l1_tx_hash]),
+        &block_tx_tree_root(&[receipt_leaf(0x7f, false, 21_000, &[])]),
+        FIXTURE_BLOCK_NUMBER,
+        FIXTURE_BLOCK_GAS_LIMIT,
+        21_000,
+        FIXTURE_TIMESTAMP,
+        &B256::from([1u8; 32]),
+        FIXTURE_BASE_FEE,
+    );
 
     BatchInput {
-        version: wire::v3::BATCH_INPUT_VERSION,
+        version: BATCH_INPUT_VERSION,
         chain_id: 270,
         spec_id: FIXTURE_SPEC_ID,
         protocol_version_minor: FIXTURE_PROTOCOL_VERSION_MINOR,
         batch_meta: BatchMeta {
             tree_root_before: tree_root,
             leaf_count_before: leaf_count,
-            block_number_before: 0,
+            block_number_before: FIXTURE_BLOCK_NUMBER - 1,
             last_block_timestamp_before: 0,
-            block_hashes_blake_before: block_hashes_blake(&[B256::ZERO; 255], &B256::ZERO),
+            block_hashes_blake_before: block_hashes_blake(&[B256::ZERO; 255], &parent_hash),
             previous_block_hashes: vec![],
             upgrade_tx_hash: B256::ZERO,
             da_commitment_scheme: 2,
@@ -195,24 +320,33 @@ fn build_batch_input(value: U256) -> BatchInput {
             multichain_root: B256::ZERO,
             sl_chain_id: 0,
             blob_versioned_hashes: vec![],
-            tree_update: Some(tree_update),
-            account_preimages_after: vec![(sender, sender_props_after)],
+            tree_update: None,
+            account_preimages_after: vec![],
             fri_proof_verification_enabled: false,
-            max_tx_gas_limit: 1 << 24,
-            interop_proofs: None,
+            max_tx_gas_limit: FIXTURE_MAX_TX_GAS_LIMIT,
+            pubdata_content: PUBDATA_CONTENT_FULL,
+            interop_proofs,
         },
         blocks: vec![BlockInput {
-            number: 1,
-            timestamp: 1700000000,
-            base_fee: 250_000_000,
-            gas_limit: 80_000_000,
+            number: FIXTURE_BLOCK_NUMBER,
+            timestamp: FIXTURE_TIMESTAMP,
+            base_fee: FIXTURE_BASE_FEE,
+            gas_limit: FIXTURE_BLOCK_GAS_LIMIT,
             coinbase: sender, // coinbase = sender so no extra account proof is needed
             prev_randao: B256::from([1u8; 32]),
-            block_header_hash: B256::ZERO,
-            storage_proofs: vec![(sender_flat_key, proof)],
+            block_header_hash,
+            storage_proofs: vec![
+                (sender_flat_key, proof),
+                (
+                    history_key,
+                    non_existence_proof(&leaves, &siblings, &history_key),
+                ),
+            ],
             account_preimages: vec![(sender, sender_props)],
             transactions: vec![TxInput {
                 chain_id: Some(270),
+                // Zero preserves the minimal force-fail path; the handler's
+                // intrinsic phase still reports 21,000 gas in the receipt.
                 gas_used_override: Some(0),
                 force_fail: true,
                 auth: TxAuth::L1 {
@@ -220,7 +354,7 @@ fn build_batch_input(value: U256) -> BatchInput {
                     abi_encoded: abi,
                 },
             }],
-            block_hashes: vec![],
+            block_hashes: vec![(FIXTURE_BLOCK_NUMBER - 1, parent_hash)],
             l2_to_l1_logs: vec![L2ToL1LogEntry {
                 l2_shard_id: 0,
                 is_service: true,
@@ -248,25 +382,6 @@ fn frame(wire_bytes: &[u8]) -> Vec<u8> {
     buf
 }
 
-fn decode_hex_fixture(source: &str) -> anyhow::Result<Vec<u8>> {
-    let digits: Vec<u8> = source
-        .bytes()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect();
-    let (pairs, remainder) = digits.as_slice().as_chunks::<2>();
-    anyhow::ensure!(
-        remainder.is_empty(),
-        "historical fixture has odd hex length"
-    );
-    pairs
-        .iter()
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair)?;
-            Ok(u8::from_str_radix(pair, 16)?)
-        })
-        .collect()
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -285,13 +400,13 @@ fn main() -> anyhow::Result<()> {
         let input = build_batch_input(one_eth * U256::from(n));
         let wire_bytes = wire::encode(&input)?;
         anyhow::ensure!(
-            wire::batch_input_version(&wire_bytes)? == wire::v3::BATCH_INPUT_VERSION,
+            wire::batch_input_version(&wire_bytes)? == BATCH_INPUT_VERSION,
             "batch {n}: encoded an unexpected wire version"
         );
-        let decoded: wire::v3::BatchInput = wire::decode(&wire_bytes)?;
+        let decoded: BatchInput = wire::decode(&wire_bytes)?;
         anyhow::ensure!(
             wire::encode(&decoded)? == wire_bytes,
-            "batch {n}: frozen wire-v3 round trip changed the bytes"
+            "batch {n}: wire-v5 round trip changed the bytes"
         );
         let (_output, commitment) =
             executor::execute_and_commit_from_bincode(&wire_bytes).map_err(anyhow::Error::msg)?;
@@ -304,24 +419,18 @@ fn main() -> anyhow::Result<()> {
 
         let filename = format!("batch-{n}.bin");
         let framed = frame(&wire_bytes);
-        if n == 1 {
-            anyhow::ensure!(
-                framed == decode_hex_fixture(HISTORICAL_BATCH_1)?,
-                "batch 1 differs from lib/testdata/wire-v3-session-batch-1.hex"
-            );
-        }
         std::fs::write(out_dir.join(&filename), &framed)?;
         let framed_input_sha256 = sha256_hex(&framed);
         println!(
             "{filename}: wire v{} spec {} minor {}; framed sha256 {}; native commitment {commitment}",
-            wire::v3::BATCH_INPUT_VERSION,
+            BATCH_INPUT_VERSION,
             FIXTURE_SPEC_ID,
             FIXTURE_PROTOCOL_VERSION_MINOR,
             framed_input_sha256
         );
         records.push(InputRecord {
             input_filename: filename,
-            wire_version: wire::v3::BATCH_INPUT_VERSION,
+            wire_version: BATCH_INPUT_VERSION,
             spec_id: FIXTURE_SPEC_ID,
             protocol_version_minor: FIXTURE_PROTOCOL_VERSION_MINOR,
             framed_input_sha256,
@@ -335,7 +444,7 @@ fn main() -> anyhow::Result<()> {
     manifest.push(b'\n');
     std::fs::write(out_dir.join("input-manifest.json"), manifest)?;
     println!(
-        "wrote 4 framed wire-v3 inputs and input-manifest.json to {}",
+        "wrote 4 framed wire-v5 inputs and input-manifest.json to {}",
         out_dir.display()
     );
     Ok(())

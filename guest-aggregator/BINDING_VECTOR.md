@@ -53,14 +53,16 @@ zisk-fixture-session workflow (run 32503874362) with both programVKs
 calibrated against the pins before proving.
 
 Future rotations use this repo's dispatch-only
-`.github/workflows/fixture-session.yaml`. Its inputs are intentionally frozen
-wire-v3 AtlasV2 fixtures (spec ID 1, protocol minor 30) built by
-`tools/test-utils` — no server-sealed batches are involved. The inputs retain
-their historical bytes and execution commitments, but their proofs use the
-current guest ELF and current inner programVK; wire compatibility does not
-preserve the old programVK. Before PLONK wrapping or aggregation, the workflow
-automatically compares the native manifest commitment with the commitment
-extracted from each of the four guest proofs, in order.
+`.github/workflows/fixture-session.yaml`. Its inputs are deterministic wire-v5
+protocol-v32 AtlasV4 fixtures (spec ID 3, protocol minor 32) built by
+`tools/test-utils` — no server-sealed batches are involved. They include the
+v5 chain configuration, authenticated interop boundary reads, the EIP-2935
+history-account proof and a sealed AtlasV4 block header. Their four-word public
+input includes `chainConfigHash`, matching the current settlement-contract
+shape. The proofs use the current guest ELF and current inner programVK. Before
+PLONK wrapping or aggregation, the workflow automatically compares the native
+manifest commitment with the commitment extracted from each of the four guest
+proofs, in order.
 
 The separate publisher job updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
