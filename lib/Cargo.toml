@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-zksync-os-revm = { git = "https://github.com/antoniolocascio-bot/zksync-os-revm", rev = "a49c249db5631140f8f17b9dbf0670e3aeeb8143", default-features = false }
+zksync-os-revm = { git = "https://github.com/matter-labs/zksync-os-revm", rev = "32872310b862e98bfa00a2f7c7ac701b83621066", default-features = false }
 revm = { version = "=42.0.1", default-features = false, features = ["std", "optional_balance_check", "serde", "tracer"] }
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }

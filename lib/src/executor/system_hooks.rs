@@ -221,6 +221,7 @@ mod tests {
             .tx_hash(B256::ZERO)
             .build()
             .expect("transaction builds");
+        evm.0.ctx.journaled_state.set_tx_number(0);
         evm.transact(transaction).expect("transaction runs");
         evm.0.ctx.journaled_state.take_l2_to_l1_logs()
     }
@@ -239,6 +240,7 @@ mod tests {
         assert_eq!(logs.len(), 1, "one leaf insertion emits one log");
         assert_eq!(logs[0].l2_shard_id, 0);
         assert!(logs[0].is_service);
+        assert_eq!(logs[0].tx_number_in_block, 0);
         assert_eq!(logs[0].sender, L2_INTEROP_COMMITMENT_TREE_ADDRESS);
         assert_eq!(logs[0].key, B256::ZERO);
         assert_eq!(logs[0].value, leaf);
