@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.5](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.4...0.0.5) (2026-08-27)
+
+
+### Features
+
+* **tools:** ZiSK divergence validator, witness-soundness framework, and a shareable dump conversion ([#31](https://github.com/matter-labs/zksync-os-zisk/issues/31)) ([ebe485f](https://github.com/matter-labs/zksync-os-zisk/commit/ebe485f6dc86469daaf7208d308de5bec14af2be))
+
 ## [0.0.4](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.3...0.0.4) (2026-08-26)
 
 
