@@ -7,7 +7,7 @@ Production image for the ZiSK prover daemon
 - the two hash-verified guest ELFs at `/app/elf/zksync-os-zisk-guest` and
   `/app/elf/zksync-os-zisk-guest-aggregator`, checked against the recorded
   `GUEST_ELF_SHA256` values during the image build
-- the ZiSK v0.18.0 GPU toolchain (`cargo-zisk`, `ziskemu`, `zisk-coordinator`,
+- the ZiSK v1.2.0-alpha GPU toolchain (`cargo-zisk`, `ziskemu`, `zisk-coordinator`,
   `zisk-worker`) at `/opt/zisk/bin`, installed with `ziskup --system --gpu --nokey`
 
 The base is a CUDA runtime image, so the container needs the NVIDIA container
@@ -33,7 +33,7 @@ The STARK + PLONK proving keys are ~26–40 GB, so they are **not** baked into
 the image (unlike the airbender image's CRS file). Two options:
 
 **1. Mounted volume (recommended).** Download the keys once on the host —
-`ziskup -v 0.18.0 --provingkey --gpu` for the STARK key plus
+`ziskup -v 1.2.0-alpha --provingkey --gpu` for the STARK key plus
 `ziskup setup_snark` for the PLONK key (they land in `~/.zisk/provingKey` and
 `~/.zisk/provingKeySnark`) — and mount them:
 
@@ -54,8 +54,8 @@ docker run --gpus all \
 persistent volume mounted at `/opt/zisk` the download happens once:
 
 ```bash
-ziskup -v 0.18.0 --system --prefix /opt/zisk --gpu --provingkey -y
-ziskup -v 0.18.0 --system --prefix /opt/zisk --gpu --provingkey --with-snark -y
+ziskup -v 1.2.0-alpha --system --prefix /opt/zisk --gpu --provingkey -y
+ziskup -v 1.2.0-alpha --system --prefix /opt/zisk --gpu --provingkey --with-snark -y
 ```
 
 The daemon defaults to the standard emulator, which runs under the default

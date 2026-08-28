@@ -3,11 +3,11 @@
 //! Two backends share one pipeline, selected by [`ProvingBackend`]:
 //! - [`ProvingBackend::Spawn`] (the default) runs one `cargo-zisk` process
 //!   per proof. The process loads the proving keys and initializes the GPU
-//!   on every invocation. ZiSK v0.18.0 supports this backend.
+//!   on every invocation.
 //! - [`ProvingBackend::Coordinator`] shells `zisk-prove-client` calls
 //!   against a resident `zisk-coordinator`, whose `zisk-worker` keeps the
 //!   keys and the GPU loaded for the service lifetime; the client binary
-//!   ships in the ZiSK v0.18.0 source tree.
+//!   ships in the ZiSK source tree.
 //!
 //! Startup runs a one-time setup per guest ELF. It must run before the first
 //! proof for that ELF.
@@ -34,12 +34,18 @@ use tokio_util::sync::CancellationToken;
 use crate::metrics::ZISK_PROVER_METRICS;
 
 const ZISK_SNARK_PROOF_BYTES: usize = 768;
-// programVK(32) + guest publics(256: ziskos's full 64-word output region,
-// the guest's 8 commitment words first, zeros after) + vadcopVK(32).
-// A real cargo-zisk v0.18 proof file carries the full 256-byte publics
-// region (draft-era code assumed 192 — settled by the first real parse;
-// regression-tested against a committed real proof file).
-const ZISK_PUBLIC_VALUES_BYTES: usize = 320;
+// programVK(32, u64 big-endian) + guest publics(512: ziskos's full 64-word
+// output region at full u64 width, 8 little-endian bytes per word, the
+// guest's 8 commitment words first and zeros after) + vadcopVK(32, u64
+// big-endian). This is the preimage of the SNARK's single public signal,
+// built exactly like zisk-common's `snark_publics_hash`.
+const ZISK_PUBLIC_VALUES_BYTES: usize = 576;
+/// u64 words in ziskos's guest output region.
+const ZISK_PUBLICS_WORDS: usize = 64;
+/// Hash family the aggregator guest can verify. `verify_zisk_proof` fixes it,
+/// and its underlying `verifier()` panics on any other family, which would
+/// abort inside the zkVM.
+const ZISK_PROOF_HASH_FAMILY: &str = "Poseidon1";
 /// Number of u64 words in the guest-ELF ROM root (program VK) and in the
 /// vadcop-final verification key.
 const PROGRAM_VK_LEN: usize = 4;
@@ -402,19 +408,13 @@ fn p(path: &Path) -> String {
 /// live on the worker.
 fn setup_args(backend: &ProvingBackend, elf: &Path) -> Vec<String> {
     match backend {
-        ProvingBackend::Spawn(spawn) => {
-            let mut args = vec![
-                "program-setup".to_string(),
-                "-e".into(),
-                p(elf),
-                "-k".into(),
-                p(&spawn.proving_key),
-            ];
-            if spawn.gpu {
-                args.push("-g".into());
-            }
-            args
-        }
+        ProvingBackend::Spawn(spawn) => vec![
+            "setup".to_string(),
+            "-e".into(),
+            p(elf),
+            "-k".into(),
+            p(&spawn.proving_key),
+        ],
         ProvingBackend::Coordinator { url } => vec![
             "--coordinator".to_string(),
             url.clone(),
@@ -460,8 +460,8 @@ fn prove_args(
             if spawn.gpu {
                 args.push("-g".into());
             }
-            if !spawn.asm_emulator {
-                args.push("--emulator".into());
+            if spawn.asm_emulator {
+                args.push("-a".into());
             }
             args
         }
@@ -540,20 +540,24 @@ async fn run_cancellable(
 }
 
 // ---------------------------------------------------------------------------
-// v0.18.0 proof-file parsing.
+// Proof-file parsing.
 //
-// `cargo-zisk prove --plonk -o <file>` writes bincode-2 (standard config) of
+// `cargo-zisk prove -o <file>` writes bincode-2 (standard config) of
 // zisk-common's `Proof` struct. Rather than depending on zisk-common (which
 // pulls in the whole proofman stack), we mirror the exact struct shapes and
 // deserialize with serde + bincode 2. Shapes must match
-// zisk@v0.18.0 `common/src/proof.rs` field-for-field.
+// zisk@v1.2.0-alpha `common/src/proof.rs` field-for-field.
+//
+// The encoding carries no version tag, and the 0.18 and 1.2.0 streams share a
+// prefix, so an older file decodes part-way before it diverges. The daemon
+// therefore selects the shape by the pinned toolchain version rather than by
+// probing the bytes.
 // ---------------------------------------------------------------------------
 
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
 struct ZiskProofFile {
     body: ZiskProofBody,
-    publics: ZiskPublicValues,
     program_vk: ZiskProgramVk,
 }
 
@@ -564,19 +568,51 @@ enum ZiskProofBody {
     Vadcop {
         proof: Vec<u64>,
         zisk_vk: Vec<u64>,
-        minimal: bool,
+        kind: ZiskVadcopKind,
+        hash: String,
+        publics_full: Vec<u64>,
     },
     Plonk {
         proof_bytes: Vec<u8>,
+        // The wrap key and the u32 publics view are decoded only to advance
+        // the deserializer; the wire values come from `publics_full` and
+        // `rootc`.
+        #[allow(dead_code)]
         plonk_vk: Box<ZiskPlonkVkBlob>,
+        #[allow(dead_code)]
+        publics: ZiskPublicValues,
+        publics_full: Vec<u64>,
+        rootc: Vec<u64>,
     },
+}
+
+/// Which vadcop flavor a proof carries. The variant owns the
+/// `is_vadcop_final_proof` public: 1 for a leaf, 0 for a recurser fold, absent
+/// for a compressed proof.
+#[cfg_attr(test, derive(serde::Serialize))]
+#[derive(serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+enum ZiskVadcopKind {
+    Final,
+    Recurser,
+    Minimal,
+}
+
+/// Hash family a verification key was produced under. A verification key is
+/// valid only against its own family.
+#[cfg_attr(test, derive(serde::Serialize))]
+#[derive(serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[allow(dead_code)]
+enum ZiskHashMode {
+    Poseidon1,
+    Poseidon2,
+    Blake3,
 }
 
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ZiskPlonkVkBlob {
     vadcop_vk: Vec<u64>,
-    #[allow(dead_code)]
     plonk_vkey: ZiskPlonkVkey,
 }
 
@@ -607,6 +643,7 @@ struct ZiskPlonkVkey {
 /// absent from the bincode stream, so only `data` is mirrored.
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct ZiskPublicValues {
     data: Vec<u8>,
 }
@@ -615,15 +652,28 @@ struct ZiskPublicValues {
 #[derive(serde::Deserialize)]
 struct ZiskProgramVk {
     vk: Vec<u64>,
+    #[allow(dead_code)]
+    hash_mode: ZiskHashMode,
+}
+
+/// Append `words` as big-endian u64s — the verification-key byte form.
+fn extend_be(out: &mut Vec<u8>, words: &[u64]) {
+    for word in words {
+        out.extend_from_slice(&word.to_be_bytes());
+    }
 }
 
 /// Extract `(proof, public_values)` in the server's wire format:
 /// - proof: the 768-byte BN254 PLONK SNARK.
-/// - public_values (320 bytes): `program_vk (32B, u64 BE) ‖ publics.data
-///   (256B) ‖ vadcop_final_vk (32B, u64 BE)` — the exact preimage of the
-///   circuit's single public signal (`sha256(...) % r`), matching
-///   zisk-common's `PublicValues::bytes_solidity` and the on-chain
-///   `ZiskVerifier` digest reconstruction.
+/// - public_values (576 bytes): `program_vk (32B, u64 BE) ‖ guest publics
+///   (512B, 64 words of 8 LE bytes) ‖ rootCVadcopFinal (32B, u64 BE)` — the
+///   exact preimage of the circuit's single public signal
+///   (`sha256(...) % r`), matching zisk-common's `snark_publics_hash` and the
+///   on-chain `ZiskVerifier` digest reconstruction.
+///
+/// `rootc` is the verification key STAMPED into the proof, which is the
+/// vadcop-final key for a plain proof and a recurser key for a folded one.
+/// It is read from the file rather than derived, because the two differ.
 pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
     let data = std::fs::read(path)?;
     let (proof_file, consumed): (ZiskProofFile, usize) =
@@ -637,7 +687,9 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
 
     let ZiskProofBody::Plonk {
         proof_bytes,
-        plonk_vk,
+        publics_full,
+        rootc,
+        ..
     } = proof_file.body
     else {
         anyhow::bail!("proof file contains a Vadcop proof, expected Plonk (missing --plonk?)");
@@ -653,24 +705,29 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
         proof_file.program_vk.vk.len()
     );
     anyhow::ensure!(
-        plonk_vk.vadcop_vk.len() == PROGRAM_VK_LEN,
-        "vadcop VK has {} words, expected {PROGRAM_VK_LEN}",
-        plonk_vk.vadcop_vk.len()
+        rootc.len() == PROGRAM_VK_LEN,
+        "rootC has {} words, expected {PROGRAM_VK_LEN}",
+        rootc.len()
+    );
+    // `publics_full` is the flag-free `[program VK | inputs]` view; the guest
+    // publics the circuit hashes are the inputs half.
+    anyhow::ensure!(
+        publics_full.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS,
+        "publics_full has {} words, expected {}",
+        publics_full.len(),
+        PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS
     );
 
     let mut public_values = Vec::with_capacity(ZISK_PUBLIC_VALUES_BYTES);
-    for word in &proof_file.program_vk.vk {
-        public_values.extend_from_slice(&word.to_be_bytes());
+    extend_be(&mut public_values, &proof_file.program_vk.vk);
+    for word in &publics_full[PROGRAM_VK_LEN..] {
+        public_values.extend_from_slice(&word.to_le_bytes());
     }
-    public_values.extend_from_slice(&proof_file.publics.data);
-    for word in &plonk_vk.vadcop_vk {
-        public_values.extend_from_slice(&word.to_be_bytes());
-    }
+    extend_be(&mut public_values, &rootc);
     anyhow::ensure!(
         public_values.len() == ZISK_PUBLIC_VALUES_BYTES,
-        "public values length {} != {ZISK_PUBLIC_VALUES_BYTES} (publics data {} bytes)",
+        "public values length {} != {ZISK_PUBLIC_VALUES_BYTES}",
         public_values.len(),
-        proof_file.publics.data.len()
     );
 
     Ok(ZiskSnarkOutput {
@@ -686,7 +743,8 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
 /// the file holds only the BN254 wrap and the vadcop_final proof is gone).
 ///
 /// Stream layout (u64 LE words):
-/// `[minimal=0][n_publics=68][program_vk(4)][publics(64)][body][vadcop_vk(4)]`.
+/// `[minimal=0][n_publics=69][is_vadcop_final_proof=1][program_vk(4)]
+/// [publics(64)][body][vadcop_vk(4)]`.
 pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     use zksync_os_zisk_guest_aggregator as agg;
 
@@ -703,7 +761,9 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     let ZiskProofBody::Vadcop {
         proof,
         zisk_vk,
-        minimal,
+        kind,
+        hash,
+        publics_full,
     } = proof_file.body
     else {
         anyhow::bail!(
@@ -712,9 +772,15 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         );
     };
     anyhow::ensure!(
-        !minimal,
-        "proof file contains a minimal vadcop_final proof; the aggregator \
-         accepts only non-minimal proofs (Poseidon2-16 precompile path)"
+        kind == ZiskVadcopKind::Final,
+        "proof file carries a {kind:?} vadcop proof; the aggregator accepts \
+         only a non-minimal leaf proof"
+    );
+    // The in-guest verifier fixes the hash family, so a proof from another
+    // family would fail verification inside the zkVM with no diagnosis.
+    anyhow::ensure!(
+        hash == ZISK_PROOF_HASH_FAMILY,
+        "proof file uses hash family {hash}, expected {ZISK_PROOF_HASH_FAMILY}"
     );
     anyhow::ensure!(
         proof.len() == agg::VADCOP_FINAL_BODY_WORDS,
@@ -732,28 +798,27 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         "vadcop VK has {} words, expected {PROGRAM_VK_LEN}",
         zisk_vk.len()
     );
+    // `publics_full` is the canonical flag-free `[program VK | inputs]` view
+    // at full u64 width; the leaf flag lives in `kind`.
     anyhow::ensure!(
-        proof_file.publics.data.len() == agg::PUBLICS_WORDS * 4,
-        "publics region has {} bytes, expected {}",
-        proof_file.publics.data.len(),
-        agg::PUBLICS_WORDS * 4
+        publics_full.len() == PROGRAM_VK_LEN + agg::PUBLICS_WORDS,
+        "publics_full has {} words, expected {}",
+        publics_full.len(),
+        PROGRAM_VK_LEN + agg::PUBLICS_WORDS
+    );
+
+    // The stream carries the program VK inside `publics_full`. The aggregator
+    // reads it from there, so it must agree with the file's own field.
+    anyhow::ensure!(
+        publics_full[..PROGRAM_VK_LEN] == proof_file.program_vk.vk[..],
+        "publics_full program VK differs from the proof file's program VK"
     );
 
     let mut words: Vec<u64> = Vec::with_capacity(agg::PROOF_STREAM_WORDS);
     words.push(0); // non-minimal
-    words.push((PROGRAM_VK_LEN + agg::PUBLICS_WORDS) as u64); // n_publics = 68
-    words.extend_from_slice(&proof_file.program_vk.vk);
-    // Each public is a u32 stored LE in `data`, widened to a u64 word
-    // (mirrors zisk-common's `PublicValues::public_u64`).
-    words.extend(
-        proof_file
-            .publics
-            .data
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes(*c) as u64),
-    );
+    words.push(agg::EXPECTED_N_PUBLICS);
+    words.push(agg::IS_VADCOP_FINAL_PROOF);
+    words.extend_from_slice(&publics_full);
     words.extend_from_slice(&proof);
     words.extend_from_slice(&zisk_vk);
     debug_assert_eq!(words.len(), agg::PROOF_STREAM_WORDS);
@@ -797,21 +862,28 @@ mod tests {
     #[test]
     fn parse_proof_file_roundtrip() {
         let program_vk = vec![0x1111_2222_3333_4444u64; PROGRAM_VK_LEN];
-        let vadcop_vk = vec![0xaaaa_bbbb_cccc_ddddu64; PROGRAM_VK_LEN];
-        let publics_data = vec![0x42u8; ZISK_PUBLIC_VALUES_BYTES - 2 * PROGRAM_VK_LEN * 8];
+        let rootc = vec![0xaaaa_bbbb_cccc_ddddu64; PROGRAM_VK_LEN];
+        let mut publics_full = program_vk.clone();
+        publics_full.extend(std::iter::repeat_n(
+            0x4242_4242_4242_4242u64,
+            ZISK_PUBLICS_WORDS,
+        ));
         let proof = ZiskProofFile {
             body: ZiskProofBody::Plonk {
                 proof_bytes: vec![7u8; ZISK_SNARK_PROOF_BYTES],
                 plonk_vk: Box::new(ZiskPlonkVkBlob {
-                    vadcop_vk: vadcop_vk.clone(),
+                    vadcop_vk: rootc.clone(),
                     plonk_vkey: sample_vkey(),
                 }),
-            },
-            publics: ZiskPublicValues {
-                data: publics_data.clone(),
+                publics: ZiskPublicValues {
+                    data: vec![0u8; 256],
+                },
+                publics_full: publics_full.clone(),
+                rootc: rootc.clone(),
             },
             program_vk: ZiskProgramVk {
                 vk: program_vk.clone(),
+                hash_mode: ZiskHashMode::Poseidon1,
             },
         };
 
@@ -826,14 +898,23 @@ mod tests {
 
         assert_eq!(out.proof, vec![7u8; ZISK_SNARK_PROOF_BYTES]);
         assert_eq!(out.public_values.len(), ZISK_PUBLIC_VALUES_BYTES);
-        // program VK words big-endian first, then publics data, then vadcop VK.
+        // program VK big-endian first, then the guest publics little-endian,
+        // then rootCVadcopFinal big-endian.
         assert_eq!(
             &out.public_values[..8],
             0x1111_2222_3333_4444u64.to_be_bytes().as_slice()
         );
-        assert_eq!(out.public_values[32..288], publics_data[..]);
         assert_eq!(
-            &out.public_values[288..296],
+            &out.public_values[32..40],
+            0x4242_4242_4242_4242u64.to_le_bytes().as_slice()
+        );
+        assert!(
+            out.public_values[32..544]
+                .chunks_exact(8)
+                .all(|c| c == 0x4242_4242_4242_4242u64.to_le_bytes())
+        );
+        assert_eq!(
+            &out.public_values[544..552],
             0xaaaa_bbbb_cccc_ddddu64.to_be_bytes().as_slice()
         );
     }
@@ -845,19 +926,25 @@ mod tests {
         let program_vk = vec![1u64, 2, 3, 4];
         let zisk_vk = vec![5u64, 6, 7, 8];
         let body = vec![7u64; agg::VADCOP_FINAL_BODY_WORDS];
-        // 64 u32 publics, LE-packed: first 8 words carry 0x11111111.
-        let mut publics_data = vec![0u8; agg::PUBLICS_WORDS * 4];
-        publics_data[..32].copy_from_slice(&[0x11u8; 32]);
+        // `[program VK | inputs]`: the first 8 input words carry 0x11111111,
+        // which is the STF guest's commitment.
+        let mut publics_full = program_vk.clone();
+        publics_full.extend(std::iter::repeat_n(0u64, agg::PUBLICS_WORDS));
+        for word in publics_full[PROGRAM_VK_LEN..PROGRAM_VK_LEN + 8].iter_mut() {
+            *word = 0x1111_1111;
+        }
 
         let proof = ZiskProofFile {
             body: ZiskProofBody::Vadcop {
                 proof: body.clone(),
                 zisk_vk: zisk_vk.clone(),
-                minimal: false,
+                kind: ZiskVadcopKind::Final,
+                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
+                publics_full,
             },
-            publics: ZiskPublicValues { data: publics_data },
             program_vk: ZiskProgramVk {
                 vk: program_vk.clone(),
+                hash_mode: ZiskHashMode::Poseidon1,
             },
         };
         let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
@@ -877,7 +964,8 @@ mod tests {
         assert_eq!(frame.program_vk(), program_vk.as_slice());
         assert_eq!(frame.vadcop_vk(), zisk_vk.as_slice());
         assert_eq!(frame.commitment(), [0x11u8; 32]);
-        let body_start = agg::HEADER_WORDS + agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS;
+        let body_start =
+            agg::HEADER_WORDS + agg::LEAF_FLAG_WORDS + agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS;
         assert_eq!(
             &words[body_start..body_start + agg::VADCOP_FINAL_BODY_WORDS],
             body.as_slice()
@@ -899,9 +987,14 @@ mod tests {
                     vadcop_vk: vec![0; 4],
                     plonk_vkey: sample_vkey(),
                 }),
+                publics: ZiskPublicValues { data: vec![0; 256] },
+                publics_full: vec![0u64; PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS],
+                rootc: vec![0; 4],
             },
-            publics: ZiskPublicValues { data: vec![0; 256] },
-            program_vk: ZiskProgramVk { vk: vec![0; 4] },
+            program_vk: ZiskProgramVk {
+                vk: vec![0; 4],
+                hash_mode: ZiskHashMode::Poseidon1,
+            },
         };
         let path = dir.join("plonk.bin");
         std::fs::write(
@@ -914,15 +1007,19 @@ mod tests {
             .to_string();
         assert!(err.contains("Plonk"), "unexpected error: {err}");
 
-        // Minimal vadcop body — Poseidon2-8, no precompile: refused.
+        // Minimal (compressed) vadcop body: refused.
         let minimal = ZiskProofFile {
             body: ZiskProofBody::Vadcop {
                 proof: vec![7u64; agg::VADCOP_FINAL_BODY_WORDS],
                 zisk_vk: vec![0; 4],
-                minimal: true,
+                kind: ZiskVadcopKind::Minimal,
+                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
+                publics_full: vec![0u64; PROGRAM_VK_LEN + agg::PUBLICS_WORDS],
             },
-            publics: ZiskPublicValues { data: vec![0; 256] },
-            program_vk: ZiskProgramVk { vk: vec![0; 4] },
+            program_vk: ZiskProgramVk {
+                vk: vec![0; 4],
+                hash_mode: ZiskHashMode::Poseidon1,
+            },
         };
         let path = dir.join("minimal.bin");
         std::fs::write(
@@ -934,17 +1031,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         std::fs::remove_dir_all(&dir).ok();
-        assert!(err.contains("minimal"), "unexpected error: {err}");
+        assert!(err.contains("Minimal"), "unexpected error: {err}");
     }
 
     /// The guest-side body-size constant must match the pinned
     /// pil2-proofman verifier exactly — this is the only place the pin is
-    /// checked mechanically (see `VADCOP_FINAL_BODY_WORDS` docs).
+    /// checked mechanically (see `VADCOP_FINAL_BODY_WORDS` docs). The
+    /// aggregator verifies through `ziskos::zisklib::verify_zisk_proof`, which
+    /// fixes the hash family at Poseidon1, so the size comes from that family.
     #[test]
     fn vadcop_body_words_matches_pinned_verifier() {
+        use proofman_verifier::Verifier;
         assert_eq!(
             zksync_os_zisk_guest_aggregator::VADCOP_FINAL_BODY_WORDS * 8,
-            proofman_verifier::expected_vadcop_final_proof_bytes(),
+            proofman_verifier::Poseidon1Verifier.expected_vadcop_final_proof_bytes(),
         );
     }
 
@@ -954,10 +1054,14 @@ mod tests {
             body: ZiskProofBody::Vadcop {
                 proof: vec![1, 2, 3],
                 zisk_vk: vec![0; 4],
-                minimal: false,
+                kind: ZiskVadcopKind::Final,
+                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
+                publics_full: vec![0u64; PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS],
             },
-            publics: ZiskPublicValues { data: vec![] },
-            program_vk: ZiskProgramVk { vk: vec![0; 4] },
+            program_vk: ZiskProgramVk {
+                vk: vec![0; 4],
+                hash_mode: ZiskHashMode::Poseidon1,
+            },
         };
         let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
         let dir =
@@ -1000,20 +1104,14 @@ mod tests {
     }
 
     /// The spawn backend must invoke only subcommands and flags that the
-    /// pinned ZiSK v0.18.0 `cargo-zisk` accepts.
+    /// pinned `cargo-zisk` accepts. `setup` runs on the CPU and writes into
+    /// the ZiSK home, so it takes neither a GPU flag nor an output path.
     #[test]
-    fn spawn_setup_args_run_program_setup() {
+    fn spawn_setup_args_run_setup() {
         let args = setup_args(&spawn_backend(), Path::new("/elf/guest"));
         assert_eq!(
             args,
-            vec![
-                "program-setup",
-                "-e",
-                "/elf/guest",
-                "-k",
-                "/keys/provingKey",
-                "-g",
-            ]
+            vec!["setup", "-e", "/elf/guest", "-k", "/keys/provingKey"]
         );
     }
 
@@ -1044,7 +1142,6 @@ mod tests {
                 "-o",
                 "/wd/proof.bin",
                 "-g",
-                "--emulator",
             ]
         );
     }
@@ -1068,7 +1165,7 @@ mod tests {
             Path::new("/wd/proof.bin"),
             true,
         );
-        assert!(!args.iter().any(|a| a == "--emulator"));
+        assert!(args.iter().any(|a| a == "-a"));
     }
 
     /// Aggregated per-batch mode keeps the vadcop_final proof, so it must not

@@ -1,13 +1,13 @@
 //! Off-chain verification helpers for ZKsync OS ZiSK proofs.
 //!
 //! The server produces a ZiSK proof for each batch (the final BN254 PLONK
-//! wrap, 768 bytes) with 320 bytes of public values, then submits both to L1.
+//! wrap, 768 bytes) with 576 bytes of public values, then submits both to L1.
 //! This crate lets the server check the proof off-chain BEFORE it submits, so a
 //! bad proof fails fast on the box instead of on-chain.
 //!
 //! # What this crate verifies, and what it does NOT
 //!
-//! The pinned ZiSK toolchain (v0.18.0) does NOT expose a pure-Rust verifier for
+//! The pinned ZiSK toolchain does NOT expose a pure-Rust verifier for
 //! the final BN254 PLONK proof. `cargo-zisk verify` and `zisk_common::Proof::
 //! verify` both check the PLONK wrap by shelling out to the external `snarkjs`
 //! Node.js CLI (see `proofman::verify_snark_proof`). So a dependency-light,
@@ -36,8 +36,8 @@
 //!
 //! # On-chain layout (mirrored here)
 //!
-//! The 320-byte public values decode as
-//! `programVK(32) ‖ guest publics(256) ‖ rootCVadcopFinal(32)`. The circuit's
+//! The 576-byte public values decode as
+//! `programVK(32) ‖ guest publics(512) ‖ rootCVadcopFinal(32)`. The circuit's
 //! single public signal is `uint256(sha256(public_values)) mod r`, with `r` the
 //! BN254 scalar-field modulus. See `ZiskVerifier.sol`.
 
@@ -49,19 +49,20 @@ type U256 = ruint::Uint<256, 4>;
 /// The final BN254 PLONK proof size: 24 field elements, 32 bytes each.
 pub const PLONK_PROOF_BYTES: usize = 768;
 
-/// The ZiSK public-values size: `programVK(32) ‖ guest publics(256) ‖
+/// The ZiSK public-values size: `programVK(32) ‖ guest publics(512) ‖
 /// rootCVadcopFinal(32)`.
-pub const PUBLIC_VALUES_BYTES: usize = 320;
+pub const PUBLIC_VALUES_BYTES: usize = 576;
 
 /// Byte range of the `programVK` (the guest ELF ROM root) in the public values.
 pub const PROGRAM_VK_RANGE: core::ops::Range<usize> = 0..32;
 
-/// Byte range of the guest publics (ziskos's 64-word output block).
-pub const GUEST_PUBLICS_RANGE: core::ops::Range<usize> = 32..288;
+/// Byte range of the guest publics (ziskos's 64-word output block, each word
+/// 8 little-endian bytes).
+pub const GUEST_PUBLICS_RANGE: core::ops::Range<usize> = 32..544;
 
 /// Byte range of the `rootCVadcopFinal` (the vadcop-final VK) in the public
 /// values.
-pub const ROOT_C_VADCOP_FINAL_RANGE: core::ops::Range<usize> = 288..320;
+pub const ROOT_C_VADCOP_FINAL_RANGE: core::ops::Range<usize> = 544..576;
 
 /// The BN254 scalar-field modulus `r`, big-endian.
 /// `21888242871839275222246405745257275088548364400416034343698204186575808495617`.
@@ -81,7 +82,7 @@ pub const BN254_FR_MODULUS_BE: [u8; 32] = [
 pub struct ExpectedProgram {
     /// The guest ELF ROM root, 32 bytes big-endian (wire bytes `[0..32]`).
     pub program_vk: [u8; 32],
-    /// The vadcop-final VK, 32 bytes big-endian (wire bytes `[288..320]`).
+    /// The vadcop-final VK, 32 bytes big-endian (wire bytes `[544..576]`).
     pub root_c_vadcop_final: [u8; 32],
 }
 
@@ -174,7 +175,7 @@ pub fn program_vk(public_values: &[u8]) -> Result<[u8; 32], VerifyError> {
     Ok(public_values[PROGRAM_VK_RANGE].try_into().unwrap())
 }
 
-/// Read the `rootCVadcopFinal` suffix (wire bytes `[288..320]`) from the public
+/// Read the `rootCVadcopFinal` suffix (wire bytes `[544..576]`) from the public
 /// values.
 pub fn root_c_vadcop_final(public_values: &[u8]) -> Result<[u8; 32], VerifyError> {
     if public_values.len() != PUBLIC_VALUES_BYTES {
@@ -225,7 +226,7 @@ pub fn verify_plonk_bound(
 /// Check an aggregated-range final PLONK proof's wire form.
 ///
 /// The aggregated-range proof (the aggregator guest over N per-batch streams,
-/// with the PLONK wrap) has the same 768/320 wire shape as a per-batch proof,
+/// with the PLONK wrap) has the same 768/576 wire shape as a per-batch proof,
 /// so the same checks apply. As with [`verify_plonk`], this does NOT run the
 /// BN254 pairing.
 pub fn verify_aggregated_range(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError> {
@@ -251,13 +252,19 @@ pub use stark::{verify_vadcop_final_proof_file, verify_vadcop_final_stream};
 mod tests {
     use super::*;
 
-    /// Build the 320-byte public values from the three field hexes, with the
-    /// guest publics beyond the commitment left zero (the real proof's shape).
+    /// Build the public values from the three field hexes, with the guest
+    /// publics beyond the commitment left zero (the real proof's shape). Each
+    /// guest public is a u32 widened to a u64 and written little-endian, so
+    /// the commitment's eight words land four bytes apart in eight-byte slots.
     fn make_public_values(program_vk: &str, commitment: &str, vadcop_vk: &str) -> Vec<u8> {
         let mut pv = vec![0u8; PUBLIC_VALUES_BYTES];
-        pv[0..32].copy_from_slice(&unhex(program_vk));
-        pv[32..64].copy_from_slice(&unhex(commitment));
-        pv[288..320].copy_from_slice(&unhex(vadcop_vk));
+        pv[PROGRAM_VK_RANGE].copy_from_slice(&unhex(program_vk));
+        let commitment = unhex(commitment);
+        for (word, chunk) in commitment.chunks_exact(4).enumerate() {
+            let at = GUEST_PUBLICS_RANGE.start + word * 8;
+            pv[at..at + 4].copy_from_slice(chunk);
+        }
+        pv[ROOT_C_VADCOP_FINAL_RANGE].copy_from_slice(&unhex(vadcop_vk));
         pv
     }
 
@@ -269,26 +276,27 @@ mod tests {
         out
     }
 
-    // The pinned values from the committed real v0.18.0 PLONK proof
-    // (`prover/tests/data/real_proof_zisk_v0.18.0.bin`), also asserted by
+    // Sample field values. These exercise the wire shape only; the binding
+    // of a real proof to the released pins is asserted in
     // `prover/tests/real_proof_parse.rs`.
-    const REAL_PROGRAM_VK: &str =
+    const SAMPLE_PROGRAM_VK: &str =
         "1d16f620e2bc7e58044df7ee8d4284422a0dd37cf151cf79ecf324c131e50468";
-    const REAL_COMMITMENT: &str =
+    const SAMPLE_COMMITMENT: &str =
         "6c41981c6fd0bd9a9262fe3dcc9fe4f0d8e142651f80316a8846d6922b5214ea";
-    const REAL_VADCOP_VK: &str = "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
+    const SAMPLE_VADCOP_VK: &str =
+        "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
     #[test]
     fn verify_plonk_accepts_well_shaped_artifact() {
         let proof = vec![7u8; PLONK_PROOF_BYTES];
-        let pv = make_public_values(REAL_PROGRAM_VK, REAL_COMMITMENT, REAL_VADCOP_VK);
+        let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         assert_eq!(verify_plonk(&proof, &pv), Ok(()));
         assert_eq!(verify_aggregated_range(&proof, &pv), Ok(()));
     }
 
     #[test]
     fn verify_plonk_rejects_wrong_lengths() {
-        let pv = make_public_values(REAL_PROGRAM_VK, REAL_COMMITMENT, REAL_VADCOP_VK);
+        let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         assert_eq!(
             verify_plonk(&[0u8; 767], &pv),
             Err(VerifyError::ProofLength { got: 767 })
@@ -302,10 +310,10 @@ mod tests {
     #[test]
     fn verify_plonk_bound_binds_the_expected_keys() {
         let proof = vec![7u8; PLONK_PROOF_BYTES];
-        let pv = make_public_values(REAL_PROGRAM_VK, REAL_COMMITMENT, REAL_VADCOP_VK);
+        let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         let expected = ExpectedProgram {
-            program_vk: unhex(REAL_PROGRAM_VK),
-            root_c_vadcop_final: unhex(REAL_VADCOP_VK),
+            program_vk: unhex(SAMPLE_PROGRAM_VK),
+            root_c_vadcop_final: unhex(SAMPLE_VADCOP_VK),
         };
         assert_eq!(verify_plonk_bound(&proof, &pv, &expected), Ok(()));
 
@@ -328,7 +336,7 @@ mod tests {
 
     #[test]
     fn public_signal_is_reduced_deterministic_and_bit_sensitive() {
-        let pv = make_public_values(REAL_PROGRAM_VK, REAL_COMMITMENT, REAL_VADCOP_VK);
+        let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         let signal = public_signal(&pv).unwrap();
 
         // Deterministic.

@@ -42,9 +42,9 @@ RUN cargo build --release --locked --manifest-path prover/Cargo.toml \
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG ZISK_VERSION=0.18.0
+ARG ZISK_VERSION=1.2.0-alpha
 
-# build-essential + libgmp-dev: cargo-zisk program-setup assembles and links at runtime (-lgmp/-lgmpxx).
+# build-essential + libgmp-dev: cargo-zisk setup assembles and links at runtime (-lgmp/-lgmpxx).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates xz-utils build-essential libgmp-dev \
         openmpi-bin libopenmpi-dev libsodium23 libgmp10 libomp5-18 && \

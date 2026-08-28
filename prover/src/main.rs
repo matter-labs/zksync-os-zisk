@@ -5,10 +5,10 @@
 //! back to the server for multi-proof composition.
 //!
 //! By default it runs one `cargo-zisk` process per proof, which the pinned
-//! ZiSK v0.18.0 toolchain supports. `--coordinator-url` instead shells
+//! ZiSK toolchain supports. `--coordinator-url` instead shells
 //! `zisk-prove-client` against a resident `zisk-coordinator` whose worker
 //! keeps the proving keys and the GPU loaded for the service lifetime.
-//! `zisk-prove-client` builds from the ZiSK v0.18.0 source tree.
+//! `zisk-prove-client` builds from the ZiSK source tree.
 //!
 //! Two modes, matching the server's `zisk_aggregation` setting:
 //! - Per-batch (default): each batch is proven with the PLONK wrap and the

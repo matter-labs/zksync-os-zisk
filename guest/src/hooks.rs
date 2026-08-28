@@ -44,6 +44,7 @@ const BN254_FP_BE: [u8; 32] = [
 /// BLS12-381 base-field modulus p, big-endian:
 /// 4002409555221667393417789825735904156556882819939007885332058136124031650490
 /// 837864442687629129015664037894272559787.
+#[cfg(test)]
 const BLS12_381_FP_BE: [u8; 48] = [
     0x1a, 0x01, 0x11, 0xea, 0x39, 0x7f, 0xe6, 0x9a, 0x4b, 0x1b, 0xa7, 0xb6, 0x43, 0x4b, 0xac, 0xd7,
     0x64, 0x77, 0x4b, 0x84, 0xf3, 0x85, 0x12, 0xbf, 0x67, 0x30, 0xd2, 0xa0, 0xf6, 0xb0, 0xf6, 0x24,
@@ -59,14 +60,14 @@ pub fn sha256(input: &[u8]) -> [u8; 32] {
 
 /// BN254 G1 addition with EIP-196 validation semantics.
 ///
-/// zisklib's `add_complete_bn254` performs exactly the reference checks
+/// zisklib's `add_complete_safe_bn254` performs exactly the reference checks
 /// (canonical coordinates, on-curve, (0,0) = infinity) and returns the
 /// matching codes, so this is a pure format-conversion wrapper around the
 /// `bn254_curve_add`/`bn254_curve_dbl` syscalls.
 pub fn bn254_g1_add(p1: &[u8; 64], p2: &[u8; 64], out: &mut [u8; 64]) -> u8 {
     let a = zisklib::g1_bytes_be_to_u64_le_bn254(p1);
     let b = zisklib::g1_bytes_be_to_u64_le_bn254(p2);
-    match zisklib::add_complete_bn254(&a, &b) {
+    match zisklib::add_complete_safe_bn254(&a, &b) {
         // Identity is encoded as all zeros (EIP-196 output format).
         Ok(sum) if sum == [0u64; 8] => {
             out.fill(0);
@@ -88,7 +89,7 @@ pub fn bn254_g1_add(p1: &[u8; 64], p2: &[u8; 64], out: &mut [u8; 64]) -> u8 {
 pub fn bn254_g1_mul(point: &[u8; 64], scalar: &[u8; 32], out: &mut [u8; 64]) -> u8 {
     let p = zisklib::g1_bytes_be_to_u64_le_bn254(point);
     let k = zisklib::scalar_bytes_be_to_u64_le_bn254(scalar);
-    match zisklib::mul_complete_bn254(&p, &k) {
+    match zisklib::scalar_mul_complete_safe_bn254(&p, &k) {
         Ok(product) if product == [0u64; 8] => {
             out.fill(0);
             1
@@ -107,7 +108,7 @@ pub fn bn254_g1_mul(point: &[u8; 64], scalar: &[u8; 32], out: &mut [u8; 64]) -> 
 /// checked here for EVERY coordinate of every pair before delegating to
 /// zisklib: the reference (revm's arkworks backend) parses each Fq with a
 /// canonical check regardless of the partner point, while zisklib's
-/// `pairing_check_bn254` short-circuits pairs containing an infinity point
+/// `pairing_check_safe_bn254` short-circuits pairs containing an infinity point
 /// and would accept a non-canonical on-curve-mod-p coordinate there (e.g.
 /// x = p + 1 next to an infinity partner). On-curve and G2-subgroup checks
 /// are zisklib's, which match the reference for canonical inputs.
@@ -132,7 +133,7 @@ pub fn bn254_pairing_check(pairs: &[u8]) -> u8 {
         g2_points.push(zisklib::g2_bytes_be_to_u64_le_bn254(g2));
     }
 
-    match zisklib::pairing_check_bn254(&g1_points, &g2_points) {
+    match zisklib::pairing_check_safe_bn254(&g1_points, &g2_points) {
         Ok(true) => 0,
         Ok(false) => 1,
         Err(code) => code,
@@ -171,29 +172,10 @@ pub fn modexp(base: &[u8], exp: &[u8], modulus: &[u8], out: &mut [u8]) -> usize 
 /// zisklib's `ecdsa_verify_secp256r1` enforces exactly the reference checks
 /// (r, s ∈ [1, n-1]; pk canonical, non-identity, on curve; high-s accepted;
 /// the message scalar acts mod n) on top of the `secp256r1_add`/`dbl`
-/// syscalls and the ecdsa-verify fcall hint.
-///
-/// EXCEPTION — public keys with x = 0, i.e. the two curve points (0, ±√b)
-/// (crafted-key territory; a random key hits them with probability ~2⁻²⁵⁵):
-/// the fcall hint implementation behind zisklib (`fcalls_impl`, shared
-/// verbatim by native runs, ziskemu, and the prover through the fcall-ID
-/// proxy) encodes the point at infinity as (0, 0) and tests x-equality
-/// BEFORE its identity checks, so its first accumulator step 𝒪 + PK takes
-/// the "equal x, different y ⇒ inverse points ⇒ 𝒪" branch and drops PK's
-/// top-bit contribution from the hinted R. zisklib's in-circuit equation
-/// check [z]G + [r]PK − [s]R = 𝒪 is sound — a corrupted hint can only
-/// reject valid signatures, never accept invalid ones — so exactly this pk
-/// class mis-verdicts (found by the 2026-07-11 corpus round 2: 4
-/// osaka_eip7951 cases). Route it to REVM's software reference
-/// (`DefaultCrypto` → the p256 crate), bit-identical to the native side of
-/// the equivalence check by construction; it is already compiled into the
-/// guest, and the cost is irrelevant at ~never-hit frequency. Drop this
-/// branch when upstream fixes the hint (see the tripwire test below).
+/// syscalls and the ecdsa-verify fcall hint. The in-circuit equation check
+/// [z]G + [r]PK − [s]R = 𝒪 is sound: a corrupted hint can only reject valid
+/// signatures, never accept invalid ones.
 pub fn secp256r1_verify(msg: &[u8; 32], sig: &[u8; 64], pk: &[u8; 64]) -> bool {
-    if pk[..32].iter().all(|&b| b == 0) {
-        use revm::precompile::{Crypto, DefaultCrypto};
-        return DefaultCrypto.secp256r1_verify_signature(msg, sig, pk);
-    }
     let z = be_bytes_to_u64_le_4(msg[..32].try_into().unwrap());
     let r = be_bytes_to_u64_le_4(sig[..32].try_into().unwrap());
     let s = be_bytes_to_u64_le_4(sig[32..].try_into().unwrap());
@@ -220,25 +202,12 @@ pub fn blake2b_compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 
 /// compressed G1 points. Returns true iff the proof holds for the trusted
 /// setup that zisklib embeds (the Ethereum mainnet ceremony's τ·G2, the same
 /// setup the reference's arkworks backend loads).
-///
-/// EXCEPTION — a commitment or a proof that decodes to a point of cofactor
-/// order (see [`bls12_381_g1_order_divides_cofactor`]): zisklib holds both
-/// points to the subgroup check that divides by zero on such a point. The
-/// caller controls both, and 48 zero bytes with the compression flag decode
-/// straight to the 3-torsion, so the class is one crafted blob call away.
-/// A point of cofactor order lies outside G1, which is the verdict false,
-/// and the reference rejects it as well.
 pub fn verify_kzg_proof(
     z: &[u8; 32],
     y: &[u8; 32],
     commitment: &[u8; 48],
     proof: &[u8; 48],
 ) -> bool {
-    if bls12_381_compressed_g1_order_divides_cofactor(commitment)
-        || bls12_381_compressed_g1_order_divides_cofactor(proof)
-    {
-        return false;
-    }
     zisklib::verify_kzg_proof(z, y, commitment, proof)
 }
 
@@ -249,7 +218,7 @@ pub fn verify_kzg_proof(
 pub fn bls12_381_g1_add(a: &[u8; 96], b: &[u8; 96], out: &mut [u8; 96]) -> u8 {
     let a = zisklib::g1_bytes_be_to_u64_le_bls12_381(a);
     let b = zisklib::g1_bytes_be_to_u64_le_bls12_381(b);
-    match zisklib::add_complete_bls12_381(&a, &b) {
+    match zisklib::add_complete_safe_bls12_381(&a, &b) {
         Ok(sum) if sum == [0u64; 12] => {
             out.fill(0);
             1
@@ -266,28 +235,8 @@ pub fn bls12_381_g1_add(a: &[u8; 96], b: &[u8; 96], out: &mut [u8; 96]) -> u8 {
 ///
 /// `pairs` is `n` × 128 bytes (96-byte point ‖ 32-byte scalar).
 ///
-/// EXCEPTION — a call that holds a pair whose point is not the identity and
-/// whose scalar reduces to zero mod the subgroup order r: zisklib's
-/// `msm_complete_bls12_381` drops such a pair BEFORE it validates the point,
-/// while the reference validates every point and drops the zero-scalar pairs
-/// only after that. An invalid point next to such a scalar therefore halts
-/// the reference where zisklib alone returns a value. Route that call to
-/// REVM's software reference (`DefaultCrypto`), bit-identical to the native
-/// side of the equivalence check by construction; every other call keeps the
-/// accelerated path, and a zero-mod-r scalar contributes nothing, so real
-/// traffic rarely carries one. The route links REVM's arkworks BLS12-381
-/// backend, which costs about 160 KiB of guest ROM and no cycles outside the
-/// corner case. Drop this branch when upstream validates the point before it
-/// drops the pair (see the tripwire test below).
-///
-/// EXCEPTION — a call that holds a point of cofactor order (see
-/// [`bls12_381_g1_order_divides_cofactor`]): zisklib's subgroup check divides
-/// by zero on such a point, and the division sits behind a non-unwinding
-/// `extern "C"` shim, so the guest and the prover witness generator both
-/// raise SIGABRT. Route that call to the software reference as well. Every
-/// such point is outside G1, so the call halts either way; the software
-/// route only makes the guest reach that verdict. Drop this branch when
-/// upstream guards the exceptional cases (see the tripwire test below).
+/// zisklib validates every point before it drops a pair whose scalar
+/// reduces to zero mod the subgroup order r, which is the EIP-2537 rule.
 pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(128));
     let mut points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 128);
@@ -299,22 +248,7 @@ pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
         scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
     }
 
-    if points
-        .iter()
-        .zip(scalars.iter())
-        .any(|(point, scalar)| *point != [0u64; 12] && msm_scalar_is_zero_mod_r(scalar))
-    {
-        return bls12_381_g1_msm_software(pairs, out);
-    }
-
-    if pairs
-        .chunks_exact(128)
-        .any(|pair| bls12_381_g1_order_divides_cofactor(pair[..96].try_into().unwrap()))
-    {
-        return bls12_381_g1_msm_software(pairs, out);
-    }
-
-    match zisklib::msm_complete_bls12_381(&points, &scalars) {
+    match zisklib::msm_complete_safe_bls12_381(&points, &scalars) {
         Ok(sum) if sum == [0u64; 12] => {
             out.fill(0);
             1
@@ -331,7 +265,7 @@ pub fn bls12_381_g1_msm(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
 pub fn bls12_381_g2_add(a: &[u8; 192], b: &[u8; 192], out: &mut [u8; 192]) -> u8 {
     let a = zisklib::g2_bytes_be_to_u64_le_bls12_381(a);
     let b = zisklib::g2_bytes_be_to_u64_le_bls12_381(b);
-    match zisklib::add_complete_twist_bls12_381(&a, &b) {
+    match zisklib::add_complete_safe_twist_bls12_381(&a, &b) {
         Ok(sum) if sum == [0u64; 24] => {
             out.fill(0);
             1
@@ -346,12 +280,8 @@ pub fn bls12_381_g2_add(a: &[u8; 192], b: &[u8; 192], out: &mut [u8; 192]) -> u8
 
 /// EIP-2537 BLS12-381 G2 multi-scalar multiplication (precompile 0x0e).
 ///
-/// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar). The software
-/// route is the G2 twin of the one in [`bls12_381_g1_msm`], for the same
-/// upstream drop-before-validation divergence. The twist arithmetic inverts
-/// through zisklib's `inv_fp2_bls12_381`, which maps zero to zero, so an
-/// identity intermediate in the G2 subgroup check divides nothing and needs
-/// no counterpart of the cofactor screen.
+/// `pairs` is `n` × 224 bytes (192-byte point ‖ 32-byte scalar). The G2 twin
+/// of [`bls12_381_g1_msm`], with the same validate-then-drop rule.
 pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(224));
     let mut points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 224);
@@ -363,15 +293,7 @@ pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
         scalars.push(zisklib::scalar_bytes_be_to_u64_le_bls12_381(scalar));
     }
 
-    if points
-        .iter()
-        .zip(scalars.iter())
-        .any(|(point, scalar)| *point != [0u64; 24] && msm_scalar_is_zero_mod_r(scalar))
-    {
-        return bls12_381_g2_msm_software(pairs, out);
-    }
-
-    match zisklib::msm_complete_twist_bls12_381(&points, &scalars) {
+    match zisklib::msm_complete_safe_twist_bls12_381(&points, &scalars) {
         Ok(sum) if sum == [0u64; 24] => {
             out.fill(0);
             1
@@ -388,20 +310,8 @@ pub fn bls12_381_g2_msm(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
 ///
 /// `pairs` is `n` × 288 bytes (96-byte G1 ‖ 192-byte G2). Returns 0 when the
 /// product of pairings is one, 1 when it is not.
-///
-/// EXCEPTION — a call that holds a G1 point of cofactor order (see
-/// [`bls12_381_g1_order_divides_cofactor`]): the G1 subgroup check that
-/// validates every pair divides by zero on such a point, exactly as in
-/// [`bls12_381_g1_msm`], so the call takes the software reference.
 pub fn bls12_381_pairing_check(pairs: &[u8]) -> u8 {
     debug_assert!(pairs.len().is_multiple_of(288));
-    if pairs
-        .chunks_exact(288)
-        .any(|pair| bls12_381_g1_order_divides_cofactor(pair[..96].try_into().unwrap()))
-    {
-        return bls12_381_pairing_check_software(pairs);
-    }
-
     let mut g1_points: Vec<[u64; 12]> = Vec::with_capacity(pairs.len() / 288);
     let mut g2_points: Vec<[u64; 24]> = Vec::with_capacity(pairs.len() / 288);
     for pair in pairs.chunks_exact(288) {
@@ -411,225 +321,41 @@ pub fn bls12_381_pairing_check(pairs: &[u8]) -> u8 {
         g2_points.push(zisklib::g2_bytes_be_to_u64_le_bls12_381(g2));
     }
 
-    match zisklib::pairing_check_bls12_381(&g1_points, &g2_points) {
+    match zisklib::pairing_check_safe_bls12_381(&g1_points, &g2_points) {
         Ok(true) => 0,
         Ok(false) => 1,
         Err(code) => code,
     }
 }
 
-/// EIP-2537 BLS12-381 map Fp to G1 (precompile 0x10), through the software
-/// reference (`DefaultCrypto`).
+/// EIP-2537 BLS12-381 map Fp to G1 (precompile 0x10).
 ///
-/// zisklib clears the cofactor with the raw curve syscalls, which have no
-/// identity encoding. A field element whose isogeny image is the identity —
-/// the kernel values the EIP-2537 fixtures carry, and the elements that map
-/// to infinity — therefore divides by zero behind a non-unwinding
-/// `extern "C"` shim, which raises SIGABRT in the guest and in the prover
-/// witness generator. A kernel element is much harder to detect in the input
-/// than a small-order point, and these two precompiles carry the least
-/// traffic of the EIP-2537 set, so the whole hook takes the software route.
-/// Restore the accelerated path when upstream clears the cofactor with the
-/// complete formulas (see the tripwire test below).
+/// `fp` is a 48-byte big-endian field element. zisklib checks that it is
+/// canonical, runs the simplified SWU isogeny, and clears the cofactor with
+/// the complete formulas, so an isogeny-kernel element maps to the identity.
 pub fn bls12_381_fp_to_g1(fp: &[u8; 48], out: &mut [u8; 96]) -> u8 {
-    use revm::precompile::{Crypto, DefaultCrypto};
-    match DefaultCrypto.bls12_381_fp_to_g1(fp) {
+    let u = zisklib::bytes_be_to_u64_le_fp_bls12_381(fp);
+    match zisklib::map_to_curve_g1_bls12_381(&u) {
         Ok(point) => {
-            out.copy_from_slice(&point);
+            zisklib::g1_u64_le_to_bytes_be_bls12_381(&point, out);
             0
         }
-        Err(_) => 1,
+        Err(code) => code,
     }
 }
 
-/// EIP-2537 BLS12-381 map Fp2 to G2 (precompile 0x11), through the software
-/// reference (`DefaultCrypto`).
+/// EIP-2537 BLS12-381 map Fp2 to G2 (precompile 0x11).
 ///
 /// `fp2` is c0 ‖ c1, each a 48-byte big-endian field element. The twist
-/// counterpart of the cofactor clearing in [`bls12_381_fp_to_g1`] divides
-/// nothing, because zisklib's `inv_fp2_bls12_381` maps zero to zero. Its
-/// addition formula returns a value off the curve when one operand is the
-/// identity and the other is not, which is the shape an isogeny image of
-/// small order takes, so the G2 map holds to the software route for that
-/// class.
+/// counterpart of [`bls12_381_fp_to_g1`].
 pub fn bls12_381_fp2_to_g2(fp2: &[u8; 96], out: &mut [u8; 192]) -> u8 {
-    use revm::precompile::{Crypto, DefaultCrypto};
-    match DefaultCrypto.bls12_381_fp2_to_g2((
-        fp2[..48].try_into().unwrap(),
-        fp2[48..].try_into().unwrap(),
-    )) {
+    let u = zisklib::bytes_be_to_u64_le_fp2_bls12_381(fp2);
+    match zisklib::map_to_curve_g2_bls12_381(&u) {
         Ok(point) => {
-            out.copy_from_slice(&point);
+            zisklib::g2_u64_le_to_bytes_be_bls12_381(&point, out);
             0
         }
-        Err(_) => 1,
-    }
-}
-
-/// True when an MSM scalar reduces to zero mod the BLS12-381 subgroup order
-/// r, i.e. it is one of 0, r and 2r — the drop condition of zisklib's MSM.
-/// The reduction is part of the condition: r and 2r are dropped exactly like
-/// the literal zero.
-fn msm_scalar_is_zero_mod_r(scalar: &[u64; 4]) -> bool {
-    zisklib::is_zero(&zisklib::reduce_fr_bls12_381(scalar))
-}
-
-/// BLS12-381 G1 cofactor h = (x-1)²/3, little-endian 64-bit limbs.
-const BLS12_381_G1_COFACTOR: [u64; 2] = [0x8c00_aaab_0000_aaab, 0x396c_8c00_5555_e156];
-
-/// True when the EIP-2537 G1 point `point` is a curve point whose order
-/// divides the G1 cofactor h — the exact class of G1 inputs that drives
-/// zisklib's subgroup check into a division by zero.
-///
-/// `is_on_subgroup_bls12_381` walks 3·σ(P) through a 126-step ladder of raw
-/// curve syscalls. Those syscalls carry no identity encoding, so the ladder
-/// divides by zero as soon as an intermediate [n]·3σ(P) reaches 𝒪. Every
-/// such intermediate holds |n| < 2¹²⁷, far below the subgroup order r, and
-/// the curve has no point of order two, so the ladder reaches 𝒪 exactly when
-/// the order of P divides h. The identity, a coordinate outside the field
-/// and a point off the curve answer false: zisklib rejects each of them
-/// before the ladder runs.
-fn bls12_381_g1_order_divides_cofactor(point: &[u8; 96]) -> bool {
-    if point.iter().all(|&b| b == 0)
-        || !fp_is_canonical(&point[..48])
-        || !fp_is_canonical(&point[48..])
-    {
-        return false;
-    }
-    let p = zisklib::g1_bytes_be_to_u64_le_bls12_381(point);
-    zisklib::is_on_curve_bls12_381(&p) && bls12_381_g1_cofactor_multiple_is_identity(&p)
-}
-
-/// [h]`p` == 𝒪 for a BLS12-381 curve point `p` other than the identity.
-///
-/// The ladder runs on the accelerated point operations with the identity
-/// cases held outside them: zisklib's `add_bls12_381` covers the equal-x
-/// cases itself, and both operations need a non-identity input.
-fn bls12_381_g1_cofactor_multiple_is_identity(p: &[u64; 12]) -> bool {
-    const IDENTITY: [u64; 12] = [0u64; 12];
-
-    let mut acc = IDENTITY;
-    for bit in (0..126).rev() {
-        if acc != IDENTITY {
-            acc = zisklib::dbl_bls12_381(&acc);
-        }
-        if (BLS12_381_G1_COFACTOR[bit / 64] >> (bit % 64)) & 1 == 1 {
-            acc = if acc == IDENTITY {
-                *p
-            } else {
-                zisklib::add_bls12_381(&acc, p)
-            };
-        }
-    }
-    acc == IDENTITY
-}
-
-/// True when the compressed G1 point `compressed` decodes to a point whose
-/// order divides the G1 cofactor (see
-/// [`bls12_381_g1_order_divides_cofactor`]). The infinity encoding and every
-/// encoding zisklib rejects answer false: neither reaches the subgroup
-/// check.
-fn bls12_381_compressed_g1_order_divides_cofactor(compressed: &[u8; 48]) -> bool {
-    match zisklib::decompress_bls12_381(compressed) {
-        Ok(p) if p != [0u64; 12] => bls12_381_g1_cofactor_multiple_is_identity(&p),
-        _ => false,
-    }
-}
-
-/// [`bls12_381_g1_msm`] through the software reference. The error codes are
-/// the ones the accelerated path returns for the same failure classes.
-fn bls12_381_g1_msm_software(pairs: &[u8], out: &mut [u8; 96]) -> u8 {
-    use revm::precompile::{bls12_381::G1PointScalar, Crypto, DefaultCrypto, PrecompileHalt};
-    let mut it = pairs
-        .chunks_exact(128)
-        .map(|pair| -> Result<G1PointScalar, PrecompileHalt> {
-            Ok((
-                (
-                    pair[..48].try_into().unwrap(),
-                    pair[48..96].try_into().unwrap(),
-                ),
-                pair[96..].try_into().unwrap(),
-            ))
-        });
-    match DefaultCrypto.bls12_381_g1_msm(&mut it) {
-        Ok(sum) if sum == [0u8; 96] => {
-            out.fill(0);
-            1
-        }
-        Ok(sum) => {
-            out.copy_from_slice(&sum);
-            0
-        }
-        Err(PrecompileHalt::Bls12381G1NotOnCurve) => 3,
-        Err(PrecompileHalt::Bls12381G1NotInSubgroup) => 4,
-        Err(_) => 2,
-    }
-}
-
-/// G2 counterpart of [`bls12_381_g1_msm_software`].
-fn bls12_381_g2_msm_software(pairs: &[u8], out: &mut [u8; 192]) -> u8 {
-    use revm::precompile::{bls12_381::G2PointScalar, Crypto, DefaultCrypto, PrecompileHalt};
-    let mut it = pairs
-        .chunks_exact(224)
-        .map(|pair| -> Result<G2PointScalar, PrecompileHalt> {
-            Ok((
-                (
-                    pair[..48].try_into().unwrap(),
-                    pair[48..96].try_into().unwrap(),
-                    pair[96..144].try_into().unwrap(),
-                    pair[144..192].try_into().unwrap(),
-                ),
-                pair[192..].try_into().unwrap(),
-            ))
-        });
-    match DefaultCrypto.bls12_381_g2_msm(&mut it) {
-        Ok(sum) if sum == [0u8; 192] => {
-            out.fill(0);
-            1
-        }
-        Ok(sum) => {
-            out.copy_from_slice(&sum);
-            0
-        }
-        Err(PrecompileHalt::Bls12381G2NotOnCurve) => 3,
-        Err(PrecompileHalt::Bls12381G2NotInSubgroup) => 4,
-        Err(_) => 2,
-    }
-}
-
-/// [`bls12_381_pairing_check`] through the software reference. The error
-/// codes are the ones the accelerated path returns for the same failure
-/// classes.
-fn bls12_381_pairing_check_software(pairs: &[u8]) -> u8 {
-    use revm::precompile::{
-        bls12_381::{G1Point, G2Point},
-        Crypto, DefaultCrypto, PrecompileHalt,
-    };
-    let collected: Vec<(G1Point, G2Point)> = pairs
-        .chunks_exact(288)
-        .map(|pair| {
-            (
-                (
-                    pair[..48].try_into().unwrap(),
-                    pair[48..96].try_into().unwrap(),
-                ),
-                (
-                    pair[96..144].try_into().unwrap(),
-                    pair[144..192].try_into().unwrap(),
-                    pair[192..240].try_into().unwrap(),
-                    pair[240..].try_into().unwrap(),
-                ),
-            )
-        })
-        .collect();
-    match DefaultCrypto.bls12_381_pairing_check(&collected) {
-        Ok(true) => 0,
-        Ok(false) => 1,
-        Err(PrecompileHalt::Bls12381G1NotOnCurve) => 3,
-        Err(PrecompileHalt::Bls12381G1NotInSubgroup) => 4,
-        Err(PrecompileHalt::Bls12381G2NotOnCurve) => 6,
-        Err(PrecompileHalt::Bls12381G2NotInSubgroup) => 7,
-        Err(_) => 2,
+        Err(code) => code,
     }
 }
 
@@ -640,13 +366,6 @@ fn bls12_381_pairing_check_software(pairs: &[u8]) -> u8 {
 fn fq_is_canonical(be: &[u8]) -> bool {
     debug_assert_eq!(be.len(), 32);
     be < &BN254_FP_BE[..]
-}
-
-/// A 48-byte big-endian BLS12-381 field element is canonical iff it is < p.
-#[inline]
-fn fp_is_canonical(be: &[u8]) -> bool {
-    debug_assert_eq!(be.len(), 48);
-    be < &BLS12_381_FP_BE[..]
 }
 
 /// Inverse of zisklib's `g1_bytes_be_to_u64_le_bn254`: [x0..x3, y0..y3]
@@ -1321,29 +1040,6 @@ mod tests {
         assert!(!check_p256(&msg_a, &sig_a, &pk_b));
     }
 
-    /// Tripwire pinning the UPSTREAM defect that motivates the x = 0
-    /// software route in `secp256r1_verify`: zisklib's fcall hint (shared
-    /// verbatim by native runs, ziskemu, and the prover via the fcall
-    /// proxy) mis-computes R for x = 0 public keys, and the sound equation
-    /// check then rejects the valid signature. If a ziskos bump makes this
-    /// test FAIL, the upstream bug is fixed and the workaround branch (and
-    /// this tripwire) can be dropped.
-    #[test]
-    fn p256_zero_x_pubkey_zisklib_hint_defect_tripwire() {
-        let [(msg, sig, pk), _] = p256_zero_x_vectors();
-        let z = be_bytes_to_u64_le_4(&msg);
-        let r = be_bytes_to_u64_le_4(sig[..32].try_into().unwrap());
-        let s = be_bytes_to_u64_le_4(sig[32..].try_into().unwrap());
-        let x = be_bytes_to_u64_le_4(pk[..32].try_into().unwrap());
-        let y = be_bytes_to_u64_le_4(pk[32..].try_into().unwrap());
-        let pk_limbs = [x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]];
-        assert!(
-            !zisklib::ecdsa_verify_secp256r1(&pk_limbs, &z, &r, &s),
-            "zisklib now verifies x = 0 public keys correctly — drop the \
-             software route in secp256r1_verify and this tripwire"
-        );
-    }
-
     // ---------- BLAKE2b ----------
 
     fn blake2b_both(
@@ -1445,14 +1141,10 @@ mod tests {
     /// A compressed G1 point whose x is zero decodes to the σ-fixed
     /// 3-torsion, so the compression flag alone puts a point of cofactor
     /// order in the commitment or the proof field. Both sides reject it.
-    /// These pins abort with the pure zisklib path.
     #[test]
     fn kzg_cofactor_order_commitment_and_proof_match_reference() {
         let mut three_torsion = [0u8; 48];
         three_torsion[0] = 0x80; // compression flag, x = 0
-        assert!(bls12_381_compressed_g1_order_divides_cofactor(
-            &three_torsion
-        ));
 
         let z = hex!("73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000000");
         let y = hex!("1522a4a7f34e1ea350ae07c29c96c7e79655aa926122e95fe69fcbd932ca49e9");
@@ -1753,47 +1445,6 @@ mod tests {
         }
     }
 
-    /// Tripwire pinning the UPSTREAM defect that motivates the software route
-    /// in `bls12_381_g1_msm`: zisklib's `msm_complete_bls12_381` drops a pair
-    /// whose scalar reduces to zero mod r before it validates the point, so
-    /// it accepts an off-curve point that the reference rejects. If a ziskos
-    /// bump makes this test FAIL, the upstream defect is fixed and the
-    /// software route (and this tripwire) can be dropped.
-    #[test]
-    fn bls_g1_msm_dropped_pair_zisklib_defect_tripwire() {
-        let mut off_curve = bls_g1(3);
-        off_curve[95] ^= 1;
-        let points = [zisklib::g1_bytes_be_to_u64_le_bls12_381(&off_curve)];
-        for s in [scalar(0), BLS12_381_FR_BE] {
-            let scalars = [zisklib::scalar_bytes_be_to_u64_le_bls12_381(&s)];
-            assert_eq!(
-                zisklib::msm_complete_bls12_381(&points, &scalars),
-                Ok([0u64; 12]),
-                "zisklib's G1 MSM validates the point of a dropped pair \
-                 (scalar {s:02x?}) — drop the software route in \
-                 bls12_381_g1_msm and this tripwire"
-            );
-        }
-    }
-
-    /// G2 counterpart of [`bls_g1_msm_dropped_pair_zisklib_defect_tripwire`].
-    #[test]
-    fn bls_g2_msm_dropped_pair_zisklib_defect_tripwire() {
-        let mut off_curve = bls_g2(3);
-        off_curve[191] ^= 1;
-        let points = [zisklib::g2_bytes_be_to_u64_le_bls12_381(&off_curve)];
-        for s in [scalar(0), BLS12_381_FR_BE] {
-            let scalars = [zisklib::scalar_bytes_be_to_u64_le_bls12_381(&s)];
-            assert_eq!(
-                zisklib::msm_complete_twist_bls12_381(&points, &scalars),
-                Ok([0u64; 24]),
-                "zisklib's G2 MSM validates the point of a dropped pair \
-                 (scalar {s:02x?}) — drop the software route in \
-                 bls12_381_g2_msm and this tripwire"
-            );
-        }
-    }
-
     /// G1 points whose order divides the cofactor h: the two σ-fixed
     /// 3-torsion points (0, ±2), which are the ones the EIP-2537 fixtures
     /// carry, and an 11-torsion point, which they do not.
@@ -1821,15 +1472,12 @@ mod tests {
         out
     }
 
-    /// The cofactor screen holds exactly the points that drive zisklib's
-    /// subgroup ladder into the identity, and the screened calls keep the
-    /// reference verdict. These pins fail with the pure zisklib path: it
-    /// aborts on them.
+    /// Points whose order divides the G1 cofactor lie outside G1, so both
+    /// sides halt on them. They are the class that drove the pre-1.2.0
+    /// zisklib subgroup ladder through the identity.
     #[test]
     fn bls_g1_cofactor_order_points_match_reference() {
         for point in bls_g1_cofactor_order_points() {
-            assert!(bls12_381_g1_order_divides_cofactor(&point));
-
             for s in [scalar(1), scalar(2), scalar(3), [0xff; 32]] {
                 let (ours, reference) = bls_g1_msm_both(&[(point, s)]);
                 assert_eq!(ours, Err(()), "scalar {s:02x?}");
@@ -1841,20 +1489,8 @@ mod tests {
             assert_eq!(ours, reference);
         }
 
-        // Everything else keeps the accelerated path: the identity, points
-        // that fail the field or curve rule, subgroup points, and points off
-        // the subgroup whose order carries r.
-        assert!(!bls12_381_g1_order_divides_cofactor(&[0u8; 96]));
-        let mut non_canonical = bls_g1(3);
-        non_canonical[..48].copy_from_slice(&BLS12_381_FP_BE);
-        assert!(!bls12_381_g1_order_divides_cofactor(&non_canonical));
-        let mut off_curve = bls_g1(3);
-        off_curve[95] ^= 1;
-        assert!(!bls12_381_g1_order_divides_cofactor(&off_curve));
-        assert!(!bls12_381_g1_order_divides_cofactor(&bls_g1(3)));
-
+        // A point off the subgroup whose order carries r halts as well.
         let off_subgroup = bls_g1_large_order_off_subgroup();
-        assert!(!bls12_381_g1_order_divides_cofactor(&off_subgroup));
         let (ours, reference) = bls_g1_msm_both(&[(off_subgroup, scalar(1))]);
         assert_eq!(ours, Err(()));
         assert_eq!(ours, reference);
@@ -1998,88 +1634,6 @@ mod tests {
             assert_eq!(out, DefaultCrypto.bls12_381_fp_to_g1(&fp).unwrap());
             assert_eq!(out, [0u8; 96], "fp {fp:02x?}");
         }
-    }
-
-    /// The variable that turns a re-run of this test binary into the child
-    /// half of a tripwire. Its value is the test path the child runs.
-    const TRIPWIRE_CHILD: &str = "ZISK_GUEST_TRIPWIRE_CHILD";
-    /// The line the child prints before it makes the defective call.
-    const TRIPWIRE_REACHED: &str = "tripwire child reached the defective call";
-
-    /// True when this process is the child half of `test`. The child then
-    /// makes the defective call itself.
-    fn tripwire_child_of(test: &str) -> bool {
-        if std::env::var(TRIPWIRE_CHILD).as_deref() != Ok(test) {
-            return false;
-        }
-        println!("{TRIPWIRE_REACHED}");
-        true
-    }
-
-    /// True when `test` dies on SIGABRT in a child process.
-    ///
-    /// The defective zisklib calls divide by zero inside an `extern "C"`
-    /// shim, which is not allowed to unwind: the panic aborts the process,
-    /// where neither `#[should_panic]` nor `catch_unwind` can see it. The
-    /// child half is this same binary, re-run with the marker variable set.
-    fn tripwire_aborts(test: &str) -> bool {
-        use std::os::unix::process::ExitStatusExt;
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", test, "--nocapture"])
-            .env(TRIPWIRE_CHILD, test)
-            .output()
-            .expect("re-run of the test binary");
-        assert!(
-            String::from_utf8_lossy(&child.stdout).contains(TRIPWIRE_REACHED),
-            "the child ran no body for {test}: the test path recorded in the \
-             tripwire has drifted from the test name"
-        );
-        child.status.signal() == Some(6)
-    }
-
-    /// Tripwire pinning the UPSTREAM defect that motivates the cofactor
-    /// screen: zisklib's `is_on_subgroup_bls12_381` drives its ladder
-    /// through the identity for a point whose order divides the cofactor,
-    /// and the raw curve syscall divides by zero there. If a ziskos bump
-    /// makes this test FAIL, the upstream defect is fixed and the screen
-    /// (and this tripwire) can be dropped.
-    #[test]
-    fn bls_g1_subgroup_cofactor_order_zisklib_defect_tripwire() {
-        const TEST: &str = "hooks::tests::bls_g1_subgroup_cofactor_order_zisklib_defect_tripwire";
-        if tripwire_child_of(TEST) {
-            let [three_torsion, _, _] = bls_g1_cofactor_order_points();
-            let point = zisklib::g1_bytes_be_to_u64_le_bls12_381(&three_torsion);
-            let _ = zisklib::is_on_subgroup_bls12_381(&point);
-            return;
-        }
-        assert!(
-            tripwire_aborts(TEST),
-            "zisklib's G1 subgroup check survives the 3-torsion point (0, 2) \
-             — drop the cofactor screen in bls12_381_g1_msm, \
-             bls12_381_pairing_check and verify_kzg_proof, and this tripwire"
-        );
-    }
-
-    /// Tripwire pinning the UPSTREAM defect that motivates the software
-    /// route of the two map hooks: zisklib's `map_to_curve_g1_bls12_381`
-    /// clears the cofactor with the raw curve syscalls, which divide by zero
-    /// on the identity the isogeny returns for a kernel element. If a ziskos
-    /// bump makes this test FAIL, the upstream defect is fixed and both map
-    /// hooks can take the accelerated path again.
-    #[test]
-    fn bls_map_to_curve_kernel_zisklib_defect_tripwire() {
-        const TEST: &str = "hooks::tests::bls_map_to_curve_kernel_zisklib_defect_tripwire";
-        if tripwire_child_of(TEST) {
-            let u = zisklib::bytes_be_to_u64_le_fp_bls12_381(&BLS_ISOGENY_KERNEL_FP);
-            let _ = zisklib::map_to_curve_g1_bls12_381(&u);
-            return;
-        }
-        assert!(
-            tripwire_aborts(TEST),
-            "zisklib's G1 map to curve survives an isogeny-kernel element — \
-             restore the accelerated path in bls12_381_fp_to_g1 and \
-             bls12_381_fp2_to_g2, and drop this tripwire"
-        );
     }
 
     #[test]

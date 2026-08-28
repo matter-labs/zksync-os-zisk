@@ -16,7 +16,7 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof (ZiSK v0.18.0):
+//! `vadcop_final`** proof:
 //!
 //! ```text
 //! [minimal(1)][n_publics=68(1)][program_vk(4)][publics(64)]
@@ -81,22 +81,36 @@ pub const PUBLICS_WORDS: usize = 64;
 pub const VADCOP_VK_WORDS: usize = 4;
 /// Publics words carrying the STF guest's batch commitment.
 pub const COMMITMENT_WORDS: usize = 8;
-/// Expected `n_publics` header word: program VK + publics.
-pub const EXPECTED_N_PUBLICS: u64 = (PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
+/// u64 words in the leading `is_vadcop_final_proof` public. The non-minimal
+/// vadcop_final circuit emits it at public index 0; the recurser reads it to
+/// tell a leaf proof from an aggregated one.
+pub const LEAF_FLAG_WORDS: usize = 1;
+/// The value of `is_vadcop_final_proof` on a genuine leaf proof. An
+/// aggregated proof carries 0, so this is what keeps a folded proof out of
+/// the leaf position.
+pub const IS_VADCOP_FINAL_PROOF: u64 = 1;
+/// Expected `n_publics` header word: leaf flag + program VK + publics.
+pub const EXPECTED_N_PUBLICS: u64 = (LEAF_FLAG_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
 
 /// u64 words in a non-minimal `vadcop_final` proof body under the pinned
-/// pil2-proofman v0.18.0 recursive setup
-/// (`proofman_verifier::expected_vadcop_final_proof_bytes() / 8`).
+/// pil2-proofman recursive setup
+/// (`Poseidon1Verifier::expected_vadcop_final_proof_bytes() / 8`).
+/// `ziskos::zisklib::verify_zisk_proof` fixes the hash family at Poseidon1,
+/// so the Poseidon2 size does not apply.
 ///
 /// Part of the proof-format pin: it changes only with a
 /// pil2-proofman upgrade, which rotates every VK anyway. A host test in
 /// `prover/` (`vadcop_body_words_matches_pinned_verifier`) asserts this
-/// constant against the real `proofman-verifier` crate at the same tag.
-pub const VADCOP_FINAL_BODY_WORDS: usize = 41_947;
+/// constant against the real `proofman-verifier` crate at the same version.
+pub const VADCOP_FINAL_BODY_WORDS: usize = 46_078;
 
 /// Total u64 words in a serialized non-minimal proof stream.
-pub const PROOF_STREAM_WORDS: usize =
-    HEADER_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS + VADCOP_FINAL_BODY_WORDS + VADCOP_VK_WORDS;
+pub const PROOF_STREAM_WORDS: usize = HEADER_WORDS
+    + LEAF_FLAG_WORDS
+    + PROGRAM_VK_WORDS
+    + PUBLICS_WORDS
+    + VADCOP_FINAL_BODY_WORDS
+    + VADCOP_VK_WORDS;
 /// Total bytes in a serialized non-minimal proof stream.
 pub const PROOF_STREAM_BYTES: usize = PROOF_STREAM_WORDS * 8;
 
@@ -120,6 +134,9 @@ pub enum AggError {
     MinimalProof { flag: u64 },
     /// The `n_publics` header word is not [`EXPECTED_N_PUBLICS`].
     BadPublicsCount { got: u64 },
+    /// The `is_vadcop_final_proof` public is not [`IS_VADCOP_FINAL_PROOF`],
+    /// so the stream is an aggregated proof rather than a leaf.
+    NotALeafProof { flag: u64 },
     /// A proof's program VK differs from the first proof's.
     ProgramVkMismatch,
     /// A proof's vadcop VK differs from the first proof's.
@@ -140,6 +157,9 @@ impl core::fmt::Display for AggError {
             ),
             AggError::MinimalProof { flag } => {
                 write!(f, "minimal proofs are not accepted (flag word {flag})")
+            }
+            AggError::NotALeafProof { flag } => {
+                write!(f, "is_vadcop_final_proof is {flag}, expected leaf proof")
             }
             AggError::BadPublicsCount { got } => {
                 write!(f, "n_publics must be {EXPECTED_N_PUBLICS}, got {got}")
@@ -193,18 +213,25 @@ impl<'a> ProofFrame<'a> {
         if words[1] != EXPECTED_N_PUBLICS {
             return Err(AggError::BadPublicsCount { got: words[1] });
         }
+        if words[HEADER_WORDS] != IS_VADCOP_FINAL_PROOF {
+            return Err(AggError::NotALeafProof {
+                flag: words[HEADER_WORDS],
+            });
+        }
         Ok(Self { words })
     }
 
     /// The full stream, exactly what `verify_zisk_proof` consumes
-    /// (`[minimal][n_publics][program_vk][publics][body][vadcop_vk]`).
+    /// (`[minimal][n_publics][is_vadcop_final_proof][program_vk][publics]
+    /// [body][vadcop_vk]`).
     pub fn words(&self) -> &'a [u64] {
         self.words
     }
 
     /// The inner guest's program VK (ROM root), 4 words.
     pub fn program_vk(&self) -> &'a [u64] {
-        &self.words[HEADER_WORDS..HEADER_WORDS + PROGRAM_VK_WORDS]
+        let start = HEADER_WORDS + LEAF_FLAG_WORDS;
+        &self.words[start..start + PROGRAM_VK_WORDS]
     }
 
     /// The recursive-setup (vadcop-final) VK trailing the stream, 4 words.
@@ -214,7 +241,7 @@ impl<'a> ProofFrame<'a> {
 
     /// The 64 publics words (each carries a u32 payload).
     pub fn publics(&self) -> &'a [u64] {
-        let start = HEADER_WORDS + PROGRAM_VK_WORDS;
+        let start = HEADER_WORDS + LEAF_FLAG_WORDS + PROGRAM_VK_WORDS;
         &self.words[start..start + PUBLICS_WORDS]
     }
 
@@ -353,14 +380,15 @@ mod tests {
     const PROGRAM_VK: [u64; 4] = [1, 2, 3, 4];
     const VADCOP_VK: [u64; 4] = [5, 6, 7, 8];
 
-    /// A well-shaped synthetic stream: exact v0.18.0 sizes, non-minimal,
-    /// publics words carrying `commitment` packed one u32-LE per word
+    /// A well-shaped synthetic stream: exact sizes, non-minimal, leaf flag
+    /// set, publics words carrying `commitment` packed one u32-LE per word
     /// (the STF guest's `commit_slice` layout). The body is deterministic
     /// filler — cryptographically invalid, structurally exact.
     fn synth_stream(program_vk: [u64; 4], vadcop_vk: [u64; 4], commitment: [u8; 32]) -> Vec<u64> {
         let mut words = Vec::with_capacity(PROOF_STREAM_WORDS);
         words.push(0); // non-minimal
         words.push(EXPECTED_N_PUBLICS);
+        words.push(IS_VADCOP_FINAL_PROOF);
         words.extend_from_slice(&program_vk);
         let mut publics = [0u64; PUBLICS_WORDS];
         for (p, chunk) in publics.iter_mut().zip(commitment.chunks_exact(4)) {
@@ -438,6 +466,19 @@ mod tests {
         assert_eq!(
             ProofFrame::parse(&words),
             Err(AggError::MinimalProof { flag: 1 })
+        );
+    }
+
+    /// An aggregated proof carries `is_vadcop_final_proof = 0`. Accepting one
+    /// in a leaf position would let a folded range stand in for a batch, so
+    /// the parser must reject it.
+    #[test]
+    fn parse_rejects_aggregated_proof() {
+        let mut words = synth_stream(PROGRAM_VK, VADCOP_VK, [1u8; 32]);
+        words[HEADER_WORDS] = 0;
+        assert_eq!(
+            ProofFrame::parse(&words),
+            Err(AggError::NotALeafProof { flag: 0 })
         );
     }
 
@@ -664,7 +705,7 @@ mod tests {
     }
 
     /// THE cross-stack binding vector, computed from the real 4-batch
-    /// aggregation session (ZiSK v0.18.0). `BINDING_VECTOR.md` next to
+    /// aggregation session. `BINDING_VECTOR.md` next to
     /// this package records the same values; the server and L1-contract
     /// workstreams pin them verbatim. Update all of them together — they
     /// must never diverge.

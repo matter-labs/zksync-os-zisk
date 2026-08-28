@@ -1,10 +1,13 @@
-//! Regression test against a REAL PLONK proof file (ZiSK v0.18.0): batch 1
-//! of the binding-vector range, wrapped by `cargo-zisk wrap-proof --plonk`
-//! on an RTX 5090 on 2026-08-04 from the same `vadcop_final` stream that
-//! `real_aggregation_vector.rs` checks. Guest ELF sha256 32911f12….
+//! Regression test against a REAL PLONK proof file: batch 1 of the
+//! binding-vector range, wrapped from the same `vadcop_final` stream that
+//! `real_aggregation_vector.rs` checks.
 //!
-//! Guards the wire-layout facts the round-trip tests cannot see:
-//! the publics region is ziskos's full 64-word (256-byte) output block.
+//! Guards the wire-layout facts the round-trip tests cannot see: the publics
+//! region is ziskos's full 64-word output block at u64 width, so it occupies
+//! 512 bytes and each word carries four significant bytes.
+//!
+//! The three expected values rotate with the fixture. The fixture-session
+//! workflow produces both together.
 
 use zksync_os_zisk_prover_service::prover::parse_proof_file;
 
@@ -18,32 +21,48 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The commitment's eight u32 words each sit in the low half of an
+/// eight-byte slot, so read them back out of the widened publics region.
+fn commitment(public_values: &[u8]) -> String {
+    let mut out = Vec::with_capacity(32);
+    for word in public_values[32..96].chunks_exact(8) {
+        out.extend_from_slice(&word[..4]);
+    }
+    hex(&out)
+}
+
 #[test]
-fn parses_real_v0_18_proof_file() {
+fn parses_real_proof_file() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/real_proof_zisk_v0.18.0.bin"
+        "/tests/data/real_proof_zisk_v1.2.0-alpha.bin"
     );
     let out = parse_proof_file(std::path::Path::new(path)).expect("parse real proof file");
 
     assert_eq!(out.proof.len(), 768, "PLONK proof size");
-    assert_eq!(out.public_values.len(), 320, "wire public values size");
+    assert_eq!(out.public_values.len(), 576, "wire public values size");
     assert_eq!(
         hex(&out.public_values[..32]),
         EXPECTED_PROGRAM_VK,
         "programVK prefix"
     );
     assert_eq!(
-        hex(&out.public_values[32..64]),
+        commitment(&out.public_values),
         EXPECTED_COMMITMENT,
-        "batch commitment word"
+        "batch commitment words"
     );
     assert!(
-        out.public_values[64..288].iter().all(|b| *b == 0),
+        out.public_values[32..96]
+            .chunks_exact(8)
+            .all(|w| w[4..] == [0u8; 4]),
+        "each guest public is a u32 widened to a u64"
+    );
+    assert!(
+        out.public_values[96..544].iter().all(|b| *b == 0),
         "unused guest output words must be zero"
     );
     assert_eq!(
-        hex(&out.public_values[288..]),
+        hex(&out.public_values[544..]),
         EXPECTED_VADCOP_VK,
         "vadcop VK suffix"
     );

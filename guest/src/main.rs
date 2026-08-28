@@ -43,7 +43,7 @@ fn main() {
     // read, so the siblings are never all resident. The wire format is the same
     // for both paths and the commitment is byte-identical. See
     // `executor::stream`.
-    let bytes = ziskos::io::read_input_slice();
+    let bytes = ziskos::io::read_slice();
     let (_output, commitment) = executor::execute_and_commit_streaming(bytes)
         .expect("failed to deserialize/execute BatchInput (streaming, bincode 2.x)");
     let hash_bytes: [u8; 32] = commitment.into();
@@ -204,7 +204,7 @@ pub extern "C" fn secp256r1_ecdsa_verify_c(msg: *const u8, sig: *const u8, pk: *
 /// (`hash[..12].fill(0)`) and impls.rs's `Address::from_slice(&output[12..])`.
 /// Returns 0 on success, 1 on failure.
 ///
-/// The public key is recovered via ziskos v0.18.0's `zkvm_secp256k1_ecrecover`
+/// The public key is recovered via ziskos's `zkvm_secp256k1_ecrecover`
 /// (a `#[no_mangle]` C symbol from `ziskos::zisklib::zkvm_accelerators` on the
 /// zisk target). On-target it uses the accelerated secp256k1 add/dbl ops
 /// (0xf4/0xf5) + arith_eq circuits — NOT software k256. The signature `s` is

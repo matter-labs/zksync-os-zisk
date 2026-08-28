@@ -28,7 +28,7 @@ zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator" }
 [dev-dependencies]
 # Pin cross-check only: asserts VADCOP_FINAL_BODY_WORDS against the real
 # pil2-proofman verifier at the pinned tag (see prover.rs tests).
-proofman-verifier = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.18.0", default-features = false, features = ["verify"] }
+proofman-verifier = { version = "=1.2.0-alpha", default-features = false, features = ["verify"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

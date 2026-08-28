@@ -1,7 +1,7 @@
 # Aggregated-Range Binding Vector
 
 Cross-stack test vector for the aggregator guest's committed output — the
-32 bytes at `publics[32..64]` of an aggregated range proof. Three
+32 bytes at `publics[32..96]` of an aggregated range proof. Three
 codebases pin these exact values and must stay in lockstep:
 
 - this guest (`cross_stack_binding_vector` in `src/lib.rs` and the
@@ -111,4 +111,4 @@ PLONK-wrapped aggregate has wire public-values bytes `[32..64]` equal to
 
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin` in a separate PR.
+`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin` in a separate PR.

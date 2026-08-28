@@ -72,7 +72,7 @@ class RotateProgramVkTests(unittest.TestCase):
             "--record",
             str(self.record),
             "--zisk-version",
-            "0.18.0",
+            "1.2.0-alpha",
             "--date",
             "2026-08-24",
             "--run-url",
@@ -144,7 +144,7 @@ class ReleaseSummaryTests(unittest.TestCase):
     def test_summary_contains_operator_identities(self) -> None:
         manifest = {
             "release": {"tag": "1.2.3", "commit": "a" * 40},
-            "toolchain": {"zisk_version": "0.18.0"},
+            "toolchain": {"zisk_version": "1.2.0-alpha"},
             "programs": {
                 "inner": {
                     "elf": {"sha256": "b" * 64},
@@ -168,7 +168,7 @@ class ReleaseSummaryTests(unittest.TestCase):
             release_assets.append_summary(summary, manifest)
             result = summary.read_text()
         self.assertIn("## ZiSK release identities", result)
-        self.assertIn("ZiSK `0.18.0`", result)
+        self.assertIn("ZiSK `1.2.0-alpha`", result)
         self.assertIn("`[1, 2, 3, 4]`", result)
         self.assertIn("`[9, 10, 11, 12]`", result)
         self.assertIn("0x" + "d" * 64, result)
@@ -217,7 +217,7 @@ class ReleaseAssetsTests(unittest.TestCase):
                     "--commit",
                     "a" * 40,
                     "--zisk-version",
-                    "0.18.0",
+                    "1.2.0-alpha",
                     "--inner-elf",
                     str(inner_elf),
                     "--inner-verkey",

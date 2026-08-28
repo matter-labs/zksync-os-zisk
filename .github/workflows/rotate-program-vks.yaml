@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 env:
-  ZISK_VERSION: "0.18.0"
+  ZISK_VERSION: "1.2.0-alpha"
 
 jobs:
   rotate:

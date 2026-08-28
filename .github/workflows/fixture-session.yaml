@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZISK_VERSION: "0.18.0"
+  ZISK_VERSION: "1.2.0-alpha"
 
 jobs:
   prepare:
@@ -257,7 +257,7 @@ jobs:
           expected=(
             guest-aggregator/BINDING_VECTOR.md
             guest-aggregator/src/lib.rs
-            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
             prover/tests/real_aggregation_vector.rs
           )
           if [[ "${changed[*]}" != "${expected[*]}" ]]; then
@@ -299,7 +299,7 @@ jobs:
             guest-aggregator/BINDING_VECTOR.md \
             guest-aggregator/src/lib.rs \
             prover/tests/real_aggregation_vector.rs \
-            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
           git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
@@ -327,7 +327,7 @@ jobs:
           - \`guest-aggregator/BINDING_VECTOR.md\`
           - \`guest-aggregator/src/lib.rs\`
           - \`prover/tests/real_aggregation_vector.rs\`
-          - \`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin\`
+          - \`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin\`
 
           The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests.
           EOF

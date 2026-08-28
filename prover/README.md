@@ -8,8 +8,8 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Per-proof process** (default, ZiSK v0.18.0). Each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation.
-- **Resident prover service** (`--coordinator-url`). The daemon shells `zisk-prove-client` calls against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries belong to ZiSK v0.18.0: `ziskup` installs the coordinator and the worker, and `zisk-prove-client` builds from the ZiSK source tree (`cargo build --release -p zisk-prove-client`).
+- **Per-proof process** (default). Each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation.
+- **Resident prover service** (`--coordinator-url`). The daemon shells `zisk-prove-client` calls against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries belong to ZiSK v1.2.0-alpha: `ziskup` installs the coordinator and the worker, and `zisk-prove-client` builds from the ZiSK source tree (`cargo build --release -p zisk-prove-client`).
 
 ### Architecture
 
@@ -46,7 +46,7 @@ On an RTX 5090, per-batch proving runs from ~12 s (small batch) to ~80 s (1000-t
 
 ## Prerequisites
 
-- **ZiSK toolchain v0.18.0** (`ziskup -v 0.18.0`): `cargo-zisk` for the default backend, `zisk-prove-client` (built from the ZiSK source tree) for the coordinator backend; the selected binary's path is passed as `--zisk-binary`.
+- **ZiSK toolchain v1.2.0-alpha** (`ziskup -v 1.2.0-alpha`): `cargo-zisk` for the default backend, `zisk-prove-client` (built from the ZiSK source tree) for the coordinator backend; the selected binary's path is passed as `--zisk-binary`.
 - **ZiSK guest ELFs**: built from `zksync-os-zisk/guest/` and `zksync-os-zisk/guest-aggregator/` via the reproducible builds (`./build-guest.sh`, `./build-aggregator.sh`); their paths are passed as `--elf-path` and `--aggregator-elf`.
 - **STARK proving key**: `~/.zisk/provingKey/` (via `ziskup`), passed as `--proving-key`.
 - **PLONK proving key**: `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`), passed as `--proving-key-plonk`.
@@ -192,7 +192,7 @@ zksync-os-zisk-prover-service \
 ```
 
 `ziskup` installs the coordinator and the worker. Build `zisk-prove-client`
-from the ZiSK v0.18.0 source tree with
+from the ZiSK v1.2.0-alpha source tree with
 `cargo build --release -p zisk-prove-client`.
 
 Proving throughput then scales on the worker side: join more workers to the

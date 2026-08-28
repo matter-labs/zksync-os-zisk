@@ -70,7 +70,7 @@ calibrate() {
     local name="$1" elf="$2" expected="$3"
     local setup_dir="${SESSION_DIR}/setup-${name}"
     mkdir -p "${setup_dir}"
-    "${CARGO_ZISK}" program-setup -e "${elf}" -k "${ZISK_PK}" -g -o "${setup_dir}"
+    ZISK_CACHE_DIR="${setup_dir}" "${CARGO_ZISK}" setup -e "${elf}" -k "${ZISK_PK}"
     local derived
     derived="$(vk_of_setup_dir "${setup_dir}")"
     check "${name} programVK calibration" "${derived}" "${expected}"
@@ -91,7 +91,7 @@ calibrate aggregator "${AGG_ELF}" "${aggregator_program_vk}"
 echo "==> proving the four per-batch vadcop_final streams"
 for n in 1 2 3 4; do
     "${CARGO_ZISK}" prove -e "${GUEST_ELF}" -i "${SESSION_DIR}/batch-${n}.bin" \
-        -k "${ZISK_PK}" -y -o "${SESSION_DIR}/vadcop-batch-${n}.bin" -g --emulator
+        -k "${ZISK_PK}" -y -o "${SESSION_DIR}/vadcop-batch-${n}.bin" -g
 done
 
 echo "==> extracting and comparing proved commitments before PLONK/aggregation"
@@ -149,12 +149,12 @@ check "aggregator input rootCVadcopFinal" \
 echo "==> PLONK-wrapping batch 1"
 "${CARGO_ZISK}" prove -e "${GUEST_ELF}" -i "${SESSION_DIR}/batch-1.bin" \
     -k "${ZISK_PK}" -w "${ZISK_SK}" --plonk -y \
-    -o "${SESSION_DIR}/batch1-plonk.bin" -g --emulator
+    -o "${SESSION_DIR}/batch1-plonk.bin" -g
 
 echo "==> proving and PLONK-wrapping the aggregation"
 "${CARGO_ZISK}" prove -e "${AGG_ELF}" -i "${SESSION_DIR}/agg-input.bin" \
     -k "${ZISK_PK}" -w "${ZISK_SK}" --plonk -y \
-    -o "${SESSION_DIR}/aggregated-plonk.bin" -g --emulator
+    -o "${SESSION_DIR}/aggregated-plonk.bin" -g
 
 echo "==> extracting the wire fixtures"
 "${TOOLS_DIR}/inspect_proof" "${SESSION_DIR}/batch1-plonk.bin" \
@@ -205,7 +205,7 @@ jq -n \
             "guest-aggregator/BINDING_VECTOR.md",
             "guest-aggregator/src/lib.rs",
             "prover/tests/real_aggregation_vector.rs",
-            "prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+            "prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
         ]
     }' > "${SESSION_DIR}/fixture-values.json"
 

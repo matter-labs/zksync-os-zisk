@@ -19,10 +19,10 @@ proof generation on a GPU, and the on-chain verification in era-contracts.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
-# ZiSK toolchain, pinned at v0.18.0
+# ZiSK toolchain, pinned at v1.2.0-alpha
 curl -L https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/install.sh | bash
 source ~/.bashrc
-ziskup -v 0.18.0
+ziskup -v 1.2.0-alpha
 
 # PLONK proving key (a separate, multi-gigabyte download)
 ziskup setup_snark
@@ -37,7 +37,7 @@ The resident-prover backend also needs `zisk-prove-client`. Build it from
 the ZiSK source tree at the pinned release:
 
 ```bash
-git clone --branch v0.18.0 https://github.com/0xPolygonHermez/zisk zisk-src
+git clone --branch v1.2.0-alpha https://github.com/0xPolygonHermez/zisk zisk-src
 cd zisk-src && cargo build --release -p zisk-prove-client
 ```
 
@@ -70,12 +70,14 @@ before you prove anything.
 The `programVK` is the ROM merkle root of an ELF. Derive it once per ELF:
 
 ```bash
-cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey -g
-cargo-zisk program-setup -e out/zksync-os-zisk-guest-aggregator \
-    -k ~/.zisk/provingKey -g
+cargo-zisk setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+cargo-zisk setup -e out/zksync-os-zisk-guest-aggregator \
+    -k ~/.zisk/provingKey
 ```
 
-The command prints the four ROM root-hash u64 limbs. Compare them against
+The setup runs on the CPU and writes the verkey into `~/.zisk/cache`; set
+`ZISK_CACHE_DIR` to collect it elsewhere. The command prints the four ROM
+root-hash u64 limbs. Compare them against
 `guest/GUEST_PROGRAM_VK` and `guest-aggregator/GUEST_PROGRAM_VK`, which hold
 both the limbs and the 32-byte big-endian value the wire format uses.
 
@@ -91,12 +93,12 @@ cargo-zisk prove \
     -i /tmp/proven_input.bin \
     -k ~/.zisk/provingKey \
     -w ~/.zisk/provingKeySnark --plonk \
-    -y -o /tmp/proof.bin -g --emulator
+    -y -o /tmp/proof.bin -g
 ```
 
-`--emulator` selects the standard emulator, which runs anywhere. The ASM
-emulator is faster and needs a high memlock ulimit, so containers with an
-8 MB memlock limit must keep `--emulator`.
+The standard emulator runs anywhere and is the default. `-a` selects the ASM
+emulator, which is faster and needs a high memlock ulimit, so containers with
+an 8 MB memlock limit leave it off.
 
 The output file is bincode of ZiSK's `Proof` struct. It carries the
 768-byte BN254 PLONK proof, the 256-byte publics region, the program VK and
@@ -106,9 +108,9 @@ the vadcop-final VK. Decode it with the daemon's inspector:
 cd prover && cargo run --bin inspect_proof -- /tmp/proof.bin
 ```
 
-It prints the 320-byte wire public values
-`programVK (32) ‖ publics (256) ‖ vadcopVK (32)`, with the batch commitment
-at bytes `[32..64]`.
+It prints the 576-byte wire public values
+`programVK (32) ‖ publics (512) ‖ vadcopVK (32)`, with the batch commitment
+at bytes `[32..96]`.
 
 To keep the intermediate `vadcop_final` STARK stream instead — the artifact
 the aggregator guest verifies, and the artifact the server accepts per
@@ -181,8 +183,8 @@ paths of the generated contracts.
   aggregation stage needs 64 GB or more of RAM.
 - CUDA errors: check that `nvidia-smi` works and that the CUDA toolkit is
   installed.
-- The ASM emulator hangs or fails to lock memory: pass `--emulator` to use
-  the standard emulator.
+- The ASM emulator hangs or fails to lock memory: drop `-a` to use the
+  standard emulator.
 - `cargo-zisk` fails to start with `libmpi.so.40: cannot open shared object
   file`: install `openmpi-bin`, or extract the runtime libraries into a user
   directory and export `LD_LIBRARY_PATH`.

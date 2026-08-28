@@ -51,7 +51,8 @@ generation contains pathological long-running cases. The target-emulation lane
 also stays separate: native replay cannot test the ZiSK entrypoint, fcall ABI,
 target memory behavior, or target crypto hooks.
 
-This ZKsync OS 0.5.0 baseline runs against guest ELF `6c487fca…`. Its steady
+This ZKsync OS 0.5.0 baseline runs against the guest ELF recorded in
+`guest/GUEST_ELF_SHA256`. Its steady
 state over the 35 chunks is 10,605 cases →
 10,589 OK, 0 unexpected, and the same two waiver families the 0.4.0 line
 carries. Its `prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008
@@ -110,9 +111,9 @@ runs through the rig itself, so both lanes report on one comparison.
    blocks and their dumps matter.
 3. **Fixtures** — in `tests/evm_tester/` run `./download_ethereum_fixtures.sh`
    (EEST v5.4.0, ~13 GB unpacked, ~250 MB download).
-4. **ZiSK v0.18.0 toolchain** — release tarball
-   `cargo_zisk_linux_amd64.tar.gz` from the zisk v0.18.0 GitHub release into
-   `~/.zisk-0.18.0/`. On machines without root, extract the runtime libs
+4. **ZiSK v1.2.0-alpha toolchain** — release tarball
+   `cargo_zisk_linux_amd64.tar.gz` from the zisk v1.2.0-alpha GitHub release
+   into `~/.zisk-1.2.0-alpha/`. On machines without root, extract the runtime libs
    from Ubuntu debs (`libomp5-18`, `libopenmpi3`, `libhwloc15`,
    `libevent-core/pthreads`) via `dpkg -x` into a user dir and export it as
    `LD_LIBRARY_PATH` (the runner's default points at
@@ -184,11 +185,9 @@ emulation status, detail.
 - Any guest, lib, or zksync-os-revm change (the guest ELF pin rotates).
 - Any zksync-os pin/branch move — and after protocol upgrades, alongside
   testnet replays.
-- ziskos/toolchain bumps: the guest's x=0 P-256 tripwire test signals when
-  that workaround can be dropped (the underlying hint bug is fixed on the
-  ZiSK 1.0 line); re-run the p256 family then. The two BLS12-381 tripwires
-  give the same signal for the cofactor screen and the map-to-curve software
-  route; re-run the eip2537 family then.
+- ziskos/toolchain bumps: the accelerated crypto hooks change with them.
+  Re-run the p256 and eip2537 families, which carry the inputs the hooks
+  handle least like the reference.
 - At each protocol bump: regenerate from the matching official native release;
   header roots, fee rules, precompiles, or wire semantics may require a fresh
   divergence-triage round.

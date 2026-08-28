@@ -42,7 +42,7 @@
 #   tools/aggregator-stepcost.sh proof1.bin proof2.bin # real measurement
 #
 # Environment (defaults for this workstation):
-#   ZISK_BIN_DIR        cargo-zisk-cpu + ziskemu location (~/.zisk-0.18.0/bin)
+#   ZISK_BIN_DIR        cargo-zisk-cpu + ziskemu location (~/.zisk-1.2.0-alpha/bin)
 #   STEPCOST_OUT        work/output directory
 #   SYNTHETIC_N         N for the synthetic mode (default 2)
 #   STEPCOST_MAX_STEPS  ziskemu step cap (default 4e9: ~64x the estimated
@@ -56,7 +56,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-ZISK_BIN_DIR="${ZISK_BIN_DIR:-$HOME/.zisk-0.18.0/bin}"
+ZISK_BIN_DIR="${ZISK_BIN_DIR:-$HOME/.zisk-1.2.0-alpha/bin}"
 ZISKEMU="$ZISK_BIN_DIR/ziskemu"
 CARGO_ZISK="$ZISK_BIN_DIR/cargo-zisk-cpu"
 STEPCOST_OUT="${STEPCOST_OUT:-$HOME/multiprover/aggregator-stepcost-out}"

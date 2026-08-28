@@ -30,12 +30,12 @@ fn main() {
         parse_count_frame, words_from_bytes, Aggregator, ProofFrame,
     };
 
-    let count_bytes = ziskos::io::read_input_slice();
+    let count_bytes = ziskos::io::read_slice();
     let n = parse_count_frame(count_bytes).unwrap_or_else(|e| panic!("count frame: {e}"));
 
     let mut aggregator = Aggregator::new();
     for i in 0..n {
-        let proof_bytes = ziskos::io::read_input_slice();
+        let proof_bytes = ziskos::io::read_slice();
         let words = words_from_bytes(proof_bytes).unwrap_or_else(|e| panic!("proof {i}: {e}"));
         let frame = ProofFrame::parse(words).unwrap_or_else(|e| panic!("proof {i}: {e}"));
         aggregator

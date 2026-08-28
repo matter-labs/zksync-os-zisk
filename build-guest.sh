@@ -14,7 +14,7 @@ set -euo pipefail
 # The ELF lands in out/zksync-os-zisk-guest. Its programVK (the value in the
 # server's compiled ZiSK release manifest and the L1 verifier pin) is
 # derived on a prover box with:
-#   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
+#   cargo-zisk setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 # — deterministic given the ELF and the pinned cargo-zisk version.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

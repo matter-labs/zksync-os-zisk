@@ -11,7 +11,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
 ruint = { version = "1", default-features = false }
-proofman-verifier = { git = "https://github.com/0xPolygonHermez/pil2-proofman.git", tag = "v0.18.0", default-features = false, features = ["verify"], optional = true }
+proofman-verifier = { version = "=1.2.0-alpha", default-features = false, features = ["verify"], optional = true }
 zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator", optional = true }
 
 [features]

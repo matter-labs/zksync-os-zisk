@@ -95,7 +95,7 @@ flowchart TB
 
     ZAM -->|"range streams"| DAEMON
     DAEMON --> AGGG
-    AGGG -->|"PLONK 768 B + publics 320 B"| ZAM
+    AGGG -->|"PLONK 768 B + publics 576 B"| ZAM
 
     SNK -->|"Airbender SNARK"| MPC
     ZAM -->|"ZiSK range proof"| MPC
@@ -116,7 +116,7 @@ batches as its Airbender SNARK.
 | `matter-labs/zksync-os-zisk` (this repo) | The ZiSK side end to end: the REVM re-implementation (`lib/`), the zkVM guest (`guest/`), the range aggregator guest (`guest-aggregator/`), the proving daemon (`prover/`), the off-chain verification helpers (`zisk-verifier/`), and the EEST conformance lane (`tools/`). |
 | `matter-labs/zksync-os-revm` | The REVM extension crate the re-implementation executes on: ZKsync OS system-contract precompiles, L2→L1 log collection, spec gating. |
 | `matter-labs/zksync-os-server` | Second-proof-system input generation (`zisk_witness`), the ZiSK job lane (`zisk_prover_lane`), shadow re-execution equivalence, off-chain proof verification, the multiproof rendezvous, and L1 submission. Tracked in matter-labs/zksync-os-server#1472. |
-| `matter-labs/era-contracts` | `ZiskVerifier` (Plonk SNARK over the 320-byte public values), `MultiProofVerifier` (combined type-5 proof), aggregated range mode, deployment dispatch. Tracked in matter-labs/era-contracts#2305. |
+| `matter-labs/era-contracts` | `ZiskVerifier` (Plonk SNARK over the 576-byte public values), `MultiProofVerifier` (combined type-5 proof), aggregated range mode, deployment dispatch. Tracked in matter-labs/era-contracts#2305. |
 
 ## Components of this repository
 
@@ -197,7 +197,7 @@ key covers every range width.
    type-5 payload — Airbender SNARK plus ZiSK range proof — from whichever
    proof arrives last, and `l1_sender` submits it.
 8. **L1** (era-contracts): `MultiProofVerifier` verifies the Airbender
-   proof, and `ZiskVerifier` reconstructs the 320-byte ZiSK public values
+   proof, and `ZiskVerifier` reconstructs the 576-byte ZiSK public values
    on-chain from its three pins and the batch public inputs, then verifies
    the ZiSK Plonk proof through a standalone snarkJS-generated verifier
    referenced by address.
@@ -216,23 +216,28 @@ therefore rotates the key.
 
 | Artifact | Size | Layout |
 |---|---|---|
-| Per-batch `vadcop_final` stream | 336168 B | `[minimal=0][n_publics=68][programVK(4)][publics(64)][body][vadcopVK(4)]`, u64 little-endian words |
+| Per-batch `vadcop_final` stream | 369224 B | `[minimal=0][n_publics=69][isVadcopFinalProof=1][programVK(4)][publics(64)][body][vadcopVK(4)]`, u64 little-endian words |
 | Plonk SNARK proof | 768 B | BN254 Plonk proof bytes |
-| Public values | 320 B | `programVK (32) ‖ guest publics (256) ‖ rootCVadcopFinal (32)` |
+| Public values | 576 B | `programVK (32) ‖ guest publics (512) ‖ rootCVadcopFinal (32)` |
 
-The batch commitment sits at public-values bytes `[32..64]`. The publics
-region is ziskos's full 64-word output area: the guest's 8 commitment words
-first, zeros after. The single public signal the Plonk circuit proves is
-`sha256(public_values) mod r`. The proof therefore carries no public values;
-L1 reconstructs all 320 bytes from its own pins and the batch public inputs,
-so the cross-proof binding is inherent.
+`isVadcopFinalProof` separates a leaf proof from an aggregated one; the
+aggregator rejects any stream that does not carry the leaf value.
+
+The publics region is ziskos's full 64-word output area at u64 width, eight
+little-endian bytes per word: the guest's 8 commitment words first, zeros
+after. The batch commitment therefore occupies public-values bytes
+`[32..96]`, four significant bytes in every eight-byte slot. The single
+public signal the Plonk circuit proves is `sha256(public_values) mod r`. The
+proof therefore carries no public values; L1 reconstructs all 576 bytes from
+its own pins and the batch public inputs, so the cross-proof binding is
+inherent.
 
 ## Keys and pinning
 
 A `programVK` is the ROM merkle root of a guest ELF. It covers the ROM image
 only, so two ELFs that differ outside the ROM image share it. Derive one on
 a prover box with
-`cargo-zisk program-setup -e <elf> -k ~/.zisk/provingKey`.
+`cargo-zisk setup -e <elf> -k ~/.zisk/provingKey`.
 
 Four values identify the lane, and each is pinned at least twice so drift
 is caught at the layer that notices first:
@@ -244,14 +249,14 @@ is caught at the layer that notices first:
 | `rootCVadcopFinal` | ZiSK vadcop-final circuit VK | server release manifest, L1 `ZiskVerifier.rootCVadcopFinal()`, binding digest |
 | ZiSK VK hash | `keccak256` over the three pins above, in that order | server capability registry and startup check, L1 `ZiskVerifier.verificationKeyHash()` |
 
-Current values, with ZiSK v0.18.0:
+Current values, with ZiSK v1.2.0-alpha:
 
 ```text
-guest ELF sha256      = 6c487fca080740f08346f95dc7f5b6db49127a8392744b23c233d19e81814a16
-guest programVK       = pending derivation on a prover box (guest/GUEST_PROGRAM_VK)
-aggregator ELF sha256 = d886c4cdfa10e8c106592f8698504b6fd4df619e0889974a792bf7e6762a2bb8
-aggregator programVK  = pending derivation on a prover box (guest-aggregator/GUEST_PROGRAM_VK)
-rootCVadcopFinal      = 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
+guest ELF sha256      = pending the reproducible build (guest/GUEST_ELF_SHA256)
+guest programVK       = pending the rotation workflow (guest/GUEST_PROGRAM_VK)
+aggregator ELF sha256 = pending the reproducible build (guest-aggregator/GUEST_ELF_SHA256)
+aggregator programVK  = pending the rotation workflow (guest-aggregator/GUEST_PROGRAM_VK)
+rootCVadcopFinal      = 0x564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f
 ```
 
 The programVKs derive from the exact ELF bytes, so guest binaries come from

@@ -1,4 +1,4 @@
-//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v0.18.0)
+//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v1.2.0-alpha)
 //! `vadcop_final` proofs: load the proof files, parse them with the
 //! guest's own frame parser, run the `Aggregator` (the exact code path the
 //! guest executes, host keccak backend), and assert the values pinned in
@@ -7,7 +7,7 @@
 //! Two levels of coverage:
 //! - [`binding_vector_batch1_matches_committed_fixture`] runs
 //!   UNCONDITIONALLY against the committed batch-1 fixture
-//!   (`tests/data/real_vadcop_final_zisk_v0.18.0.bin`), so a normal CI run
+//!   (`tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin`), so a normal CI run
 //!   verifies the pinned `innerProgramVK`, `rootCVadcopFinal`, and
 //!   `commitment_1` rather than passing while checking nothing.
 //! - [`real_proofs_reproduce_binding_vector`] reproduces the full 4-batch
@@ -52,7 +52,7 @@ fn vk_hex(words: &[u64]) -> String {
 fn binding_vector_batch1_matches_committed_fixture() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+        "/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
     );
     let stream = load_proof_stream(std::path::Path::new(path))
         .expect("load committed batch-1 vadcop_final fixture");

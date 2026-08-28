@@ -36,17 +36,17 @@ ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 # _init_stack_top, _kernel_heap_bottom and _kernel_heap_top, so the guest
 # needs it to link.
 #
-# By default `toolchain install` downloads the "latest" toolchain release, and
-# that reference floats. A newer toolchain release drops the link script from
+# By default `toolchain install` picks the highest `zisk-3.x.y` tag, and that
+# reference floats. A newer toolchain release can drop the link script from
 # the target, so the guest fails to link and the recorded ELF stops
 # reproducing. Pin the toolchain to the release that matches cargo-zisk
-# 0.18.0 (the release that was current at the 2026-05-15 build). Download the
-# exact artifact, verify its sha256, and hand it to `toolchain install` through
-# ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then installs from the local file and
-# makes no network fetch, so the toolchain no longer floats.
-ARG ZISK_VERSION=0.18.0
-ARG ZISK_TOOLCHAIN_TAG=zisk-0.5.1
-ARG ZISK_TOOLCHAIN_SHA256=b2eb5e86568ec29e68a813683edb54616478d473b3e179c7fe880dbf764c11c5
+# 1.2.0-alpha. Download the exact artifact, verify its sha256, and hand it to
+# `toolchain install` through ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then
+# installs from the local file and makes no network fetch, so the toolchain
+# no longer floats.
+ARG ZISK_VERSION=1.2.0-alpha
+ARG ZISK_TOOLCHAIN_TAG=zisk-3.0.0
+ARG ZISK_TOOLCHAIN_SHA256=74190d265b2d8f10424cdf666b71a5b5670c3a685785cd668ee5f49318fa149e
 RUN curl -fsSL -o /tmp/cargo_zisk.tar.gz \
         https://github.com/0xPolygonHermez/zisk/releases/download/v${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz \
     && mkdir -p /root/.zisk \
