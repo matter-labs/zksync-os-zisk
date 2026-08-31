@@ -13,7 +13,7 @@ publish = false
 
 [dependencies]
 zksync-os-zisk-lib = { path = "../../lib" }
-zksync-os-revm = { git = "https://github.com/matter-labs/zksync-os-revm", tag = "v0.3.0", default-features = false }
+zksync-os-revm = { git = "https://github.com/matter-labs/zksync-os-revm", tag = "v0.3.1", default-features = false }
 revm = { version = "=42.0.1", default-features = false, features = ["std", "optional_balance_check", "serde", "tracer"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
