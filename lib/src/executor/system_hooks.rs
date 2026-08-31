@@ -65,7 +65,7 @@ impl ZKsyncOsPrecompiles {
 impl<CTX> PrecompileProvider<CTX> for ZKsyncOsPrecompiles
 where
     CTX: ContextTr<Cfg: Cfg<Spec = ZkSpecId>>,
-    CTX::Journal: L2ToL1LogStore,
+    CTX::Journal: L2ToL1LogStore + zksync_os_revm::force_deploy::ForceDeployRecorder,
 {
     type Output = InterpreterResult;
 

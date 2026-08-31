@@ -99,6 +99,10 @@ pub struct TxDump {
     /// state change, no gas, no transactions-rolling-hash contribution).
     #[serde(default)]
     pub failed: bool,
+    /// Native tx executed and its top-level run reverted (tx_result is `Ok`
+    /// with `status == false`). The tx IS part of the sealed block.
+    #[serde(default)]
+    pub reverted: bool,
 }
 
 /// One block's dump: the witness plus the native reference commitments.
@@ -805,7 +809,12 @@ pub fn build_batch_input(d: &StateDumpBundle, header_hash_check: HeaderHashCheck
             .map(|t| TxInput {
                 chain_id: Some(d.chain_id),
                 gas_used_override: Some(t.gas_used),
-                force_fail: false,
+                // A natively reverted tx is force-failed in the guest: the
+                // guest cannot reproduce every native failure class (e.g. the
+                // settlement-time out-of-gas when the native-resource charge
+                // exceeds the gas limit), and the write-set equality plus the
+                // receipt pin keep the flag honest.
+                force_fail: t.reverted,
                 auth: TxAuth::L2 {
                     signed_bytes: hbytes(&t.signed),
                 },
