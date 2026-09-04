@@ -19,7 +19,7 @@ const SHARD: &[u8] =
 
 /// The case, named by the SHA-256 of its canonical JSON, as the corpus names
 /// every case.
-const CASE: &str = "7b802cc3d9331ed21ee720967a1e92215adc32c9b6d58c74980e6cff76597f41";
+const CASE: &str = "1321a564a42a31df4b13335275b46d9d1bc3641b5247514b971c12d81c01175b";
 
 /// The corpus manifest, which pins the native producer the cases came from.
 const MANIFEST: &str = include_str!("../../eest-corpus/manifest.json");

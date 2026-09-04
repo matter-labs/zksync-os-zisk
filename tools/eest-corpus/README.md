@@ -14,9 +14,9 @@ from the canonical payload rather than the producer's parallel case counter.
 `skipped_filters` records fixture families the pinned producer cannot parse or
 execute, so the committed coverage boundary stays explicit.
 
-The per-PR corpus covers the established 35-family baseline from the official
-ZKsync OS v0.5.0 release at protocol minor 32. It contains 33 nonempty shards;
-the manifest records two filters that emit no dump and the separate
+The per-PR corpus covers the established 35-family baseline from the ZKsync OS
+v0.5.4-private release at protocol minor 32. It contains 33 nonempty shards; the
+manifest records two filters that emit no dump and the separate
 `static/state_tests` is listed as excluded because its native producer includes
 pathological long-running cases; it remains a separate resource-bounded run.
 
@@ -31,12 +31,14 @@ tools/run-eest-native.py \
 ```
 
 Regeneration needs a clean dedicated checkout of `matter-labs/zksync-os` at the
-official `v0.5.0` tag and commit recorded in the generator, plus the official
-EEST v5.4.0 stable and develop fixtures. The release contains the state-dump
-hook and a production rig feature, but its `evm-tester` manifest selects the
-Ethereum-conformance feature. The generator applies the checked-in one-line
-`tools/eest-v0.5.0-production-rig.patch`; the manifest records its SHA-256 so
-the official source plus the exact build transformation remain reproducible.
+`v0.5.4-private` tag and commit recorded in the generator, plus the official
+EEST v5.4.0 stable and develop fixtures. This release's state-dump hook exports
+the per-transaction revert flag consumed by the fixture conversion; the
+regenerated corpus contains 1,272 transactions with that flag set. Its
+`evm-tester` manifest selects the Ethereum-conformance feature, so the
+generator applies the checked-in one-line
+`tools/eest-v0.5.4-private-production-rig.patch`; the manifest records its
+SHA-256 so the source plus the exact build transformation remain reproducible.
 
 ```bash
 CARGO_TARGET_DIR=/path/to/fresh-target \

@@ -1,5 +1,5 @@
 # The native ZKsync OS crates this tool links need the toolchain their release
-# pins; see the zksync-os v0.5.0 rust-toolchain.toml.
+# pins; see the zksync-os v0.5.4-private rust-toolchain.toml.
 [toolchain]
-channel = "nightly-2026-02-10"
+channel = "nightly-2026-08-09"
 components = ["rust-src", "llvm-tools-preview"]

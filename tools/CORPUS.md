@@ -34,12 +34,15 @@ transitions in the committed dataset run once. `corpus-waivers.tsv` remains the
 bounded allowlist. Producer witness insertion order can affect regenerated
 shards, so corpus rotations require manifest and data review.
 
-The committed producer is the official `matter-labs/zksync-os` v0.5.0 tag at
-protocol minor 32. That release contains the state-dump hook and its production
-rig feature, but the `evm-tester` manifest selects Ethereum-conformance tester
-semantics. The generator applies the committed one-line build overlay recorded
-in the manifest to select the tag's existing `production` feature. No fork or
-unreachable commit is needed, and the exact source transformation is reviewable.
+The committed producer is the `matter-labs/zksync-os` v0.5.4-private tag at
+protocol minor 32. That release's state-dump hook exports whether each executed
+transaction reverted, so the fixture conversion can reproduce native failures
+with `force_fail` rather than silently defaulting the signal to false. The
+regenerated corpus contains 1,272 transactions with that flag set. The
+`evm-tester` manifest still selects Ethereum-conformance tester semantics; the
+generator applies the committed one-line build overlay recorded in the
+manifest to select the tag's existing `production` feature. The exact source
+transformation remains reviewable.
 
 With a prebuilt reader, the full replay took 14.3 seconds at eight-way
 parallelism during local validation. PR CI also builds the reader from the
@@ -51,8 +54,8 @@ generation contains pathological long-running cases. The target-emulation lane
 also stays separate: native replay cannot test the ZiSK entrypoint, fcall ABI,
 target memory behavior, or target crypto hooks.
 
-This ZKsync OS 0.5.0 baseline runs against guest ELF `6c487fca…`. Its steady
-state over the 35 chunks is 10,605 cases →
+The latest completed target-emulation sweep used the former ZKsync OS 0.5.0
+baseline and guest ELF `6c487fca…`. Its steady state over the 35 chunks is 10,605 cases →
 10,589 OK, 0 unexpected, and the same two waiver families the 0.4.0 line
 carries. Its `prague/eip2537_bls_12_381_precompiles` chunk stands at 2,008
 cases → 2,008 OK, 0 panics, 0 waived.
@@ -93,19 +96,20 @@ runs through the rig itself, so both lanes report on one comparison.
 
 ## From-scratch setup
 
-1. **zksync-os checkout** — create a clean dedicated worktree at the official
-   `matter-labs/zksync-os` `v0.5.0` tag and pinned commit recorded in the
-   manifest. The release hook is env-gated by `ZKOS_STATE_DUMP_DIR` and emits one
-   self-contained JSON bundle per executed block: pre/post state (leaves +
-   preimages + roots), signed txs with per-tx `failed` markers, block context,
-   the full native header, and the mid-chain fields (`block_number_before`,
-   `last_block_timestamp_before`, `block_hash_ring_head`).
+1. **zksync-os checkout** — create a clean dedicated worktree at the
+   `matter-labs/zksync-os` `v0.5.4-private` tag and pinned commit recorded in
+   the manifest. The release hook is env-gated by `ZKOS_STATE_DUMP_DIR` and
+   emits one self-contained JSON bundle per executed block: pre/post state
+   (leaves + preimages + roots), signed txs with per-tx `failed` and `reverted`
+   markers, block context, the full native header, and the mid-chain fields
+   (`block_number_before`, `last_block_timestamp_before`,
+   `block_hash_ring_head`).
 2. **Production-semantics tester build** — corpus dumps must reflect
    production execution semantics. `generate-eest-corpus.sh` applies
-   `tools/eest-v0.5.0-production-rig.patch`, replacing the tester dependency's
-   `evm_tester` feature with the release's existing `production` feature. This
-   drops base-fee burn, disabled system contracts, mocked `prevrandao`, and
-   EIP-4844 tester behavior while retaining the rig's default test harness.
+   `tools/eest-v0.5.4-private-production-rig.patch`, replacing the tester
+   dependency's `evm_tester` feature with the release's existing `production`
+   feature. This drops base-fee burn, disabled system contracts, mocked
+   `prevrandao`, and EIP-4844 tester behavior while retaining the rig's default test harness.
    Fixture verdict FAILs under these semantics are expected; only executed
    blocks and their dumps matter.
 3. **Fixtures** — in `tests/evm_tester/` run `./download_ethereum_fixtures.sh`
