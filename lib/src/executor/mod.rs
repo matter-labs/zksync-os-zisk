@@ -9,7 +9,6 @@ mod evm;
 mod interop;
 mod proven_db;
 mod stream;
-pub mod system_hooks;
 pub mod tx;
 mod verify;
 

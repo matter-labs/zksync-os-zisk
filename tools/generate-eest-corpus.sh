@@ -5,14 +5,14 @@ set -euo pipefail
 # Use a dedicated checkout because enabling the complete fixture index is a
 # deliberate worktree-local mutation.
 
-ZKOS_DUMP_COMMIT=20fdb610f8a29655dff3b87fc5eeb16340cd8a7b
+ZKOS_DUMP_COMMIT=b38a94b53dc35ec1821f21e488812f7deb05883f
 ZKOS_DUMP_REPOSITORY=matter-labs/zksync-os
-ZKOS_DUMP_REF=refs/tags/v0.5.0
+ZKOS_DUMP_REF=refs/tags/v0.5.4-private
 ZKOS_UPSTREAM_REPOSITORY=matter-labs/zksync-os
 ZKOS_PROTOCOL_VERSION_MINOR=32
 EEST_VERSION=5.4.0
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-producer_overlay="$script_dir/eest-v0.5.0-production-rig.patch"
+producer_overlay="$script_dir/eest-v0.5.4-private-production-rig.patch"
 
 if [[ $# -lt 3 ]]; then
     echo "usage: $0 <zksync-os-dump-checkout> <ethereum-fixtures> <output-directory> [filter ...]" >&2
@@ -47,10 +47,10 @@ if [[ -e "$output" ]] && find "$output" -mindepth 1 -print -quit | grep -q .; th
 fi
 mkdir -p "$output/shards" "$work_root/logs"
 
-# The v0.5.0 release contains the state-dump hook and the production feature,
-# but its evm-tester manifest selects the semantics-changing tester feature.
-# Apply the committed one-line overlay so dumps use the tag's existing
-# production feature without depending on a fork.
+# The v0.5.4-private release contains the state-dump hook, including the
+# per-transaction revert flag, and the production feature, but its evm-tester
+# manifest selects the semantics-changing tester feature. Apply the committed
+# one-line overlay so dumps use the tag's existing production feature.
 git -C "$zkos_checkout" apply --unidiff-zero --check "$producer_overlay"
 git -C "$zkos_checkout" apply --unidiff-zero "$producer_overlay"
 producer_overlay_sha256=$(sha256sum "$producer_overlay" | cut -d' ' -f1)
@@ -201,7 +201,7 @@ manifest = {
         "upstream_commit_reachable": True,
         "protocol_version_minor": int(os.environ["ZKOS_PROTOCOL_VERSION_MINOR"]),
         "build_overlay": {
-            "file": "tools/eest-v0.5.0-production-rig.patch",
+            "file": "tools/eest-v0.5.4-private-production-rig.patch",
             "sha256": os.environ["PRODUCER_OVERLAY_SHA256"],
             "purpose": "select the release tag's production rig feature for evm-tester",
         },

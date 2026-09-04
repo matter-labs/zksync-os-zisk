@@ -6,18 +6,17 @@
 use std::collections::HashSet;
 
 use revm::database::CacheDB;
-use revm::primitives::{B256, U256};
+use revm::primitives::{Address, B256, U256};
 use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm};
-use revm::primitives::Address;
+use zksync_os_revm::precompiles::ZKsyncPrecompiles;
 use zksync_os_revm::{zk_context, ZkBuilder, ZkSpecId};
 
 use super::eip2935;
+use super::proven_db::ProvenDB;
+use super::tx::build_proven_tx;
 use crate::block_header;
 use crate::block_roots;
 use crate::types::*;
-use super::proven_db::ProvenDB;
-use super::system_hooks;
-use super::tx::build_proven_tx;
 
 /// EIP-4844 blob transactions. Native's transaction dispatch compiles the
 /// type-3 arm only under a cargo feature no shipped build enables, so every
@@ -218,7 +217,7 @@ where
             blk.prevrandao = Some(block.prev_randao);
         })
         .build_zk()
-        .with_precompiles(system_hooks::ZKsyncOsPrecompiles::new_with_spec(spec_id));
+        .with_precompiles(ZKsyncPrecompiles::new_with_spec(spec_id));
 
     // AtlasV4 is the first spec whose block header carries a receipts root, so
     // it is the only one that builds receipt leaves. It is also the first spec

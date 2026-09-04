@@ -180,11 +180,25 @@ pub(super) fn build_revm_write_map(
             // A destroyed account has exactly one legal post-state, so the
             // preimage is pinned whole rather than field by field: any other
             // content leaves value alive in an account execution emptied.
-            PostState::Destroyed => assert!(
-                account_props::is_zeroed_account(&props),
-                "after-preimage for destroyed account {addr} is not the zeroed \
-                 account leaf: destruction writes nonce 0, balance 0, and no code"
-            ),
+            PostState::Destroyed => {
+                // Native omits the zeroed leaf of an account created and
+                // destroyed inside the batch (EIP-6780): nothing pre-existed to
+                // empty, so no tree write exists for it. The discriminator is
+                // existence in the authenticated pre-state, not the account's
+                // values — a pre-existing account that is empty-but-present
+                // (zero nonce/balance, e.g. with code) is legitimately emptied.
+                let existed_before = proven_db.basic_ref(*addr).ok().flatten().is_some();
+                assert!(
+                    existed_before,
+                    "after-preimage for account {addr} created and destroyed inside \
+                     the batch: native records no leaf for it"
+                );
+                assert!(
+                    account_props::is_zeroed_account(&props),
+                    "after-preimage for destroyed account {addr} is not the zeroed \
+                     account leaf: destruction writes nonce 0, balance 0, and no code"
+                );
+            }
             // A system force-deploy changes an account REVM never executed, so
             // there is no post-state to derive the fields from. It is the
             // documented trusted hole of an upgrade batch: the fields rest on
@@ -657,13 +671,20 @@ mod tests {
 
     /// Admitting destroyed accounts must not admit their CONTENT: a destroyed
     /// account has one legal post-state, so a preimage that keeps a balance
-    /// alive in it is rejected.
+    /// alive in it is rejected. The pre-state holds a balance so the account
+    /// is one destruction legitimately empties, not a same-batch
+    /// create+destroy (native records no leaf for those at all).
     #[test]
     #[should_panic(expected = "is not the zeroed account leaf")]
     fn rejects_non_zeroed_preimage_for_destroyed_account() {
         let addr = Address::repeat_byte(0x33);
-        let cache_db =
-            cache_db_with(vec![], vec![(addr, DbAccount::new_not_existing())], HashMap::new());
+        let mut pre_blob = zeroed_account_blob();
+        pre_blob[47] = 1; // the account held 1 wei before destruction
+        let cache_db = cache_db_with(
+            vec![(addr, pre_blob)],
+            vec![(addr, DbAccount::new_not_existing())],
+            HashMap::new(),
+        );
 
         let mut blob = zeroed_account_blob();
         blob[47] = 1; // balance = 1 wei
