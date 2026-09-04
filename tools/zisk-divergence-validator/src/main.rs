@@ -34,7 +34,7 @@ use report::{
 
 /// The native ZKsync OS release this tool links, and the producer of the
 /// committed EEST corpus; see tools/CORPUS.md.
-const NATIVE_PRODUCER: &str = "matter-labs/zksync-os v0.5.0";
+const NATIVE_PRODUCER: &str = "matter-labs/zksync-os v0.5.4-private";
 
 const USAGE: &str = "\
 Usage: zisk-divergence-validator <scenario.yaml|scenario.json> [options]

@@ -18,15 +18,15 @@ path = "src/main.rs"
 zksync-os-zisk-lib = { path = "../../lib" }
 zksync-os-zisk-test-utils = { path = "../test-utils" }
 
-# Native ZKsync OS at the official release the committed EEST corpus pins as
-# its native producer (see tools/CORPUS.md and tools/eest-corpus/manifest.json).
-rig = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.0", features = [
+# Native ZKsync OS at the release the committed EEST corpus pins as its native
+# producer (see tools/CORPUS.md and tools/eest-corpus/manifest.json).
+rig = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.4-private", features = [
     "no_print",
 ] }
-forward_system = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.0", features = [
+forward_system = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.4-private", features = [
     "production",
 ] }
-zksync_os_tests_common = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.0" }
+zksync_os_tests_common = { git = "https://github.com/matter-labs/zksync-os", tag = "v0.5.4-private" }
 
 alloy = { version = "2.4.1", features = [
     "consensus",
