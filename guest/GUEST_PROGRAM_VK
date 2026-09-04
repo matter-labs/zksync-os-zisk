@@ -6,15 +6,17 @@
 # `prover_api.zisk_vks[].program_vk` expectation.
 #
 # Derived with cargo-zisk 0.18.0 on 2026-09-04 by
-# https://github.com/matter-labs/zksync-os-zisk/actions/runs/33845059956
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/33872157699
 # from the reproducible container ELF with sha256
-# c1aae93a95ccc4c89e0404480c0fff4df2e3d5e94122e930c52cdc3e575f7744:
+# 92721a03ffbb7e6df9f1bb32570562549f621397393fec78df63490007f3aaca:
 #   cargo-zisk program-setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 #
-# Root hash limbs: [14309917511618162757, 14091370846930080649,
-#                   1798387548193355116, 2570739467774007901]
-0xc6970a28dd247045c38e9b204190138918f527f2628cf56c23ad19ecf2bf1a5d
+# Root hash limbs: [9512061988066778150, 7453770231994497494,
+#                   15627699651111526065, 12082518200217936122]
+0x8401a1fb28375c2667711c88c369b9d6d8e0be0898ff9eb1a7adba49842ea0fa
 
+# History: 0xc6970a28dd247045c38e9b204190138918f527f2628cf56c23ad19ecf2bf1a5d
+# (retired 2026-09-04 by https://github.com/matter-labs/zksync-os-zisk/actions/runs/33872157699).
 # History: 0x8168c5d383a50a9c7a40561b82bf679cc6dfdab0308417b4fea653362d78d080
 # (retired 2026-09-04 by https://github.com/matter-labs/zksync-os-zisk/actions/runs/33845059956).
 # History: 0x4b1b8e583ed8f62b9af9bb13c96e922b10acd14f897070df3fd8618058da6eb7
