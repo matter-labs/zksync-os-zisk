@@ -30,7 +30,7 @@ env:
 
 jobs:
   rotate:
-    name: derive pins and propose a draft PR
+    name: regenerate alpha ELFs and VKs for review
     runs-on: matterlabs-ci-runner-high-performance
     timeout-minutes: 180
     env:
@@ -65,12 +65,12 @@ jobs:
           test -n "$remote_commit"
           test "$(git rev-parse HEAD)" = "$remote_commit"
 
-      # These scripts require each reproducible ELF to agree with the reviewed
-      # digest on the selected base branch.
+      # One-off regeneration: record the rebased source and derive matching
+      # VKs. Upload outputs for review and signed publication.
       - name: build both guest ELFs
         run: |
-          ./build-guest.sh
-          ./build-aggregator.sh
+          ./build-guest.sh --record
+          ./build-aggregator.sh --record
 
       - name: install ZiSK system dependencies
         run: |
@@ -147,7 +147,7 @@ jobs:
           mapfile -t changed_files < <(git diff --name-only)
           for path in "${changed_files[@]}"; do
             case "$path" in
-              guest/GUEST_PROGRAM_VK|guest-aggregator/GUEST_PROGRAM_VK) ;;
+              guest/GUEST_PROGRAM_VK|guest-aggregator/GUEST_PROGRAM_VK|guest/GUEST_ELF_SHA256|guest-aggregator/GUEST_ELF_SHA256) ;;
               *) echo "ERROR: unexpected generated change: $path" >&2; exit 1 ;;
             esac
           done
@@ -207,81 +207,26 @@ jobs:
           echo "ERROR: a derived program VK changed outside rotation_scope=${{ inputs.rotation_scope }}" >&2
           exit 1
 
-      - name: open or update the draft rotation PR
-        if: steps.update.outputs.changed == 'true'
-        # The bot credential makes the PR a normal external event, so its
-        # pull-request checks run. Events created by github.token are suppressed.
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: RELEASE_TOKEN is required to publish the rotation PR" >&2
-            exit 1
-          fi
-          source_commit="$(git rev-parse HEAD)"
-          branch="automation/program-vks-${source_commit:0:12}"
-          inner_vk="$(jq -r .derived_program_vk /tmp/vk-inner/metadata.json)"
-          aggregator_vk="$(jq -r .derived_program_vk /tmp/vk-aggregator/metadata.json)"
-          inner_elf="$(jq -r .elf_sha256 /tmp/vk-inner/metadata.json)"
-          aggregator_elf="$(jq -r .elf_sha256 /tmp/vk-aggregator/metadata.json)"
+      - name: upload regenerated records and ELF binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-120-regenerated-records-${{ github.run_id }}
+          path: |
+            guest/GUEST_ELF_SHA256
+            guest/GUEST_PROGRAM_VK
+            guest-aggregator/GUEST_ELF_SHA256
+            guest-aggregator/GUEST_PROGRAM_VK
+            out/zksync-os-zisk-guest
+            out/zksync-os-zisk-guest-aggregator
+          if-no-files-found: error
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add guest/GUEST_PROGRAM_VK guest-aggregator/GUEST_PROGRAM_VK
-          git commit -m "chore(guest): rotate ZiSK program VK pins"
-
-          if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
-            expected="$(git rev-parse "refs/remotes/origin/$branch")"
-            git push --force-with-lease="refs/heads/$branch:$expected" \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          else
-            git push \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          fi
-
-          body="$RUNNER_TEMP/program-vk-rotation.md"
-          {
-            echo "Derived both ZiSK program VKs from the reproducible guest ELFs on the high-performance runner."
-            echo ""
-            echo "| Program | ELF SHA-256 | Derived program VK |"
-            echo "|---|---|---|"
-            echo "| inner | \`$inner_elf\` | \`$inner_vk\` |"
-            echo "| aggregator | \`$aggregator_elf\` | \`$aggregator_vk\` |"
-            echo ""
-            echo "Provenance: [workflow run]($RUN_URL) using ZiSK \`$ZISK_VERSION\`."
-            echo ""
-            echo "Downstream server and L1 pins require coordinated updates from the reviewed release manifest."
-          } > "$body"
-
-          existing="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
-            -f head="$GITHUB_REPOSITORY_OWNER:$branch" \
-            -f base="$BASE_REF" \
-            -f state=open \
-            --jq '.[0].number // empty')"
-          payload="$RUNNER_TEMP/program-vk-pr.json"
-          if [[ -n "$existing" ]]; then
-            jq -n \
-              --arg title "chore(guest): rotate ZiSK program VK pins" \
-              --rawfile body "$body" \
-              '{title: $title, body: $body}' > "$payload"
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/pulls/$existing" \
-              --input "$payload" >/dev/null
-            pr_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pull/$existing"
-          else
-            jq -n \
-              --arg title "chore(guest): rotate ZiSK program VK pins" \
-              --arg head "$branch" \
-              --arg base "$BASE_REF" \
-              --rawfile body "$body" \
-              '{title: $title, head: $head, base: $base, body: $body, draft: true}' \
-              > "$payload"
-            pr_url="$(gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
-              --input "$payload" --jq .html_url)"
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Draft rotation PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+      - name: upload derivation metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: zisk-120-derivation-metadata-${{ github.run_id }}
+          path: |
+            /tmp/vk-inner/metadata.json
+            /tmp/vk-inner/program.verkey.bin
+            /tmp/vk-aggregator/metadata.json
+            /tmp/vk-aggregator/program.verkey.bin
+          if-no-files-found: error
