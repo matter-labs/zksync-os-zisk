@@ -252,6 +252,7 @@ jobs:
             --values session/fixture-values.json \
             --vadcop session/vadcop-batch-1.bin \
             --repo-root .
+          git add -N prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
           mapfile -t changed < <(git diff --name-only)
           expected=(
             guest-aggregator/BINDING_VECTOR.md
