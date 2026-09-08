@@ -53,12 +53,20 @@ jobs:
           echo "aggregator=$aggregator" >> "$GITHUB_OUTPUT"
           echo "root_c=$root_c" >> "$GITHUB_OUTPUT"
 
-      # Both scripts rebuild in the pinned container and fail unless each ELF
-      # matches its reviewed GUEST_ELF_SHA256 record.
-      - name: Build and reproduce both guest ELFs
+      # Prove the published binaries whose programVKs were independently derived.
+      # The current changes affect host inspection only; enforce identical guest
+      # build inputs before accepting this release's hash-verified artifacts.
+      - name: Fetch and verify the published alpha guest ELFs
         run: |
-          ./build-guest.sh
-          ./build-aggregator.sh
+          set -euo pipefail
+          git fetch origin tag 0.0.6-alpha.1 --no-tags
+          git diff --exit-code 0.0.6-alpha.1 HEAD -- lib guest guest-aggregator docker .dockerignore build-guest.sh build-aggregator.sh
+          curl -fsSL -o guest-elfs.tar.gz https://github.com/matter-labs/zksync-os-zisk/releases/download/0.0.6-alpha.1/zksync-os-zisk-guest-elfs-0.0.6-alpha.1.tar.gz
+          echo '4f2c2d1d5fbd1989e1b2ae775aa88ee1fa6920a4273787eaefe76fb7cd5e1b3c  guest-elfs.tar.gz' | sha256sum -c -
+          mkdir -p out
+          tar -xzf guest-elfs.tar.gz -C out
+          echo "$(cat guest/GUEST_ELF_SHA256)  out/zksync-os-zisk-guest" | sha256sum -c -
+          echo "$(cat guest-aggregator/GUEST_ELF_SHA256)  out/zksync-os-zisk-guest-aggregator" | sha256sum -c -
 
       - uses: dtolnay/rust-toolchain@stable
 
