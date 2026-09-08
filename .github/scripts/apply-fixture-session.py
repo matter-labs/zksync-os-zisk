@@ -159,7 +159,7 @@ digest           = {values['binding_digest']}
 The real aggregated proof of this range commits the same digest: the
 PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
 `digest`, bytes `[0..32]` equal to the aggregator programVK
-`{metadata['aggregator_program_vk']}`, and bytes `[288..320]` equal to
+`{metadata['aggregator_program_vk']}`, and bytes `[544..576]` equal to
 `rootCVadcopFinal`.
 
 The fixture publisher automatically updates this document,
