@@ -167,17 +167,20 @@ jobs:
             sleep 30
           done
 
+      # Same two jobs the daemon runs for a PLONK proof: `remote prove` for
+      # the vadcop_final proof, then `remote wrap` as its own task. A wrap
+      # requested inside the prove job is not reported when it fails; the
+      # worker returns the unwrapped proof instead.
       - name: Prove the fixture batch, vadcop_final and PLONK-wrapped
         working-directory: docker/zisk-stack
         run: |
           set -euo pipefail
-          run() {
+          zisk() {
             docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
-              cargo-zisk remote --coordinator http://coordinator:7000 prove \
-              -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin --timeout 0 "$@"
+              cargo-zisk remote --coordinator http://coordinator:7000 "$@" --timeout 0
           }
-          run -o /session/proof-vadcop.bin
-          run -o /session/proof-plonk.bin --plonk
+          zisk prove -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin -o /session/proof-vadcop.bin
+          zisk wrap -p /session/proof-vadcop.bin -o /session/proof-plonk.bin --plonk
           ls -la "${GITHUB_WORKSPACE}/bundle/session"
 
       - name: Check the proofs with the host tools

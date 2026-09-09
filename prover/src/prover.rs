@@ -307,7 +307,23 @@ impl ZiskProver {
         plonk: bool,
         cancel: &CancellationToken,
     ) -> anyhow::Result<bool> {
-        let args = prove_args(&self.backend, elf, input_path, proof_path, plonk);
+        // Against a coordinator the PLONK wrap is a second job. `remote prove
+        // --plonk` asks the worker to wrap inside the aggregation job, and
+        // when that wrap fails the worker returns the unwrapped vadcop_final
+        // proof as a success, which this daemon then rejects on every retry.
+        // `remote wrap` runs the same wrap as its own task and reports its
+        // failure; it also lets a coordinator keep the vadcop_final proof.
+        let wrap_url = match (&self.backend, plonk) {
+            (ProvingBackend::Coordinator { url }, true) => Some(url.clone()),
+            _ => None,
+        };
+        let vadcop_path = coordinator_vadcop_path(proof_path);
+        let prove_out = if wrap_url.is_some() {
+            vadcop_path.as_path()
+        } else {
+            proof_path
+        };
+        let args = prove_args(&self.backend, elf, input_path, prove_out, plonk);
         let prove_start = Instant::now();
         let mut attempt = run_cancellable(&self.binary, &args, cancel).await;
         if let (Err(e), ProvingBackend::Coordinator { .. }) = (&attempt, &self.backend) {
@@ -328,6 +344,16 @@ impl ZiskProver {
         }
         if !attempt? {
             return Ok(false);
+        }
+        if let Some(url) = wrap_url {
+            anyhow::ensure!(
+                vadcop_path.exists(),
+                "vadcop_final proof file not generated before the PLONK wrap"
+            );
+            let args = wrap_args(&url, &vadcop_path, proof_path);
+            if !run_cancellable(&self.binary, &args, cancel).await? {
+                return Ok(false);
+            }
         }
         ZISK_PROVER_METRICS
             .prove_time
@@ -454,14 +480,15 @@ fn prove_args(
             args
         }
         ProvingBackend::Coordinator { url } => {
-            // Without `--plonk` the remote run returns the vadcop_final
-            // proof; `--plonk` adds the BN254 wrap on the worker. The ELF
-            // path identifies the program: the client hashes it and the
-            // coordinator resolves the setup registered at startup. This path
-            // has no verify flag, and none is wanted: the toolchain verifies a
-            // wrapped proof through the external `snarkjs` executable, which
-            // the images do not carry.
-            let mut args = vec![
+            // The remote prove always returns the vadcop_final proof; the
+            // PLONK wrap is a separate job built by [`wrap_args`], see
+            // `run_prove`. The ELF path identifies the program: the client
+            // hashes it and the coordinator resolves the setup registered at
+            // startup. This path has no verify flag, and none is wanted: the
+            // toolchain verifies a wrapped proof through the external
+            // `snarkjs` executable, which the images do not carry.
+            let _ = plonk;
+            vec![
                 "remote".to_string(),
                 "--coordinator".into(),
                 url.clone(),
@@ -474,13 +501,39 @@ fn prove_args(
                 p(proof_path),
                 "--timeout".into(),
                 "0".into(),
-            ];
-            if plonk {
-                args.push("--plonk".into());
-            }
-            args
+            ]
         }
     }
+}
+
+/// `cargo-zisk remote wrap` arguments: wrap the vadcop_final proof at
+/// `vadcop_path` into the PLONK proof at `proof_path`, on the worker behind
+/// the coordinator at `url`.
+fn wrap_args(url: &str, vadcop_path: &Path, proof_path: &Path) -> Vec<String> {
+    vec![
+        "remote".to_string(),
+        "--coordinator".into(),
+        url.to_string(),
+        "wrap".into(),
+        "-p".into(),
+        p(vadcop_path),
+        "-o".into(),
+        p(proof_path),
+        "--timeout".into(),
+        "0".into(),
+        "--plonk".into(),
+    ]
+}
+
+/// Where the coordinator backend keeps the vadcop_final proof that a PLONK
+/// `proof_path` is wrapped from: next to it, with a `.vadcop.bin` suffix.
+fn coordinator_vadcop_path(proof_path: &Path) -> PathBuf {
+    let mut name = proof_path
+        .file_stem()
+        .map(|s| s.to_os_string())
+        .unwrap_or_default();
+    name.push(".vadcop.bin");
+    proof_path.with_file_name(name)
 }
 
 fn write_zisk_input(path: &Path, bincode: &[u8]) -> anyhow::Result<()> {
@@ -1243,12 +1296,14 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_prove_args_per_batch_wraps_plonk() {
+    fn coordinator_prove_args_never_wrap_inline() {
+        // Even when a PLONK proof is wanted, the remote prove asks for the
+        // vadcop_final proof; the wrap is a second job (`wrap_args`).
         let args = prove_args(
             &coordinator_backend(),
             Path::new("/elf/guest"),
             Path::new("/wd/input.bin"),
-            Path::new("/wd/proof.bin"),
+            Path::new("/wd/proof.vadcop.bin"),
             true,
         );
         assert_eq!(
@@ -1263,10 +1318,9 @@ mod tests {
                 "-i",
                 "/wd/input.bin",
                 "-o",
-                "/wd/proof.bin",
+                "/wd/proof.vadcop.bin",
                 "--timeout",
                 "0",
-                "--plonk",
             ]
         );
         // No key, GPU, verify, or emulator flags reach the client. `-y` in
@@ -1276,7 +1330,34 @@ mod tests {
             || a == "-w"
             || a == "-g"
             || a == "-y"
-            || a == "-a"));
+            || a == "-a"
+            || a == "--plonk"));
+    }
+
+    #[test]
+    fn coordinator_wrap_args_wrap_the_vadcop_proof_into_plonk() {
+        let vadcop = coordinator_vadcop_path(Path::new("/wd/range_1_2/proof.bin"));
+        assert_eq!(vadcop, Path::new("/wd/range_1_2/proof.vadcop.bin"));
+        assert_eq!(
+            wrap_args(
+                "http://coord:7000",
+                &vadcop,
+                Path::new("/wd/range_1_2/proof.bin")
+            ),
+            vec![
+                "remote",
+                "--coordinator",
+                "http://coord:7000",
+                "wrap",
+                "-p",
+                "/wd/range_1_2/proof.vadcop.bin",
+                "-o",
+                "/wd/range_1_2/proof.bin",
+                "--timeout",
+                "0",
+                "--plonk",
+            ]
+        );
     }
 
     /// Aggregated per-batch mode keeps the vadcop_final proof on the remote
@@ -1327,12 +1408,13 @@ mod tests {
             format!(
                 "#!/bin/sh\n\
                  echo \"$4\" >> '{calls}'\n\
+                 sub=\"$4\"\n\
                  case \"$4\" in\n\
                    setup) exit 0 ;;\n\
-                   prove)\n\
-                     if [ ! -e '{failed_once}' ]; then touch '{failed_once}'; exit 1; fi\n\
+                   prove|wrap)\n\
+                     if [ \"$4\" = prove ] && [ ! -e '{failed_once}' ]; then touch '{failed_once}'; exit 1; fi\n\
                      while [ $# -gt 0 ]; do\n\
-                       if [ \"$1\" = -o ]; then echo proof > \"$2\"; exit 0; fi\n\
+                       if [ \"$1\" = -o ]; then echo \"$sub\" > \"$2\"; exit 0; fi\n\
                        shift\n\
                      done\n\
                      exit 1 ;;\n\
@@ -1360,10 +1442,35 @@ mod tests {
             .await
             .unwrap();
         assert!(done);
-        assert_eq!(std::fs::read_to_string(&proof_path).unwrap(), "proof\n");
+        assert_eq!(std::fs::read_to_string(&proof_path).unwrap(), "prove\n");
         assert_eq!(
             std::fs::read_to_string(&calls).unwrap(),
             "prove\nsetup\nprove\n"
+        );
+
+        // A PLONK proof is the vadcop_final prove followed by a wrap job that
+        // writes the requested proof path.
+        let plonk_path = base.join("range").join("proof.bin");
+        std::fs::create_dir_all(plonk_path.parent().unwrap()).unwrap();
+        let done = prover
+            .run_prove(
+                &elf,
+                &base.join("input.bin"),
+                &plonk_path,
+                true,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert!(done);
+        assert_eq!(std::fs::read_to_string(&plonk_path).unwrap(), "wrap\n");
+        assert_eq!(
+            std::fs::read_to_string(coordinator_vadcop_path(&plonk_path)).unwrap(),
+            "prove\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&calls).unwrap(),
+            "prove\nsetup\nprove\nprove\nwrap\n"
         );
         let _ = std::fs::remove_dir_all(&base);
     }

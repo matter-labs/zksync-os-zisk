@@ -8,7 +8,7 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
+- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. A PLONK proof is two jobs here: `remote prove` for the vadcop_final proof, then `remote wrap --plonk` on that file. The wrap is not requested inside the prove job because the worker returns the unwrapped proof when such an inline wrap fails. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
 - **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the PLONK wrap is verified through the external `snarkjs` executable, which must then be on `PATH`.
 
 ### Architecture
