@@ -13,7 +13,7 @@ license = "MIT OR Apache-2.0"
 # only the pure logic against tiny-keccak.
 [target.'cfg(all(target_os = "zkvm", target_vendor = "zisk"))'.dependencies]
 alloy-primitives = { version = "1", default-features = false, features = ["native-keccak"] }
-ziskos = { git = "https://github.com/0xPolygonHermez/zisk.git", tag = "v0.18.0" }
+ziskos = "=1.2.0-alpha"
 
 [target.'cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))'.dependencies]
 tiny-keccak = { version = "2.0", features = ["keccak"] }

@@ -6,16 +6,21 @@
 # ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order.
 #
-# Derived with cargo-zisk 0.18.0 on 2026-08-25 by
-# https://github.com/matter-labs/zksync-os-zisk/actions/runs/32862242677
+# Derived with cargo-zisk 1.2.0-alpha on 2026-09-07 by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/34129543769
 # from the reproducible container ELF with sha256
-# d886c4cdfa10e8c106592f8698504b6fd4df619e0889974a792bf7e6762a2bb8:
-#   cargo-zisk program-setup -e out/zksync-os-zisk-guest-aggregator -k ~/.zisk/provingKey
+# c6c591234675f4d08a1edce83d60d64ffe6d69d96da943eb509c28ac8b0b878c:
+#   cargo-zisk setup -e out/zksync-os-zisk-guest-aggregator -k ~/.zisk/provingKey
 #
-# Root hash limbs: [17765460705594893175, 12644773086732340805,
-#                   13570135610615888618, 5218006920068642616]
-0xf68b9862e424e377af7b4220a419ce45bc52ce70b0a37aea486a15a5ca38b738
+# Unused symbols stripped; load segments unchanged. Stripped ELF sha256:
+# 562816295d64258ce4a57a8efe1e109e5161ff4cd8bf941977ad1e8ab64b412f
+#
+# Root hash limbs: [1220731819791312612, 16813929319053786532,
+#                   5666566744029606960, 17255361277609682888]
+0x10f0e91f54ad66e4e95713a1b4b9fda44ea3b06e51ed3430ef775ba8bef4a7c8
 
+# History: 0xf68b9862e424e377af7b4220a419ce45bc52ce70b0a37aea486a15a5ca38b738
+# (retired 2026-09-07 by https://github.com/matter-labs/zksync-os-zisk/actions/runs/34129543769).
 # History: 0x4c3d7317a62f651d813ba6afbbce59e45eaa7c009ab2a9b51d2f0fb3e7987254
 # (retired 2026-08-25; VK of the rolling fold over per-input-truncated
 # public inputs, ELF sha256

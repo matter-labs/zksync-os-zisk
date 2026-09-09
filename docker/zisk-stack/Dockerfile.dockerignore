@@ -1,0 +1,19 @@
+# Build context for docker/zisk-stack/Dockerfile (repo root). Everything is
+# excluded except the ELF pins, the out/ artifacts the image copies, the
+# stack's own config and scripts, and the two crates prover-export builds.
+*
+!out/zksync-os-zisk-guest
+!out/zksync-os-zisk-guest-aggregator
+!out/zksync-os-zisk-prover-service
+!guest/GUEST_ELF_SHA256
+!guest-aggregator/GUEST_ELF_SHA256
+!docker/zisk-stack/coordinator.toml
+!docker/zisk-stack/coordinator-core.toml
+!docker/zisk-stack/worker.toml
+!docker/zisk-stack/prepare-keys.sh
+!docker/zisk-stack/keys.sha256
+!guest-aggregator
+!prover
+guest-aggregator/target
+guest-aggregator/build
+prover/target

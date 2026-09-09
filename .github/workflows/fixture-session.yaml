@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZISK_VERSION: "0.18.0"
+  ZISK_VERSION: "1.2.0-alpha"
 
 jobs:
   prepare:
@@ -130,7 +130,7 @@ jobs:
 
   prove:
     name: prove, compare native/guest commitments, and aggregate
-    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
+    runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
     permissions:
@@ -141,8 +141,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # The GPU runner is a GKE pod that exposes the driver under /usr/local/nvidia.
       - name: Check Nvidia driver version
-        run: nvidia-smi
+        run: |
+          echo "/usr/local/nvidia/bin:/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/nvidia/bin:$PATH"
+          nvidia-smi
 
       - name: Download the immutable session bundle
         uses: actions/download-artifact@v4
@@ -177,6 +181,13 @@ jobs:
           bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --gpu -y
           echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
           "$HOME/.zisk/bin/ziskup" setup_snark
+
+      # ZiSK 1.2 verifies wrapped SNARKs through the snarkjs executable.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install SNARK verification tool
+        run: npm install --global snarkjs@0.7.6
 
       - name: Prove and validate the complete session
         env:
@@ -257,7 +268,7 @@ jobs:
           expected=(
             guest-aggregator/BINDING_VECTOR.md
             guest-aggregator/src/lib.rs
-            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
             prover/tests/real_aggregation_vector.rs
           )
           if [[ "${changed[*]}" != "${expected[*]}" ]]; then
@@ -299,7 +310,7 @@ jobs:
             guest-aggregator/BINDING_VECTOR.md \
             guest-aggregator/src/lib.rs \
             prover/tests/real_aggregation_vector.rs \
-            prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
           git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
@@ -327,7 +338,7 @@ jobs:
           - \`guest-aggregator/BINDING_VECTOR.md\`
           - \`guest-aggregator/src/lib.rs\`
           - \`prover/tests/real_aggregation_vector.rs\`
-          - \`prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin\`
+          - \`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin\`
 
           The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests.
           EOF

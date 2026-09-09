@@ -1,6 +1,10 @@
 name: Docker build and release
 
-# Builds the zksync-os-zisk-prover image and pushes it to ghcr + GAR, exactly like zksync-airbender-prover's stage-build.
+# Builds the ZiSK stack image (docker/zisk-stack/Dockerfile: coordinator,
+# GPU worker, prover daemon and key preparation in one image) and pushes it
+# to ghcr and GAR, like zksync-airbender-prover's stage-build. Release tags
+# are not built here: release-assets.yaml builds the image from the released
+# binaries, so the daemon inside it is the one the release manifest pins.
 
 on:
   workflow_dispatch:
@@ -12,12 +16,13 @@ on:
   push:
     branches:
       - main
-    tags:
-      - '[0-9]*'
   pull_request:
     paths:
-      - 'docker/zksync-os-zisk-prover/**'
+      - 'docker/zisk-stack/**'
+      - 'prover/**'
+      - 'guest-aggregator/**'
       - '.github/workflows/stage-build.yaml'
+      - '.github/workflows/sbom-analysis-reusable.yaml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -35,8 +40,21 @@ env:
   IMAGE_NAME: zksync-os-zisk-prover
 
 jobs:
+  setup:
+    name: Compute shared image tag
+    runs-on: ubuntu-latest
+    outputs:
+      sha_tag: ${{ steps.sha-tag.outputs.tag }}
+    steps:
+      # One timestamp so the build and the SBOM job agree on a single
+      # `<sha7>-<unix-ms>` tag.
+      - name: Compute SHA tag
+        id: sha-tag
+        run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
+
   build-image:
     name: Build and push zksync-os-zisk-prover
+    needs: [setup]
     runs-on: matterlabs-ci-runner-high-performance
     steps:
       - name: Checkout
@@ -44,33 +62,45 @@ jobs:
         with:
           ref: ${{ inputs.tag_name || '' }}
 
-      # Populates out/ for the Dockerfile; both scripts exit non-zero on a hash mismatch, failing the job before any image is built.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      # The image copies the guest ELFs and the daemon binary from out/. Both
+      # scripts exit non-zero on an ELF hash mismatch, failing the job before
+      # any image is built; the Dockerfile re-verifies the copies.
       - name: Build the guest ELFs in the pinned containers
         run: |
           ./build-guest.sh
           ./build-aggregator.sh
 
+      - name: Build the daemon binary in a container
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f docker/zisk-stack/Dockerfile --target prover-export -o out .
+          ls -la out
+
+      # Pull requests only build. A fork's pull request carries no repository
+      # secrets, so every registry login is skipped there rather than failing.
       - name: Login to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub (airbender pushes only to ghcr + GAR too).
+      # Pull-rate-limit relief only; the org credential has no push rights on Docker Hub.
       - name: Login to Docker Hub
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USER }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Ambient runner identity, no stored key — the self-hosted runners carry GCP credentials.
+      # Ambient runner identity, no stored key; the self-hosted runners carry GCP credentials.
       - name: Login to Google Artifact Registry
+        if: ${{ github.event_name != 'pull_request' }}
         run: gcloud auth configure-docker us-docker.pkg.dev -q
-
-      - name: Compute SHA tag
-        id: sha-tag
-        run: echo "tag=${GITHUB_SHA::7}-$(date +%s%3N)" >> "${GITHUB_OUTPUT}"
 
       - name: Docker metadata
         id: meta
@@ -81,9 +111,8 @@ jobs:
             us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=${{ inputs.tag_name }},enable=${{ inputs.tag_name != '' }}
-            type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=raw,value=${{ steps.sha-tag.outputs.tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.setup.outputs.sha_tag }},enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
             type=ref,event=pr
 
       - name: Define whether to save cache
@@ -91,21 +120,31 @@ jobs:
         id: set-cache-to
         run: echo "cache-to=type=registry,ref=ghcr.io/${{ github.repository_owner }}/${IMAGE_NAME}:buildcache,mode=max" >> "${GITHUB_OUTPUT}"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
-
       - name: Build and push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
-          build-args: |
-            SCCACHE_GCS_BUCKET=matterlabs-infra-sccache-storage
-            SCCACHE_GCS_SERVICE_ACCOUNT=gha-ci-runners@matterlabs-infra.iam.gserviceaccount.com
-            SCCACHE_GCS_RW_MODE=READ_WRITE
-            RUSTC_WRAPPER=sccache
-          file: docker/zksync-os-zisk-prover/Dockerfile
+          file: docker/zisk-stack/Dockerfile
+          target: stack
+          platforms: linux/amd64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           push: ${{ github.event_name != 'pull_request' }}
-          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-prover:buildcache'
+          cache-from: 'type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:buildcache'
           cache-to: ${{ steps.set-cache-to.outputs.cache-to }}
+
+  # Runs only once the Dependency Track endpoint is configured for this
+  # repository (vars.DEPENDENCY_TRACK_SERVER_HOSTNAME, the parent project
+  # UUID variable, and the API key secret); until then it is skipped rather
+  # than failing every push to main.
+  sbom-generation:
+    name: SBOM
+    needs: [setup, build-image]
+    if: github.event_name != 'pull_request' && vars.DEPENDENCY_TRACK_SERVER_HOSTNAME != ''
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/sbom-analysis-reusable.yaml
+    secrets: inherit
+    with:
+      version: ${{ inputs.tag_name || needs.setup.outputs.sha_tag }}

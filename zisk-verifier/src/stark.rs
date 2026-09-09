@@ -11,7 +11,8 @@
 //! and the aggregator guest verifies in-zkVM:
 //!
 //! ```text
-//! [minimal(1)][n_publics=68(1)][program_vk(4)][publics(64)][body][vadcop_vk(4)]
+//! [minimal(1)][n_publics=69(1)][is_vadcop_final_proof(1)][program_vk(4)]
+//! [publics(64)][body][vadcop_vk(4)]
 //! ```
 //!
 //! The prover holds these streams for the aggregated lane before it aggregates
@@ -25,10 +26,11 @@ use crate::VerifyError;
 /// Verify a serialized non-minimal `vadcop_final` STARK proof stream.
 ///
 /// The stream is parsed with the aggregator guest's own parser (shape, the
-/// non-minimal flag, the publics count), then verified cryptographically with
-/// `proofman-verifier` at the pinned v0.18.0 recursive setup. Returns `Ok(())`
-/// only when the STARK proof verifies against the vadcop-final VK the stream
-/// carries.
+/// non-minimal flag, the publics count, the leaf flag), then verified
+/// cryptographically with `proofman-verifier` at the pinned recursive setup.
+/// The hash family is Poseidon1, matching `ziskos::zisklib::verify_zisk_proof`,
+/// which is what the aggregator guest runs in-zkVM. Returns `Ok(())` only when
+/// the STARK proof verifies against the vadcop-final VK the stream carries.
 pub fn verify_vadcop_final_stream(stream: &[u8]) -> Result<(), VerifyError> {
     let words =
         agg::words_from_bytes(stream).map_err(|e| VerifyError::StreamMalformed(e.to_string()))?;
@@ -43,7 +45,8 @@ pub fn verify_vadcop_final_stream(stream: &[u8]) -> Result<(), VerifyError> {
     let proof_with_publics = &all[1..all.len() - agg::VADCOP_VK_WORDS];
     let vk = frame.vadcop_vk();
 
-    if proofman_verifier::verify_vadcop_final_u64(proof_with_publics, vk) {
+    use proofman_verifier::Verifier;
+    if proofman_verifier::Poseidon1Verifier.verify_vadcop_final_u64(proof_with_publics, vk) {
         Ok(())
     } else {
         Err(VerifyError::StarkInvalid)
@@ -75,11 +78,17 @@ mod proof_file {
     //
     // Layout (bincode 2 standard, little-endian, varint lengths):
     //   enum ProofBody discriminant (varint u32): 0 = Vadcop
-    //     Vadcop { proof: Vec<u64>, zisk_vk: Vec<u64>, minimal: bool }
-    //   publics: { data: Vec<u8> }
-    //   program_vk: { vk: Vec<u64> }
+    //     Vadcop { proof: Vec<u64>, zisk_vk: Vec<u64>, kind: VadcopKind,
+    //              hash: String, publics_full: Vec<u64> }
+    //   program_vk: { vk: Vec<u64>, hash_mode: HashMode }
+    //
+    // `VadcopKind` and `HashMode` are fieldless enums, so each is one varint
+    // discriminant. `publics_full` is the flag-free `[program VK | inputs]`
+    // view; the leaf flag lives in `kind`.
 
     const PROGRAM_VK_WORDS: usize = 4;
+    /// `VadcopKind::Final` — a recursion-tree leaf.
+    const VADCOP_KIND_FINAL: u64 = 0;
 
     struct Reader<'a> {
         bytes: &'a [u8],
@@ -159,19 +168,20 @@ mod proof_file {
         }
         let body = r.u64_vec()?;
         let zisk_vk = r.u64_vec()?;
-        let minimal = r.byte()? != 0;
-        if minimal {
+        let kind = r.varint()?;
+        if kind != VADCOP_KIND_FINAL {
             return Err(VerifyError::StreamMalformed(
-                "minimal vadcop_final proofs are not accepted".into(),
+                "only a non-minimal leaf vadcop_final proof is accepted".into(),
             ));
         }
+        // hash: String — length-prefixed UTF-8, read to advance the reader.
+        let hash_len = r.varint()? as usize;
+        let _ = r.take(hash_len)?;
+        let publics_full = r.u64_vec()?;
 
-        // publics: Vec<u8> (256 bytes).
-        let publics_len = r.varint()? as usize;
-        let publics_data = r.take(publics_len)?.to_vec();
-
-        // program_vk: Vec<u64> (4 words).
+        // program_vk: Vec<u64> (4 words), then the HashMode discriminant.
         let program_vk = r.u64_vec()?;
+        let _hash_mode = r.varint()?;
 
         if program_vk.len() != PROGRAM_VK_WORDS || zisk_vk.len() != PROGRAM_VK_WORDS {
             return Err(VerifyError::StreamMalformed(format!(
@@ -180,12 +190,17 @@ mod proof_file {
                 zisk_vk.len()
             )));
         }
-        if publics_data.len() != agg::PUBLICS_WORDS * 4 {
+        if publics_full.len() != PROGRAM_VK_WORDS + agg::PUBLICS_WORDS {
             return Err(VerifyError::StreamMalformed(format!(
-                "publics region {} bytes, expected {}",
-                publics_data.len(),
-                agg::PUBLICS_WORDS * 4
+                "publics_full {} words, expected {}",
+                publics_full.len(),
+                PROGRAM_VK_WORDS + agg::PUBLICS_WORDS
             )));
+        }
+        if publics_full[..PROGRAM_VK_WORDS] != program_vk[..] {
+            return Err(VerifyError::StreamMalformed(
+                "publics_full program VK differs from the proof file's program VK".into(),
+            ));
         }
         if body.len() != agg::VADCOP_FINAL_BODY_WORDS {
             return Err(VerifyError::StreamMalformed(format!(
@@ -198,15 +213,9 @@ mod proof_file {
         // Reassemble the get_proof_bytes() stream.
         let mut words: Vec<u64> = Vec::with_capacity(agg::PROOF_STREAM_WORDS);
         words.push(0); // non-minimal
-        words.push((PROGRAM_VK_WORDS + agg::PUBLICS_WORDS) as u64);
-        words.extend_from_slice(&program_vk);
-        words.extend(
-            publics_data
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|c| u32::from_le_bytes(*c) as u64),
-        );
+        words.push(agg::EXPECTED_N_PUBLICS);
+        words.push(agg::IS_VADCOP_FINAL_PROOF);
+        words.extend_from_slice(&publics_full);
         words.extend_from_slice(&body);
         words.extend_from_slice(&zisk_vk);
 
@@ -231,14 +240,14 @@ mod tests {
         );
     }
 
-    /// The committed real v0.18.0 `vadcop_final` proof file (batch 1 of the
+    /// The committed real `vadcop_final` proof file (batch 1 of the
     /// binding-vector range) must verify natively. This is a full STARK
     /// verification, no external tooling.
     #[test]
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../prover/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+            "/../prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
         );
         let bytes = std::fs::read(path).expect("read committed vadcop_final fixture");
         assert_eq!(verify_vadcop_final_proof_file(&bytes), Ok(()));

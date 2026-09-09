@@ -8,8 +8,8 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Per-proof process** (default, ZiSK v0.18.0). Each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation.
-- **Resident prover service** (`--coordinator-url`). The daemon shells `zisk-prove-client` calls against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries belong to ZiSK v0.18.0: `ziskup` installs the coordinator and the worker, and `zisk-prove-client` builds from the ZiSK source tree (`cargo build --release -p zisk-prove-client`).
+- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
+- **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the PLONK wrap is verified through the external `snarkjs` executable, which must then be on `PATH`.
 
 ### Architecture
 
@@ -33,7 +33,7 @@ Every route sits under `/prover-jobs/v1/`.
 
 ### Proof Pipeline
 
-At startup the daemon runs a one-time setup per guest ELF: `cargo-zisk program-setup` in the default backend, `zisk-prove-client setup` against the coordinator otherwise (the coordinator content-addresses the ELF by its blake3 hash and reuses an existing setup).
+At startup the daemon runs a one-time setup per guest ELF: `cargo-zisk remote setup` against the coordinator (which content-addresses the uploaded ELF and reuses an existing setup), or `cargo-zisk setup` locally in the per-proof mode. Against a coordinator the daemon retries that setup until a worker has registered, since a worker registers only after loading its keys, and it re-runs the setup once whenever a prove fails, because the coordinator keeps setups in memory and forgets them on restart.
 
 The server always aggregates, so run the daemon with `--aggregation` and `--aggregator-elf`. The daemon then drives two proving flows:
 
@@ -46,7 +46,7 @@ On an RTX 5090, per-batch proving runs from ~12 s (small batch) to ~80 s (1000-t
 
 ## Prerequisites
 
-- **ZiSK toolchain v0.18.0** (`ziskup -v 0.18.0`): `cargo-zisk` for the default backend, `zisk-prove-client` (built from the ZiSK source tree) for the coordinator backend; the selected binary's path is passed as `--zisk-binary`.
+- **ZiSK toolchain v1.2.0-alpha** (`ziskup -v 1.2.0-alpha`): `cargo-zisk`, passed as `--zisk-binary`. The coordinator backend uses only its `remote` subcommands, so the CPU build suffices there; the per-proof mode needs the GPU build.
 - **ZiSK guest ELFs**: built from `zksync-os-zisk/guest/` and `zksync-os-zisk/guest-aggregator/` via the reproducible builds (`./build-guest.sh`, `./build-aggregator.sh`); their paths are passed as `--elf-path` and `--aggregator-elf`.
 - **STARK proving key**: `~/.zisk/provingKey/` (via `ziskup`), passed as `--proving-key`.
 - **PLONK proving key**: `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`), passed as `--proving-key-plonk`.
@@ -109,7 +109,7 @@ cargo run --release -- \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--sequencer-url` | required | Sequencer URL. Supports `http://user:pass@host:port`. |
-| `--zisk-binary` | required | Toolchain binary the daemon shells: `cargo-zisk` in the default backend, `zisk-prove-client` under `--coordinator-url`. |
+| `--zisk-binary` | required | The pinned `cargo-zisk` binary. Under `--coordinator-url` only its `remote` subcommands run. |
 | `--elf-path` | required | Path to the ZiSK state-transition guest ELF. |
 | `--proving-key` | required | ZiSK STARK proving key directory. Omit it under `--coordinator-url`; the worker supplies it. |
 | `--proving-key-plonk` | required | ZiSK PLONK proving key directory. Omit it under `--coordinator-url`; the worker supplies it. |
@@ -117,7 +117,7 @@ cargo run --release -- \
 | `--aggregator-elf` | (none) | Path to the ZiSK aggregator guest ELF. Requires `--aggregation`. |
 | `--no-gpu` | off | Prove CPU-only. Conflicts with `--coordinator-url`. |
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. Conflicts with `--coordinator-url`. |
-| `--coordinator-url` | (none) | ZiSK coordinator gRPC URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU; `--zisk-binary` must then point at `zisk-prove-client`. |
+| `--coordinator-url` | (none) | ZiSK coordinator client API URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. |
 | `--work-dir` | `/tmp/zisk_proofs` | Intermediate proof files (cleaned after each proof). |
 | `--poll-interval-secs` | `5` | Seconds between polls when no work available. |
 | `--iterations` | `0` | Exit after N proofs (0 = unlimited). |
@@ -162,8 +162,11 @@ distinguishable in server logs.
 ### Resident prover service
 
 A coordinator and its workers keep the proving keys and the GPU loaded
-across proofs. Start the coordinator first; it serves clients on port 7000
-and workers on the internal cluster port 50051:
+across proofs. The container image in
+[`docker/zisk-stack/`](../docker/zisk-stack/README.md) runs this layout with
+one `docker compose up`; the same three processes on a host look like this.
+Start the coordinator first; it serves clients on port 7000 and workers on
+the internal cluster port 50051:
 
 ```bash
 # 1. Coordinator: client API on 7000, worker cluster port on 50051.
@@ -171,29 +174,29 @@ zisk-coordinator
 
 # 2. Worker: proving keys + GPU, joined to the coordinator's CLUSTER port
 #    through its TOML config ([coordinator] url = "http://127.0.0.1:50051").
-#    --plonk wires the PLONK key (without it the wrap jobs fail);
-#    --emulator selects the standard emulator (the ASM path needs a high
-#    memlock ulimit); --gpu proves on the GPU. The worker registers only
-#    after the full key load (several minutes) — jobs submitted before the
-#    coordinator logs "Registered worker:" fail with "no workers connected".
+#    --plonk wires the PLONK key (without it the wrap jobs fail) and
+#    --preload-plonk keeps it resident; --emulator selects the standard
+#    emulator (the ASM path needs a high memlock ulimit); --gpu proves on the
+#    GPU. The worker registers only after the full key load (several
+#    minutes); the daemon below retries its setup until then.
 CUDA_VISIBLE_DEVICES=0 zisk-worker \
   --config worker.toml \
   --proving-key ~/.zisk/provingKey \
   --proving-key-snark ~/.zisk/provingKeySnark \
-  --emulator --gpu --plonk
+  --emulator --gpu --plonk --preload-plonk
 
-# 3. Daemon: shells zisk-prove-client against the coordinator's API port.
+# 3. Daemon: drives `cargo-zisk remote` against the coordinator's API port.
 zksync-os-zisk-prover-service \
   --sequencer-url http://sequencer:3124 \
   --coordinator-url http://localhost:7000 \
-  --zisk-binary /path/to/zisk-prove-client \
+  --zisk-binary ~/.zisk/bin/cargo-zisk \
   --elf-path /path/to/zksync-os-zisk-guest \
   --aggregation --aggregator-elf /path/to/zksync-os-zisk-guest-aggregator
 ```
 
-`ziskup` installs the coordinator and the worker. Build `zisk-prove-client`
-from the ZiSK v0.18.0 source tree with
-`cargo build --release -p zisk-prove-client`.
+`ziskup` installs all three ZiSK binaries. No proof is verified on this path
+before submission: the server's pre-submit checks and L1 gate the result, and
+that is what keeps `snarkjs` out of the deployment.
 
 Proving throughput then scales on the worker side: join more workers to the
 same coordinator (each with its own TOML config at the cluster port and its

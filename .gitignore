@@ -15,3 +15,7 @@ lib/target/
 lib/Cargo.lock
 guest/build/
 **/target/
+
+# Local deployment state of the ZiSK stack compose file.
+/docker/zisk-stack/.env
+/docker/zisk-stack/compose.ci.yaml

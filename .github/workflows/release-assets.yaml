@@ -16,11 +16,12 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  packages: write
 
 env:
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
   TARGET: x86_64-unknown-linux-gnu
-  ZISK_VERSION: "0.18.0"
+  ZISK_VERSION: "1.2.0-alpha"
 
 defaults:
   run:
@@ -200,6 +201,97 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # The stack image for a release is built here, from the same host-tools
+  # tarball and guest ELFs the release publishes, so the daemon binary inside
+  # it is byte-identical to the one the release manifest pins. The ZiSK
+  # binaries in it come from the pinned toolchain tarball.
+  stack-image:
+    name: Stack image from the released binaries
+    needs: [guest-elfs, host-tools]
+    runs-on: matterlabs-ci-runner-high-performance
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name }}
+
+      - name: Download hash-verified guest ELFs
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: zksync-os-zisk-guest-elfs-${{ env.TAG }}.tar.gz
+          path: guest-artifact
+
+      - name: Download host tools
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: zksync-os-zisk-prover-${{ env.TAG }}-${{ env.TARGET }}.tar.gz
+          path: host-artifact
+
+      # out/ is what docker/zisk-stack/Dockerfile copies. The pins are
+      # re-checked here so a mismatch fails before any image build.
+      - name: Stage the released binaries in out/
+        run: |
+          mkdir -p out
+          tar -xzf "guest-artifact/zksync-os-zisk-guest-elfs-${TAG}.tar.gz" -C out
+          tar -xzf "host-artifact/zksync-os-zisk-prover-${TAG}-${TARGET}.tar.gz" -C out \
+            zksync-os-zisk-prover-service
+          test "$(sha256sum out/zksync-os-zisk-guest | cut -d' ' -f1)" = \
+            "$(tr -d '[:space:]' < guest/GUEST_ELF_SHA256)"
+          test "$(sha256sum out/zksync-os-zisk-guest-aggregator | cut -d' ' -f1)" = \
+            "$(tr -d '[:space:]' < guest-aggregator/GUEST_ELF_SHA256)"
+          sha256sum out/*
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USER }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Login to Google Artifact Registry
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+
+      - name: Login to Quay.io
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c1e51972afc2121e065aed6d45c65596fe445f3f # v5.8.0
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/zksync-os-zisk-prover
+            us-docker.pkg.dev/matterlabs-infra/matterlabs-docker/zksync-os-zisk-prover
+            quay.io/matterlabs_enterprise/zksync-os-zisk-prover
+          tags: |
+            type=raw,value=${{ env.TAG }}
+
+      - name: Build and push
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: docker/zisk-stack/Dockerfile
+          target: stack
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+
   publish:
     name: Checksum and upload to the release
     needs: [guest-elfs, host-tools, verification-keys]
@@ -256,6 +348,10 @@ jobs:
           ~~~
           $(cat dist/SHA256SUMS)
           ~~~
+
+          ### Container images
+
+          \`zksync-os-zisk-prover:${TAG}\` on \`ghcr.io/${GITHUB_REPOSITORY_OWNER}\`, \`us-docker.pkg.dev/matterlabs-infra/matterlabs-docker\` and \`quay.io/matterlabs_enterprise\`: the ZiSK coordinator, GPU worker, prover daemon and key preparation in one image, with the host-tools binary and guest ELFs listed above. \`docker/zisk-stack/README.md\` describes the stack.
           ENDBODY
           printf '%s\n\n' "${BODY}" | cat - binaries.md > updated_body.md
           gh release edit "${TAG}" --notes-file updated_body.md -R "${GITHUB_REPOSITORY}"

@@ -1,0 +1,221 @@
+name: GPU stack smoke test
+
+# Boots the ZiSK stack image (coordinator, worker, daemon) on the GPU runner
+# and proves one deterministic fixture batch through the coordinator, once as
+# a vadcop_final proof and once PLONK-wrapped, then checks both outputs with
+# the repository's host tools: the vadcop stream parses for the aggregator,
+# its commitment equals the native commitment, and the PLONK proof carries
+# the pinned inner programVK.
+#
+# Dispatch only. It runs on matterlabs-ci-gpu-runner, an ephemeral GKE pod
+# (Docker-in-Docker with the NVIDIA driver, one H100, A100 or L4). Every run
+# downloads the 26 GB of proving keys from Polygon's GCS bucket and rebuilds
+# the constant trees, because nothing persists between pods. The run fails
+# fast with a clear message when the runner lacks Docker, GPU containers, or
+# the 70 GB of free disk the keys need.
+
+on:
+  workflow_dispatch:
+    inputs:
+      allow_unpinned_keys:
+        description: "Accept PENDING sha256 pins in docker/zisk-stack/keys.sha256 (md5 check only) and print the digests to record"
+        type: boolean
+        default: false
+
+concurrency:
+  group: gpu-stack-smoke-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: build ELFs, daemon binary, host tools, and a fixture input
+    runs-on: matterlabs-ci-runner-high-performance
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and reproduce both guest ELFs
+        run: |
+          ./build-guest.sh
+          ./build-aggregator.sh
+
+      - name: Build the daemon binary in a container
+        run: |
+          docker buildx build --platform linux/amd64 \
+            -f docker/zisk-stack/Dockerfile --target prover-export -o out .
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build host proof tools
+        working-directory: prover
+        run: cargo build --release --bin aggregator_input --bin inspect_proof
+
+      - name: Build fixture tools
+        working-directory: tools/test-utils
+        run: cargo build --release --bin gen_session_inputs
+
+      - name: Generate the deterministic fixture inputs
+        run: tools/test-utils/target/release/gen_session_inputs session
+
+      - name: Assemble the bundle
+        run: |
+          mkdir -p bundle/out bundle/session bundle/tools
+          cp out/zksync-os-zisk-guest out/zksync-os-zisk-guest-aggregator \
+             out/zksync-os-zisk-prover-service bundle/out/
+          cp session/batch-1.bin session/input-manifest.json bundle/session/
+          cp prover/target/release/aggregator_input prover/target/release/inspect_proof bundle/tools/
+          ls -laR bundle
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zisk-stack-smoke-bundle
+          path: bundle
+          if-no-files-found: error
+          retention-days: 3
+
+  smoke:
+    name: boot the stack and prove one batch through the coordinator
+    runs-on: [matterlabs-ci-gpu-runner]
+    needs: prepare
+    timeout-minutes: 240
+    permissions:
+      contents: read
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the runner can run GPU containers
+        run: |
+          set -euo pipefail
+          echo "/usr/local/nvidia/bin:/usr/local/cuda/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/local/nvidia/bin:$PATH"
+          nvidia-smi
+          df -h "$RUNNER_TEMP" "$GITHUB_WORKSPACE"
+          docker info >/dev/null || { echo "::error::Docker is not available on this runner"; exit 1; }
+          docker compose version
+          docker run --rm --gpus all ubuntu:24.04 nvidia-smi -L \
+            || { echo "::error::the NVIDIA container toolkit is not configured on this runner"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: zisk-stack-smoke-bundle
+          path: bundle
+
+      - name: Build the stack image from the bundle
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp bundle/out/* out/
+          chmod +x out/zksync-os-zisk-prover-service bundle/tools/*
+          docker/zisk-stack/build-images.sh \
+            --prover-bin out/zksync-os-zisk-prover-service --skip-guest-build \
+            --registry local --tag smoke
+
+      # The keys go to a directory on the runner's disk; the compose override
+      # binds the named volume to it so prepare-keys' free-space check and the
+      # worker see the same files. No sequencer exists here, so the daemon
+      # service is never started (the override still needs its variables).
+      - name: Write the compose environment and override
+        env:
+          ALLOW_UNPINNED: ${{ inputs.allow_unpinned_keys && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
+          mkdir -p "$KEYS_HOST_DIR"
+          cat > docker/zisk-stack/.env <<EOT
+          ZISK_SEQUENCER_URL=http://unused.invalid:3124
+          ZISK_STACK_IMAGE=local/zksync-os-zisk-prover:smoke
+          ZISK_KEYS_ALLOW_UNPINNED=${ALLOW_UNPINNED}
+          CUDA_VISIBLE_DEVICES=0
+          EOT
+          cat > docker/zisk-stack/compose.ci.yaml <<EOT
+          services:
+            prover:
+              volumes:
+                - ${GITHUB_WORKSPACE}/bundle/session:/session
+          volumes:
+            zisk-keys:
+              driver: local
+              driver_opts:
+                type: none
+                o: bind
+                device: ${KEYS_HOST_DIR}
+          EOT
+
+      - name: Install the proving keys and start the coordinator and worker
+        working-directory: docker/zisk-stack
+        run: |
+          set -euo pipefail
+          docker compose -f compose.yaml -f compose.ci.yaml up -d worker
+          docker compose -f compose.yaml -f compose.ci.yaml logs prepare-keys
+
+      # `remote setup` succeeds only once a worker has registered, which
+      # happens after the worker finishes loading its keys.
+      - name: Register the guest ELF (waits for the worker)
+        working-directory: docker/zisk-stack
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1800))
+          until docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
+                  cargo-zisk remote --coordinator http://coordinator:7000 setup -e /app/elf/zksync-os-zisk-guest; do
+            (( SECONDS < deadline )) || { echo "::error::no worker registered within 30 minutes"; exit 1; }
+            echo "worker not ready yet; retrying in 30s"
+            sleep 30
+          done
+
+      - name: Prove the fixture batch, vadcop_final and PLONK-wrapped
+        working-directory: docker/zisk-stack
+        run: |
+          set -euo pipefail
+          run() {
+            docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
+              cargo-zisk remote --coordinator http://coordinator:7000 prove \
+              -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin --timeout 0 "$@"
+          }
+          run -o /session/proof-vadcop.bin
+          run -o /session/proof-plonk.bin --plonk
+          ls -la "${GITHUB_WORKSPACE}/bundle/session"
+
+      - name: Check the proofs with the host tools
+        run: |
+          set -euo pipefail
+          session="${GITHUB_WORKSPACE}/bundle/session"
+          tools="${GITHUB_WORKSPACE}/bundle/tools"
+          native="$(jq -er '.batches[0].native_commitment' "$session/input-manifest.json")"
+          inner_vk="$(sed 's/#.*//' guest/GUEST_PROGRAM_VK | tr -d '[:space:]')"
+
+          # The vadcop_final proof must parse into the aggregator's stream and
+          # commit the native commitment.
+          "$tools/aggregator_input" -o "$session/agg-input.bin" "$session/proof-vadcop.bin" \
+            2> "$session/aggregator-input.txt"
+          cat "$session/aggregator-input.txt"
+          proved="$(grep -oE 'commitment 0x[0-9a-f]{64}' "$session/aggregator-input.txt" | head -1 | awk '{print $2}')"
+          test "$proved" = "$native"
+          echo "vadcop commitment matches native: $proved"
+
+          # The PLONK proof must carry the pinned inner programVK.
+          "$tools/inspect_proof" "$session/proof-plonk.bin" | tee "$session/plonk-inspect.txt"
+          test "$(grep -m1 '^program_vk' "$session/plonk-inspect.txt" | sed 's/.*= //')" = "$inner_vk"
+          echo "PLONK programVK matches guest/GUEST_PROGRAM_VK"
+
+      - name: Collect stack logs
+        if: always()
+        working-directory: docker/zisk-stack
+        run: |
+          docker compose -f compose.yaml -f compose.ci.yaml logs --no-color > "${GITHUB_WORKSPACE}/stack.log" 2>&1 || true
+          docker compose -f compose.yaml -f compose.ci.yaml down || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zisk-stack-smoke-results
+          path: |
+            stack.log
+            bundle/session/aggregator-input.txt
+            bundle/session/plonk-inspect.txt
+          if-no-files-found: ignore
+          retention-days: 14

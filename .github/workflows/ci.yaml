@@ -25,6 +25,12 @@ jobs:
       - uses: actions/checkout@v4
       - run: python3 -B -m unittest discover -s .github/scripts/tests -v
       - run: bash -n .github/scripts/derive-vk.sh
+      # The ZiSK stack scripts and compose file ship in the worker image and
+      # drive the GPU deployment; keep them syntactically valid.
+      - run: bash -n docker/zisk-stack/prepare-keys.sh docker/zisk-stack/build-images.sh
+      - run: >
+          docker compose -f docker/zisk-stack/compose.yaml
+          --env-file docker/zisk-stack/.env.example config --quiet
 
   prover:
     name: prover (fmt, clippy, tests, deny)
@@ -40,6 +46,17 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19.9
+      # proofman-verifier 1.2.0-alpha depends, unconditionally on x86_64, on
+      # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
+      # cargo builds. These packages are that build's inputs (nasm for the
+      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP, MPI). rust-cache keeps
+      # the compiled library across runs.
+      - run: >
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
+          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
+          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
+          protobuf-compiler libgrpc++-dev
       - run: cargo fmt --check
         working-directory: prover
       - run: cargo clippy --all-targets -- -D warnings
@@ -132,6 +149,17 @@ jobs:
       # of the reproducible guest builds, so CI holds it to the strict bar. The
       # --all-features run also builds the stark-native path (proofman-verifier)
       # and runs the real-fixture vadcop_final STARK test.
+      # proofman-verifier 1.2.0-alpha depends, unconditionally on x86_64, on
+      # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
+      # cargo builds. These packages are that build's inputs (nasm for the
+      # bn128 assembly, nlohmann-json, gmp, sodium, OpenMP, MPI). rust-cache keeps
+      # the compiled library across runs.
+      - run: >
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
+          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
+          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
+          protobuf-compiler libgrpc++-dev
       - run: cargo fmt --check
         working-directory: zisk-verifier
       - run: cargo clippy --all-targets --all-features -- -D warnings -A unexpected_cfgs

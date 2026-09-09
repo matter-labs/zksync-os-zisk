@@ -108,7 +108,7 @@ def render_record(
             f"# {run_url}",
             "# from the reproducible container ELF with sha256",
             f"# {elf_sha256}:",
-            f"#   cargo-zisk program-setup -e out/{elf_name} "
+            f"#   cargo-zisk setup -e out/{elf_name} "
             "-k ~/.zisk/provingKey",
             "#",
             f"# Root hash limbs: [{limbs[0]}, {limbs[1]},",

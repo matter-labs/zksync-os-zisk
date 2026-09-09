@@ -11,11 +11,12 @@ alloy-primitives = { version = "1", default-features = false, features = ["nativ
 # REVM relies on deallocation to keep its live heap bounded. ZiSK's default
 # bump allocator never frees, so allocation-heavy batches eventually exhaust
 # the guest heap even after their temporary values are dropped.
+# The exact crates.io release is immutable, so the guest ELF stays
+# reproducible; a Git tag can be moved.
 # (Table syntax: the pinned container's cargo 1.87 rejects multi-line
 # inline tables.)
 [dependencies.ziskos]
-git = "https://github.com/0xPolygonHermez/zisk.git"
-tag = "v0.18.0"
+version = "=1.2.0-alpha"
 features = ["zisk-embedded-dlmalloc-alloc"]
 
 [profile.release]

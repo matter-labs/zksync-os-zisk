@@ -1,4 +1,4 @@
-//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v0.18.0)
+//! Binding-vector checks over REAL `cargo-zisk` (ZiSK v1.2.0-alpha)
 //! `vadcop_final` proofs: load the proof files, parse them with the
 //! guest's own frame parser, run the `Aggregator` (the exact code path the
 //! guest executes, host keccak backend), and assert the values pinned in
@@ -7,7 +7,7 @@
 //! Two levels of coverage:
 //! - [`binding_vector_batch1_matches_committed_fixture`] runs
 //!   UNCONDITIONALLY against the committed batch-1 fixture
-//!   (`tests/data/real_vadcop_final_zisk_v0.18.0.bin`), so a normal CI run
+//!   (`tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin`), so a normal CI run
 //!   verifies the pinned `innerProgramVK`, `rootCVadcopFinal`, and
 //!   `commitment_1` rather than passing while checking nothing.
 //! - [`real_proofs_reproduce_binding_vector`] reproduces the full 4-batch
@@ -19,16 +19,16 @@
 use zksync_os_zisk_guest_aggregator as agg;
 use zksync_os_zisk_prover_service::aggregator_input::load_proof_stream;
 
-const INNER_PROGRAM_VK: &str = "8168c5d383a50a9c7a40561b82bf679cc6dfdab0308417b4fea653362d78d080";
+const INNER_PROGRAM_VK: &str = "189d6b11c50ef1db9885fed376479ed97dde719a59574a7946d8d612e25da97a";
 const ROOT_C_VADCOP_FINAL: &str =
-    "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
+    "564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f";
 const COMMITMENTS: [&str; 4] = [
     "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
     "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
     "d5a7b4485d1aece18348655132e73c86b23fa0f251adb173f80123d05a914f15",
     "c5ed165443011bac65df4d0f4240de3429c033996e9fce630a631e117537cd61",
 ];
-const DIGEST: &str = "f29341c341f2622ba86a21bbb36dde9742e1983e531c278fd1cee04c6f823e2c";
+const DIGEST: &str = "77808e06c21c5f1608738e0345b0074f0bc67ef937abfc873b2499eab7953ce4";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -52,7 +52,7 @@ fn vk_hex(words: &[u64]) -> String {
 fn binding_vector_batch1_matches_committed_fixture() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+        "/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
     );
     let stream = load_proof_stream(std::path::Path::new(path))
         .expect("load committed batch-1 vadcop_final fixture");

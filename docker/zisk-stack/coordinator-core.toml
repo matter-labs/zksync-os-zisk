@@ -1,0 +1,25 @@
+# In-process coordinator core tuning, referenced from coordinator.toml.
+# Fields not listed keep the binary defaults.
+
+[service]
+name = "ZisK Distributed Coordinator"
+environment = "production"
+
+[server]
+host = "0.0.0.0"
+port = 50051
+# The prover daemon receives every proof over the API and writes it to its
+# own work directory, so the coordinator keeps none on disk. Without this the
+# coordinator writes each proof under its working directory forever.
+no_save_proofs = true
+
+[logging]
+level = "info"
+format = "json"
+
+[coordinator]
+# Per-phase timeouts. A batch STARK takes tens of seconds on one GPU and the
+# aggregation range plus PLONK wrap a few minutes, so these leave headroom
+# for a cold worker without letting a wedged job block the queue for long.
+phase1_timeout_seconds = 900
+phase2_timeout_seconds = 1800

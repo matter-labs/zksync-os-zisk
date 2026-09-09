@@ -1,0 +1,24 @@
+# zisk-worker configuration for the container image (docker/zisk-stack).
+# Baked at /etc/zisk/worker.toml; mount a file over it to change values.
+#
+# worker_id is left unset so every container gets a fresh UUID; the
+# coordinator identifies workers by it, and a stale id from a previous
+# container would collide. Key paths, --gpu, --plonk and the emulator choice
+# are CLI flags (see compose.yaml) so they stay visible where the container
+# is defined.
+
+[worker]
+compute_capacity.compute_units = 10
+environment = "production"
+
+[coordinator]
+# The coordinator's worker-facing cluster port over the compose network.
+url = "http://coordinator:50051"
+
+[connection]
+reconnect_interval_seconds = 5
+heartbeat_timeout_seconds = 30
+
+[logging]
+level = "info"
+format = "json"

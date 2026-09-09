@@ -91,9 +91,9 @@ pub fn load_proof_stream(path: &Path) -> anyhow::Result<Vec<u8>> {
 }
 
 /// A structurally exact but cryptographically invalid proof stream for
-/// plumbing tests: correct v0.18.0 sizes, non-minimal flag, one shared
-/// synthetic (program VK, vadcop VK) pair, and a commitment derived from
-/// `index`. The guest parses it fully and fails only INSIDE
+/// plumbing tests: correct sizes, non-minimal flag, leaf flag set, one
+/// shared synthetic (program VK, vadcop VK) pair, and a commitment derived
+/// from `index`. The guest parses it fully and fails only INSIDE
 /// `verify_zisk_proof` — the expected outcome until real specimens exist.
 /// Body words stay below the Goldilocks modulus (< 2^31 here) so failure
 /// is a clean transcript/Merkle rejection, not a field-decode panic.
@@ -103,7 +103,8 @@ pub fn synthetic_stream(index: u32) -> Vec<u8> {
 
     let mut words: Vec<u64> = Vec::with_capacity(agg::PROOF_STREAM_WORDS);
     words.push(0); // non-minimal
-    words.push((agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS) as u64);
+    words.push(agg::EXPECTED_N_PUBLICS);
+    words.push(agg::IS_VADCOP_FINAL_PROOF);
     words.extend_from_slice(&program_vk);
     let mut publics = [0u64; agg::PUBLICS_WORDS];
     for (i, p) in publics.iter_mut().take(agg::COMMITMENT_WORDS).enumerate() {
@@ -188,7 +189,7 @@ mod tests {
         let a = synthetic_stream(0);
         let mut b = synthetic_stream(1);
         // Flip a program-VK word in the second stream.
-        let vk_off = agg::HEADER_WORDS * 8;
+        let vk_off = (agg::HEADER_WORDS + agg::LEAF_FLAG_WORDS) * 8;
         b[vk_off] ^= 0xFF;
         let err = assemble(&[a, b]).unwrap_err().to_string();
         assert!(
@@ -209,14 +210,14 @@ mod tests {
         assert_eq!(loaded, stream);
     }
 
-    /// A real cargo-zisk v0.18.0 vadcop_final specimen (batch 1 of the
+    /// A real cargo-zisk vadcop_final specimen (batch 1 of the
     /// binding-vector range) must load unchanged — the regression anchor
     /// for the stream framing accepted by the in-guest verifier.
     #[test]
     fn load_accepts_the_real_vadcop_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/real_vadcop_final_zisk_v0.18.0.bin"
+            "/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
         );
         let loaded = load_proof_stream(Path::new(path)).unwrap();
         assert!(!loaded.is_empty());
@@ -229,7 +230,7 @@ mod tests {
     fn load_rejects_the_real_plonk_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/real_proof_zisk_v0.18.0.bin"
+            "/tests/data/real_proof_zisk_v1.2.0-alpha.bin"
         );
         let err = load_proof_stream(Path::new(path)).unwrap_err();
         let chain = format!("{err:#}");

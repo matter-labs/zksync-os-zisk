@@ -1,0 +1,149 @@
+# The ZiSK proving stack on one GPU machine: a resident coordinator, one GPU
+# worker that holds the proving keys, and the ZKsync OS prover daemon that
+# feeds them batches from the sequencer. All four services run the same image;
+# the command picks the process.
+#
+#   cp .env.example .env      # set ZISK_SEQUENCER_URL, image tag, GPU
+#   docker compose up -d      # first start downloads 26 GB of keys
+#   docker compose logs -f prover
+#
+# Start order: prepare-keys runs to completion (a no-op once the key volume
+# is populated), then the worker joins the coordinator, then the daemon
+# registers the guest ELFs and starts polling. The daemon retries its startup
+# setup until a worker has loaded its keys, which takes several minutes on a
+# cold start.
+#
+# Requirements on the host: the NVIDIA container toolkit, a GPU with 16 GB or
+# more of VRAM, 64 GB or more of RAM for the resident PLONK key, and about
+# 80 GB free for the key volume.
+
+name: zisk-stack
+
+x-image: &image ${ZISK_STACK_IMAGE:-ghcr.io/matter-labs/zksync-os-zisk-prover:${ZISK_STACK_TAG:-latest}}
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+
+services:
+  coordinator:
+    image: *image
+    command: ["zisk-coordinator", "--config", "/etc/zisk/coordinator.toml"]
+    restart: unless-stopped
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    # Client API and metrics on loopback only; the worker and the daemon
+    # reach the coordinator over the compose network.
+    ports:
+      - "127.0.0.1:7000:7000"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      # Uploaded ELFs, re-sent to a reconnecting worker.
+      - coordinator-cache:/var/cache/zisk
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9090/health"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # One-shot: fetch, verify and install the proving keys into the key volume
+  # and generate the constant trees. Exits 0 immediately when the volume
+  # already holds keys for the image's ZiSK version.
+  prepare-keys:
+    image: *image
+    <<: *gpu
+    user: root
+    command: ["zisk-prepare-keys"]
+    restart: "no"
+    environment:
+      ZISK_KEYS_ALLOW_UNPINNED: ${ZISK_KEYS_ALLOW_UNPINNED:-0}
+      ZISK_KEYS_GPU: ${ZISK_KEYS_GPU:-1}
+    volumes:
+      - zisk-keys:/opt/zisk/keys
+
+  worker:
+    image: *image
+    <<: *gpu
+    restart: unless-stopped
+    depends_on:
+      prepare-keys:
+        condition: service_completed_successfully
+      coordinator:
+        condition: service_healthy
+    # --preload-plonk keeps the PLONK key resident: that is the point of the
+    # coordinator mode. --emulator selects the standard emulator; drop it to
+    # use the ASM emulator (faster witness generation, needs the memlock
+    # ulimit below and the build toolchain the image carries).
+    command:
+      - zisk-worker
+      - --config
+      - /etc/zisk/worker.toml
+      - --proving-key
+      - /opt/zisk/keys/provingKey
+      - --proving-key-snark
+      - /opt/zisk/keys/provingKeySnark
+      - --plonk
+      - --preload-plonk
+      - --gpu
+      - --emulator
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+    ulimits:
+      memlock: -1
+    shm_size: ${ZISK_WORKER_SHM_SIZE:-8gb}
+    volumes:
+      - zisk-keys:/opt/zisk/keys
+      # Program setups (ROM setup, ASM emulators) keyed by ELF hash.
+      - worker-cache:/var/cache/zisk
+
+  prover:
+    image: *image
+    restart: unless-stopped
+    depends_on:
+      coordinator:
+        condition: service_healthy
+      worker:
+        condition: service_started
+    command:
+      - zksync-os-zisk-prover-service
+      - --sequencer-url
+      - ${ZISK_SEQUENCER_URL:?set ZISK_SEQUENCER_URL in .env}
+      - --coordinator-url
+      - http://coordinator:7000
+      - --zisk-binary
+      - /opt/zisk/bin/cargo-zisk
+      - --elf-path
+      - /app/elf/zksync-os-zisk-guest
+      - --aggregation
+      - --aggregator-elf
+      - /app/elf/zksync-os-zisk-guest-aggregator
+      - --work-dir
+      - /var/lib/zisk-prover/work
+      - --prover-id
+      - ${ZISK_PROVER_ID:-zisk-stack}
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    ports:
+      - "127.0.0.1:3313:3313"
+    volumes:
+      - prover-work:/var/lib/zisk-prover
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3313/metrics"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+volumes:
+  # 26 GB of tarballs during installation, roughly 40 GB of keys after.
+  zisk-keys:
+  worker-cache:
+  coordinator-cache:
+  prover-work:

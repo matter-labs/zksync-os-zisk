@@ -4,11 +4,11 @@
 //! generates STARK + SNARK proofs with `cargo-zisk`, and submits the results
 //! back to the server for multi-proof composition.
 //!
-//! By default it runs one `cargo-zisk` process per proof, which the pinned
-//! ZiSK v0.18.0 toolchain supports. `--coordinator-url` instead shells
-//! `zisk-prove-client` against a resident `zisk-coordinator` whose worker
-//! keeps the proving keys and the GPU loaded for the service lifetime.
-//! `zisk-prove-client` builds from the ZiSK v0.18.0 source tree.
+//! The deployed mode is `--coordinator-url`: the daemon shells `cargo-zisk
+//! remote` against a resident `zisk-coordinator` whose worker keeps the
+//! proving keys and the GPU loaded for the service lifetime. Without it the
+//! daemon runs one `cargo-zisk` process per proof, which loads the keys on
+//! every invocation.
 //!
 //! Two modes, matching the server's `zisk_aggregation` setting:
 //! - Per-batch (default): each batch is proven with the PLONK wrap and the
@@ -21,7 +21,6 @@
 
 use zksync_os_zisk_prover_service::{prover, sequencer_client};
 
-use anyhow::Context as _;
 use clap::Parser;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -37,9 +36,8 @@ struct Args {
     #[arg(short, long)]
     sequencer_url: String,
 
-    /// Path to the toolchain binary the daemon shells: `cargo-zisk` for the
-    /// spawn backend, `zisk-prove-client` when `--coordinator-url` selects
-    /// the resident coordinator backend.
+    /// Path to the pinned `cargo-zisk` binary. The coordinator backend uses
+    /// its `remote` subcommands; the spawn backend proves with it directly.
     #[arg(long)]
     zisk_binary: PathBuf,
 
@@ -62,11 +60,12 @@ struct Args {
     )]
     proving_key_plonk: Option<PathBuf>,
 
-    /// gRPC URL of a resident `zisk-coordinator`. The daemon registers the
-    /// content-addressed ELF and proves against that service; the proving
-    /// keys and GPU live on its worker, so they load once instead of once
-    /// per proof. `--zisk-binary` must point at `zisk-prove-client`. Without
-    /// this flag the daemon runs one `cargo-zisk` process per proof.
+    /// gRPC URL of a resident `zisk-coordinator` (its client API port, 7000
+    /// by default). The daemon uploads and sets up the ELFs through
+    /// `cargo-zisk remote` and proves against that service; the proving keys
+    /// and GPU live on its worker, so they load once instead of once per
+    /// proof. Without this flag the daemon runs one `cargo-zisk` process per
+    /// proof.
     #[arg(
         long,
         env = "ZISK_COORDINATOR_URL",
@@ -269,8 +268,7 @@ async fn main() -> anyhow::Result<()> {
         args.aggregator_elf.clone(),
         backend,
         args.work_dir,
-    )
-    .context("initialize the prover (the ELF must be readable for its content hash)")?;
+    );
 
     let poll_interval = Duration::from_secs(args.poll_interval_secs);
     let mut proofs_generated: u64 = 0;
@@ -290,13 +288,44 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // One-time ROM setup for the guest ELF(s) (idempotent, cheap when cached).
-    if !prover.ensure_program_setup(&cancel).await? {
-        tracing::info!("cancelled during program-setup, exiting");
-        return Ok(());
-    }
-    if args.aggregation && !prover.ensure_aggregator_program_setup(&cancel).await? {
-        tracing::info!("cancelled during aggregator program-setup, exiting");
-        return Ok(());
+    // Against a coordinator the setup needs a registered worker, and a worker
+    // registers only after it has loaded its keys, which takes minutes on a
+    // cold start. Retry until then instead of exiting into a restart loop. The
+    // spawn backend fails fast: its setup depends on nothing remote.
+    let wait_for_coordinator = args.coordinator_url.is_some();
+    let setup_retry = poll_interval.max(Duration::from_secs(15));
+    loop {
+        let result = async {
+            if !prover.ensure_program_setup(&cancel).await? {
+                return Ok(false);
+            }
+            if args.aggregation && !prover.ensure_aggregator_program_setup(&cancel).await? {
+                return Ok(false);
+            }
+            anyhow::Ok(true)
+        }
+        .await;
+        match result {
+            Ok(true) => break,
+            Ok(false) => {
+                tracing::info!("cancelled during program-setup, exiting");
+                return Ok(());
+            }
+            Err(e) if wait_for_coordinator => {
+                tracing::warn!(
+                    retry_secs = setup_retry.as_secs(),
+                    "program-setup against the coordinator failed (no worker registered yet?), retrying: {e:#}"
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(setup_retry) => {}
+                    _ = cancel.cancelled() => {
+                        tracing::info!("cancelled while waiting for the coordinator, exiting");
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
     }
 
     loop {

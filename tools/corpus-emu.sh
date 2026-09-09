@@ -35,7 +35,7 @@ ZKOS_DUMP_WORKTREE="${ZKOS_DUMP_WORKTREE:-$HOME/multiprover/zksync-os-dump-v030}
 ZKOS_FIXTURES="${ZKOS_FIXTURES:-$HOME/zksync-os/tests/evm_tester/ethereum-fixtures}"
 ZISK_TESTUTILS_DIR="${ZISK_TESTUTILS_DIR:-$HOME/multiprover/zksync-os-zisk/tools/test-utils}"
 ZISK_GUEST_ELF="${ZISK_GUEST_ELF:-$HOME/multiprover/zksync-os-zisk/out/zksync-os-zisk-guest}"
-ZISKEMU="${ZISKEMU:-$HOME/.zisk-0.18.0/bin/ziskemu}"
+ZISKEMU="${ZISKEMU:-$HOME/.zisk-1.2.0-alpha/bin/ziskemu}"
 CORPUS_OUT="${CORPUS_OUT:-$HOME/multiprover/corpus-emu-out}"
 # ziskemu peaks at ~7 GB RSS per process (measured 2026-07-10); size
 # parallelism to MEMORY, not cores — 8-wide OOM-killed this workstation.
