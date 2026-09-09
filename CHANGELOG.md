@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.6](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.5...0.0.6) (2026-09-09)
+
+
+### Features
+
+* move the ZiSK integration to 1.2.0-alpha ([#33](https://github.com/matter-labs/zksync-os-zisk/issues/33)) ([4369c63](https://github.com/matter-labs/zksync-os-zisk/commit/4369c630d265b86fa36618a5e718e24f8d59d63d))
+
 ## [0.0.5](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.4...0.0.5) (2026-09-07)
 
 
