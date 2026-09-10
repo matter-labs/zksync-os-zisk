@@ -90,7 +90,7 @@ re-verifies the ELFs against the recorded `GUEST_ELF_SHA256` pins, so a stale
 
 CI builds the image on pushes to `main` (`stage-build.yaml`) and publishes
 it to GHCR and GAR. On a release, `release-assets.yaml` builds it from the
-released assets and publishes it to GHCR, GAR and quay with the release tag.
+released assets and publishes it to GHCR and GAR with the release tag.
 
 ## Files
 
