@@ -55,7 +55,7 @@ jobs:
   build-image:
     name: Build and push zksync-os-zisk-prover
     needs: [setup]
-    runs-on: matterlabs-ci-runner-high-performance
+    runs-on: matterlabs-ci-runner-standard-16
     steps:
       - name: Checkout
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
