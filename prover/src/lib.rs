@@ -6,3 +6,5 @@ pub mod aggregator_input;
 pub mod metrics;
 pub mod prover;
 pub mod sequencer_client;
+
+mod retry;
