@@ -33,7 +33,9 @@ Every route sits under `/prover-jobs/v1/`.
 
 ### Proof Pipeline
 
-At startup the daemon runs a one-time setup per guest ELF: `cargo-zisk remote setup` against the coordinator (which content-addresses the uploaded ELF and reuses an existing setup), or `cargo-zisk setup` locally in the per-proof mode. Against a coordinator the daemon retries that setup until a worker has registered, since a worker registers only after loading its keys, and it re-runs the setup once whenever a prove fails, because the coordinator keeps setups in memory and forgets them on restart.
+At startup the daemon runs a one-time setup per guest ELF: `cargo-zisk remote setup` against the coordinator (which content-addresses the uploaded ELF and reuses an existing setup), or `cargo-zisk setup` locally in the per-proof mode. Against a coordinator the daemon retries setup failures while workers start. It also re-runs setup before retrying a transient prove failure, because the coordinator keeps setups in memory and forgets them on restart. Cached setup success does not guarantee worker readiness.
+
+After picking a job, the daemon retries temporary coordinator unavailability, connection failures, and program registrations or remote jobs lost after coordinator restart without picking another job. Proof submissions retry transport failures, HTTP 408, 429, and 5xx responses with the same generated proof. Both paths allow eight attempts with delays of 1, 2, 4, 8, 16, 30, and 30 seconds; shutdown interrupts attempts and backoff. Other errors stop immediately. On a permanent error or exhausted retries, the daemon logs the failure and leaves reassignment to the server’s lease expiry. Retries are in-process only; restarting the daemon does not resume the current job.
 
 The server always aggregates, so run the daemon with `--aggregation` and `--aggregator-elf`. The daemon then drives two proving flows:
 

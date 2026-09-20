@@ -16,6 +16,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::metrics::{Method, ZISK_PROVER_METRICS};
@@ -198,7 +199,8 @@ impl SequencerClient {
         batch_number: u64,
         proof: &[u8],
         public_values: &[u8],
-    ) -> anyhow::Result<()> {
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<bool> {
         let payload = ZiskSubmitPayload {
             batch_number,
             proof: BASE64.encode(proof),
@@ -210,16 +212,7 @@ impl SequencerClient {
             self.base_url, self.prover_id
         );
 
-        let started_at = Instant::now();
-        let resp = self.client.post(&url).json(&payload).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::Submit].observe(started_at.elapsed());
-
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("ZiSK submit failed for batch {batch_number}: {body}");
-        }
-
-        Ok(())
+        self.submit(&url, &payload, Method::Submit, cancel).await
     }
 
     /// Pick the next assigned ZiSK aggregation range from the server.
@@ -275,7 +268,8 @@ impl SequencerClient {
         to_batch: u64,
         proof: &[u8],
         public_values: &[u8],
-    ) -> anyhow::Result<()> {
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<bool> {
         let payload = AggregationSubmitPayload {
             from_batch_number: from_batch,
             to_batch_number: to_batch,
@@ -288,24 +282,98 @@ impl SequencerClient {
             self.base_url, self.prover_id
         );
 
-        let started_at = Instant::now();
-        let resp = self.client.post(&url).json(&payload).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::SubmitAggregation].observe(started_at.elapsed());
+        self.submit(&url, &payload, Method::SubmitAggregation, cancel)
+            .await
+    }
 
-        if !resp.status().is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "ZiSK aggregation submit failed for range {from_batch}..{to_batch}: {body}"
-            );
-        }
-
-        Ok(())
+    async fn submit(
+        &self,
+        url: &str,
+        payload: &impl Serialize,
+        method: Method,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<bool> {
+        let result = crate::retry::run(
+            cancel,
+            async || {
+                let started_at = Instant::now();
+                let resp = self.client.post(url).json(payload).send().await?;
+                ZISK_PROVER_METRICS.http_latency[&method].observe(started_at.elapsed());
+                let status = resp.status();
+                if let Err(error) = resp.error_for_status_ref() {
+                    let body = resp.text().await.unwrap_or_default();
+                    return Err(anyhow::Error::new(error)
+                        .context(format!("proof submission rejected: {body}")));
+                }
+                anyhow::ensure!(status.is_success(), "proof submission rejected: {status}");
+                Ok(())
+            },
+            |error| {
+                error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(|error| match error.status() {
+                        Some(status) => {
+                            status.is_server_error()
+                                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        }
+                        None => {
+                            error.is_timeout()
+                                || error.is_connect()
+                                || error.is_request()
+                                || error.is_body()
+                        }
+                    })
+            },
+        )
+        .await?;
+        Ok(result.is_some())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::SequencerClient;
+
+    #[tokio::test]
+    async fn permanent_submit_rejections_are_returned_without_retry() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        for status in [302, 400, 401, 403, 409, 422] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = SequencerClient::new(
+                &format!("http://{}", listener.local_addr().unwrap()),
+                "p",
+                &[],
+            )
+            .unwrap();
+            let server = async {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                }
+                socket.read_exact(&mut vec![0; length]).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {status} Rejected\r\nContent-Length: 8\r\nConnection: close\r\n\r\nrejected").as_bytes()).await.unwrap();
+            };
+            let cancel = tokio_util::sync::CancellationToken::new();
+            let submit = client.submit_zisk_proof(1, b"proof", b"values", &cancel);
+            let (result, ()) = tokio::time::timeout(std::time::Duration::from_millis(500), async {
+                tokio::join!(submit, server)
+            })
+            .await
+            .expect("permanent rejection entered retry backoff");
+            let error = result.unwrap_err();
+            assert!(error.to_string().contains("submission rejected"));
+        }
+    }
 
     #[test]
     fn pick_urls_advertise_complete_zisk_identities() {
