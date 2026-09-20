@@ -309,24 +309,31 @@ impl ZiskProver {
     ) -> anyhow::Result<bool> {
         let args = prove_args(&self.backend, elf, input_path, proof_path, plonk);
         let prove_start = Instant::now();
-        let mut attempt = run_cancellable(&self.binary, &args, cancel).await;
-        if let (Err(e), ProvingBackend::Coordinator { .. }) = (&attempt, &self.backend) {
-            // The coordinator keeps program setups in memory. After it
-            // restarts, every prove fails with a precondition error until the
-            // program is set up again, and this daemon only runs setup at
-            // startup. Setup is idempotent and cheap while the coordinator
-            // still knows it, so re-run it and retry once before reporting
-            // the failure to the run loop.
-            tracing::warn!(
-                elf = %elf.display(),
-                "remote prove failed ({e:#}); re-running the program setup and retrying once"
-            );
-            if !self.program_setup(elf, cancel).await? {
-                return Ok(false);
-            }
-            attempt = run_cancellable(&self.binary, &args, cancel).await;
-        }
-        if !attempt? {
+        let done = if matches!(self.backend, ProvingBackend::Coordinator { .. }) {
+            let mut needs_setup = false;
+            crate::retry::run(
+                cancel,
+                async || {
+                    // A restarted coordinator may have lost the program registration.
+                    if needs_setup && !self.program_setup(elf, cancel).await? {
+                        return Ok(false);
+                    }
+                    let result = run_cancellable(&self.binary, &args, cancel).await;
+                    needs_setup = result.is_err();
+                    result
+                },
+                |error| {
+                    error
+                        .downcast_ref::<RemoteCommandFailure>()
+                        .is_some_and(|e| e.retryable())
+                },
+            )
+            .await?
+            .unwrap_or(false)
+        } else {
+            run_cancellable(&self.binary, &args, cancel).await?
+        };
+        if !done {
             return Ok(false);
         }
         ZISK_PROVER_METRICS
@@ -494,35 +501,97 @@ fn write_zisk_input(path: &Path, bincode: &[u8]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Run a subprocess, cancellable via token. Uses `tokio::process` — no polling.
-///
-/// stdout/stderr are inherited so `cargo-zisk`'s progress and error output
-/// reaches the daemon's console/logs: swallowing the subprocess output makes
-/// field failures undiagnosable. Inheriting (rather than piping to capture)
-/// also avoids blocking cargo-zisk's 200+ threads on pipe-buffer contention
-/// during proof generation.
+#[derive(Debug)]
+struct RemoteCommandFailure {
+    status: std::process::ExitStatus,
+    stderr: String,
+}
+
+impl RemoteCommandFailure {
+    fn retryable(&self) -> bool {
+        // The pinned CLI reports gRPC status text rather than machine-readable failures.
+        self.stderr.contains("The service is currently unavailable")
+            || self.stderr.contains("transport error")
+            || self.stderr.contains("Connection refused")
+            || self.stderr.contains("Program not found:")
+            || self.stderr.contains("Job not found:")
+            || self
+                .stderr
+                .contains("Program exists but setup is not complete:")
+    }
+}
+
+impl std::fmt::Display for RemoteCommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "cargo-zisk remote failed ({}): {}",
+            self.status, self.stderr
+        )
+    }
+}
+
+impl std::error::Error for RemoteCommandFailure {}
+
+async fn remote_stderr(mut reader: tokio::process::ChildStderr) -> std::io::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    const LIMIT: usize = 16 * 1024;
+    let mut tail = Vec::new();
+    let mut chunk = [0; 4096];
+    let mut stderr = tokio::io::stderr();
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        stderr.write_all(&chunk[..n]).await?;
+        tail.extend_from_slice(&chunk[..n]);
+        if tail.len() > LIMIT {
+            tail.drain(..tail.len() - LIMIT);
+        }
+    }
+    Ok(String::from_utf8_lossy(&tail).into_owned())
+}
+
 async fn run_cancellable(
     binary: &Path,
     args: &[String],
     cancel: &CancellationToken,
 ) -> anyhow::Result<bool> {
+    let remote = args.first().is_some_and(|arg| arg == "remote");
     let mut child = tokio::process::Command::new(binary)
         .args(args)
         .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
+        // Direct proving keeps inherited output to avoid pipe contention in GPU threads.
+        .stderr(if remote {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
+        .kill_on_drop(true)
         .spawn()?;
-
+    let stderr = child.stderr.take();
+    let output = async {
+        let stderr = async {
+            match stderr {
+                Some(reader) => remote_stderr(reader).await,
+                None => Ok(String::new()),
+            }
+        };
+        tokio::try_join!(child.wait(), stderr)
+    };
     tokio::select! {
-        status = child.wait() => {
-            let status = status?;
+        result = output => {
+            let (status, stderr) = result?;
             if status.success() {
                 Ok(true)
+            } else if remote {
+                Err(RemoteCommandFailure {status, stderr}.into())
             } else {
                 anyhow::bail!("{} failed with exit code: {:?}", binary.display(), status.code());
             }
         }
         _ = cancel.cancelled() => {
-            tracing::info!("shutdown requested, killing subprocess");
             child.kill().await.ok();
             Ok(false)
         }
@@ -1302,27 +1371,69 @@ mod tests {
         );
     }
 
-    /// A failed remote prove re-runs the setup and retries once, so a
-    /// coordinator that lost its in-memory setups recovers without a daemon
-    /// restart. The fake toolchain fails the first `prove`, then succeeds and
-    /// writes the proof file; the call log must show the setup in between.
+    #[cfg(unix)]
+    #[test]
+    fn remote_error_classification_preserves_permanent_failures() {
+        use std::os::unix::process::ExitStatusExt;
+        for (stderr, retryable) in [
+            (
+                "code: 'The service is currently unavailable', message: \"Cluster unavailable: insufficient ready capacity for the request\"",
+                true,
+            ),
+            ("Program not found: 012345", true),
+            ("Program exists but setup is not complete: 012345", true),
+            ("transport error", true),
+            ("Connection refused (os error 61)", true),
+            ("error: unexpected argument '--coordinator' found", false),
+            ("Invalid proof conversion: VadcopFinal → Plonk", false),
+            ("guest execution failed", false),
+            ("Job not found: 012345", true),
+        ] {
+            let error = RemoteCommandFailure {
+                status: std::process::ExitStatus::from_raw(256),
+                stderr: stderr.to_string(),
+            };
+            assert_eq!(error.retryable(), retryable, "{stderr}");
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
-    async fn coordinator_prove_reruns_setup_and_retries_once() {
+    async fn cancellation_reaps_a_running_subprocess() {
+        let cancel = CancellationToken::new();
+        let shutdown = async {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel.cancel();
+        };
+        let args = ["-c".to_string(), "exec sleep 60".to_string()];
+        let run = run_cancellable(Path::new("/bin/sh"), &args, &cancel);
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(run, shutdown)
+        })
+        .await
+        .expect("subprocess blocked shutdown");
+        assert!(!result.unwrap());
+    }
+
+    // A coordinator restart loses registrations and remote jobs while the daemon keeps running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn coordinator_prove_recovers_after_restart() {
         use std::os::unix::fs::PermissionsExt;
 
-        let base = std::env::temp_dir().join(format!(
-            "zisk_remote_retry_test_{}_{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let calls = base.join("calls.log");
-        let failed_once = base.join("prove-failed-once");
-        let fake = base.join("fake-cargo-zisk");
-        // Argument shape: `remote --coordinator URL <subcommand> ...`.
-        std::fs::write(
+        for failure in ["Program not found: 012345", "Job not found: 012345"] {
+            let base = std::env::temp_dir().join(format!(
+                "zisk_remote_retry_test_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let calls = base.join("calls.log");
+            let failed_once = base.join("prove-failed-once");
+            let fake = base.join("fake-cargo-zisk");
+            // Argument shape: `remote --coordinator URL <subcommand> ...`.
+            std::fs::write(
             &fake,
             format!(
                 "#!/bin/sh\n\
@@ -1330,7 +1441,7 @@ mod tests {
                  case \"$4\" in\n\
                    setup) exit 0 ;;\n\
                    prove)\n\
-                     if [ ! -e '{failed_once}' ]; then touch '{failed_once}'; exit 1; fi\n\
+                     if [ ! -e '{failed_once}' ]; then touch '{failed_once}'; echo '{failure}' >&2; exit 1; fi\n\
                      while [ $# -gt 0 ]; do\n\
                        if [ \"$1\" = -o ]; then echo proof > \"$2\"; exit 0; fi\n\
                        shift\n\
@@ -1343,29 +1454,31 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let elf = base.join("guest.elf");
-        std::fs::write(&elf, b"elf").unwrap();
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let elf = base.join("guest.elf");
+            std::fs::write(&elf, b"elf").unwrap();
 
-        let prover = ZiskProver::new(fake, elf.clone(), None, coordinator_backend(), base.clone());
-        let proof_path = base.join("proof.bin");
-        let done = prover
-            .run_prove(
-                &elf,
-                &base.join("input.bin"),
-                &proof_path,
-                false,
-                &CancellationToken::new(),
-            )
-            .await
-            .unwrap();
-        assert!(done);
-        assert_eq!(std::fs::read_to_string(&proof_path).unwrap(), "proof\n");
-        assert_eq!(
-            std::fs::read_to_string(&calls).unwrap(),
-            "prove\nsetup\nprove\n"
-        );
-        let _ = std::fs::remove_dir_all(&base);
+            let prover =
+                ZiskProver::new(fake, elf.clone(), None, coordinator_backend(), base.clone());
+            let proof_path = base.join("proof.bin");
+            let done = prover
+                .run_prove(
+                    &elf,
+                    &base.join("input.bin"),
+                    &proof_path,
+                    false,
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            assert!(done);
+            assert_eq!(std::fs::read_to_string(&proof_path).unwrap(), "proof\n");
+            assert_eq!(
+                std::fs::read_to_string(&calls).unwrap(),
+                "prove\nsetup\nprove\n"
+            );
+            let _ = std::fs::remove_dir_all(&base);
+        }
     }
 
     /// `finish_run` must keep the work dir on success (submit hasn't run yet)

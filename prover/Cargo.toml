@@ -25,6 +25,7 @@ vise-exporter = "0.3"
 zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator" }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 # Pin cross-check only: asserts VADCOP_FINAL_BODY_WORDS against the real
 # pil2-proofman verifier at the pinned tag (see prover.rs tests).
 proofman-verifier = { version = "=1.2.0-alpha", default-features = false, features = ["verify"] }

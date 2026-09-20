@@ -377,26 +377,31 @@ async fn main() -> anyhow::Result<()> {
                             tracing::warn!(
                                 from = job.from_batch,
                                 to = job.to_batch,
-                                "aggregated proof generation failed, will retry: {e:#}"
+                                "aggregated proof generation failed; leaving job for lease expiry: {e:#}"
                             );
                             continue;
                         }
                     };
-                    if let Err(e) = client
+                    match client
                         .submit_aggregated_proof(
                             job.from_batch,
                             job.to_batch,
                             &result.proof,
                             &result.public_values,
+                            &cancel,
                         )
                         .await
                     {
-                        tracing::warn!(
-                            from = job.from_batch,
-                            to = job.to_batch,
-                            "aggregated proof submit failed, will retry: {e:#}"
-                        );
-                        continue;
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(e) => {
+                            tracing::warn!(
+                                from = job.from_batch,
+                                to = job.to_batch,
+                                "aggregated proof submit failed; leaving job for lease expiry: {e:#}"
+                            );
+                            continue;
+                        }
                     }
                     prover
                         .cleanup_range_work_dir(job.from_batch, job.to_batch)
@@ -481,7 +486,7 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     tracing::warn!(
                         batch = batch.batch_number,
-                        "proof generation failed, will retry: {e:#}"
+                        "proof generation failed; leaving job for lease expiry: {e:#}"
                     );
                     continue;
                 }
@@ -491,15 +496,19 @@ async fn main() -> anyhow::Result<()> {
                 stream_bytes = stream.len(),
                 "vadcop_final proof generated"
             );
-            if let Err(e) = client
-                .submit_zisk_proof(batch.batch_number, &stream, &[])
+            match client
+                .submit_zisk_proof(batch.batch_number, &stream, &[], &cancel)
                 .await
             {
-                tracing::warn!(
-                    batch = batch.batch_number,
-                    "proof submit failed, will retry: {e:#}"
-                );
-                continue;
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::warn!(
+                        batch = batch.batch_number,
+                        "proof submit failed; leaving job for lease expiry: {e:#}"
+                    );
+                    continue;
+                }
             }
             prover.cleanup_batch_work_dir(batch.batch_number).await;
         } else {
@@ -515,7 +524,7 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => {
                     tracing::warn!(
                         batch = batch.batch_number,
-                        "proof generation failed, will retry: {e:#}"
+                        "proof generation failed; leaving job for lease expiry: {e:#}"
                     );
                     continue;
                 }
@@ -526,15 +535,24 @@ async fn main() -> anyhow::Result<()> {
                 pv_bytes = result.public_values.len(),
                 "proof generated"
             );
-            if let Err(e) = client
-                .submit_zisk_proof(batch.batch_number, &result.proof, &result.public_values)
+            match client
+                .submit_zisk_proof(
+                    batch.batch_number,
+                    &result.proof,
+                    &result.public_values,
+                    &cancel,
+                )
                 .await
             {
-                tracing::warn!(
-                    batch = batch.batch_number,
-                    "proof submit failed, will retry: {e:#}"
-                );
-                continue;
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) => {
+                    tracing::warn!(
+                        batch = batch.batch_number,
+                        "proof submit failed; leaving job for lease expiry: {e:#}"
+                    );
+                    continue;
+                }
             }
             prover.cleanup_batch_work_dir(batch.batch_number).await;
         }
