@@ -270,20 +270,18 @@ pub extern "C" fn blake2b_compress_c(
     hooks::blake2b_compress(rounds, h, m, t, f != 0);
 }
 
-/// BLAKE2s compression function F for `lib`'s state-commitment hashes
-/// (`lib/src/crypto/blake2s.rs`: bytecode hashes and the per-block
-/// transaction/receipt trees).
+/// The `blake2sf` permutation for `lib`'s BLAKE2s hashes
+/// (`lib/src/crypto/blake2s.rs`: storage-tree nodes and leaves, bytecode
+/// hashes, the per-block transaction/receipt trees).
 ///
-/// `h` points to the 8-word state (updated in place), `m` to the 16-word
-/// message block, `t` to the 2-word offset counter; `f` is the finalization
-/// flag (0 or 1). Backed by the ZiSK `blake2sf` syscall via
-/// `zisklib::blake2s_compress`.
+/// `v` points to the 16-word working vector as eight u64 slots (permuted in
+/// place), `m` to the message block in the same layout. Backed by the ZiSK
+/// `blake2sf` syscall.
 #[no_mangle]
-pub extern "C" fn blake2s_compress_c(h: *mut u32, m: *const u32, t: *const u32, f: u8) {
-    let h = unsafe { &mut *(h as *mut [u32; 8]) };
-    let m = unsafe { &*(m as *const [u32; 16]) };
-    let t = unsafe { &*(t as *const [u32; 2]) };
-    hooks::blake2s_compress(h, m, t, f != 0);
+pub extern "C" fn blake2sf_c(v: *mut u64, m: *const u64) {
+    let v = unsafe { &mut *(v as *mut [u64; 8]) };
+    let m = unsafe { &*(m as *const [u64; 8]) };
+    hooks::blake2sf(v, m);
 }
 
 /// KZG point evaluation for the `pointEvaluation` precompile (0x0a,

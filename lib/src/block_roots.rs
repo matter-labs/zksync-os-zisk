@@ -16,10 +16,11 @@
 //! On the ZiSK target every hash here runs on the `blake2sf` precompile
 //! through `crate::crypto::blake2s`; the host keeps the `blake2` crate.
 
-use alloy_consensus::{Eip658Value, Receipt, RlpEncodableReceipt};
-use alloy_primitives::{Bloom, Log, B256};
+use crate::crypto::blake2s::node_hash;
 #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
 use crate::crypto::blake2s::Blake2s256;
+use alloy_consensus::{Eip658Value, Receipt, RlpEncodableReceipt};
+use alloy_primitives::{Bloom, Log, B256};
 #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 
@@ -27,10 +28,7 @@ use blake2::{Blake2s256, Digest};
 pub const BLOCK_TX_TREE_DEPTH: usize = 32;
 
 fn blake2s_compress(lhs: &B256, rhs: &B256) -> B256 {
-    let mut h = Blake2s256::new();
-    h.update(lhs.as_slice());
-    h.update(rhs.as_slice());
-    B256::from_slice(&h.finalize())
+    B256::new(node_hash(&lhs.0, &rhs.0))
 }
 /// The empty-subtree hashes of a tree of the given height: entry `i` is the
 /// root of an empty subtree of height `i`, so entry `0` is the zero empty leaf

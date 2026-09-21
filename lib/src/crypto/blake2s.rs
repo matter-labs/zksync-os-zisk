@@ -1,16 +1,22 @@
-//! BLAKE2s-256 built on the compression function F of RFC 7693, section 3.2.
+//! BLAKE2s-256 on the `blake2sf` permutation.
 //!
-//! On the ZiSK target F is one `blake2sf` precompile call
-//! (`ziskos::zisklib::blake2s_compress`, reached through the guest's
-//! `blake2s_compress_c` hook, see `ffi.rs`); everywhere else it is the
-//! software function in [`software`]. The hasher around F is the same on both
-//! sides: the parameter block of an unkeyed 32-byte digest folded into the IV,
-//! 64-byte blocks, the byte counter `t`, the last-block flag on the final
-//! compression, and the `h ^= v_lo ^ v_hi` feed-forward that F performs.
+//! `blake2sf` is the ten-round BLAKE2s permutation of the 16-word working
+//! vector — the compression function F of RFC 7693, section 3.2, without its
+//! initialisation and `h ^= v_lo ^ v_hi` feed-forward. ZiSK exposes exactly
+//! that as a precompile over eight u64 slots, each holding two little-endian
+//! u32 words (word `2i` low, `2i + 1` high). On the ZiSK target it is reached
+//! through the guest's `blake2sf_c` hook (see `ffi.rs`); elsewhere it is
+//! [`software::blake2sf`]. Everything around the permutation — the parameter
+//! block folded into the IV, the counter and last-block flag, the
+//! feed-forward — is done here on the same u64 slots, so nothing is repacked
+//! between the message bytes and the precompile.
 //!
-//! The production callers (`account_props`, `block_roots`) use this type on
-//! the ZiSK target only; off-target they keep the `blake2` crate, which the
-//! tests here compare against.
+//! [`node_hash`] is the one-block `blake2s(left32 ‖ right32)` of every Merkle
+//! node in `merkle` and `block_roots`; it skips the streaming hasher and is
+//! used on every target. [`Blake2s256`] is the streaming hasher for the other
+//! preimages (tree leaves, bytecode); its production callers use it on the
+//! ZiSK target only and keep the `blake2` crate off-target, which the tests
+//! here compare against.
 
 /// The BLAKE2s initialization vector: the first 32 bits of the fractional
 /// parts of the square roots of the first eight primes.
@@ -35,11 +41,135 @@ pub const BLOCK_BYTES: usize = 64;
 /// Digest size in bytes.
 pub const DIGEST_BYTES: usize = 32;
 
+/// Bytes per u64 slot.
+const SLOT_BYTES: usize = 8;
+/// Slots of the working vector and of a message block (16 u32 words).
+pub const BLOCK_SLOTS: usize = BLOCK_BYTES / SLOT_BYTES;
+/// Slots of the chaining state `h` and of a digest (eight u32 words).
+const DIGEST_SLOTS: usize = DIGEST_BYTES / SLOT_BYTES;
+
+/// Two u32 words as one slot: `lo` in the low half, `hi` in the high half.
+const fn slot(lo: u32, hi: u32) -> u64 {
+    lo as u64 | ((hi as u64) << 32)
+}
+
+/// The IV as slots.
+const IV_SLOTS: [u64; DIGEST_SLOTS] = [
+    slot(IV[0], IV[1]),
+    slot(IV[2], IV[3]),
+    slot(IV[4], IV[5]),
+    slot(IV[6], IV[7]),
+];
+
+/// `h` before the first block of an unkeyed 32-byte digest.
+const INITIAL_STATE: [u64; DIGEST_SLOTS] = [
+    IV_SLOTS[0] ^ PARAM_BLOCK_WORD0 as u64,
+    IV_SLOTS[1],
+    IV_SLOTS[2],
+    IV_SLOTS[3],
+];
+
+/// Inverts `v[14]` (the low word of slot 7) on the last block.
+const LAST_BLOCK_MASK: u64 = u32::MAX as u64;
+
+/// `blake2s(lhs ‖ rhs)`: the Merkle node hash, one compression of the two
+/// children as a single full block.
+pub fn node_hash(lhs: &[u8; DIGEST_BYTES], rhs: &[u8; DIGEST_BYTES]) -> [u8; DIGEST_BYTES] {
+    let (l, r) = (slots_of(lhs), slots_of(rhs));
+    let m = [l[0], l[1], l[2], l[3], r[0], r[1], r[2], r[3]];
+    let mut h = INITIAL_STATE;
+    compress(&mut h, &m, BLOCK_BYTES as u64, true);
+    bytes_of(&h)
+}
+
+/// A 32-byte value as little-endian slots.
+///
+/// An 8-aligned value is read as whole words. The ZiSK target has no
+/// unaligned loads, so the byte-wise path stays for the rest; the reads are
+/// volatile only so the compiler does not fold this path into that one
+/// (which the target would lower back to byte loads).
+#[inline]
+fn slots_of(bytes: &[u8; DIGEST_BYTES]) -> [u64; DIGEST_SLOTS] {
+    let p = bytes.as_ptr();
+    #[cfg(target_endian = "little")]
+    if p as usize % SLOT_BYTES == 0 {
+        let p = p.cast::<u64>();
+        // SAFETY: `bytes` is 32 readable bytes, aligned as checked, and every
+        // bit pattern is a valid u64; little-endian makes the slot order the
+        // byte order.
+        return unsafe {
+            [
+                p.read_volatile(),
+                p.add(1).read_volatile(),
+                p.add(2).read_volatile(),
+                p.add(3).read_volatile(),
+            ]
+        };
+    }
+    let mut slots = [0u64; DIGEST_SLOTS];
+    for (i, slot) in slots.iter_mut().enumerate() {
+        *slot = u64::from_le_bytes(
+            bytes[i * SLOT_BYTES..(i + 1) * SLOT_BYTES]
+                .try_into()
+                .unwrap(),
+        );
+    }
+    slots
+}
+
+/// Slots to little-endian bytes, the mirror of [`slots_of`].
+#[inline]
+fn write_bytes(slots: &[u64; DIGEST_SLOTS], out: &mut [u8; DIGEST_BYTES]) {
+    let p = out.as_mut_ptr();
+    #[cfg(target_endian = "little")]
+    if p as usize % SLOT_BYTES == 0 {
+        let p = p.cast::<u64>();
+        // SAFETY: `out` is 32 writable bytes, aligned as checked.
+        unsafe {
+            for (i, slot) in slots.iter().enumerate() {
+                p.add(i).write_volatile(*slot);
+            }
+        }
+        return;
+    }
+    for (i, slot) in slots.iter().enumerate() {
+        out[i * SLOT_BYTES..(i + 1) * SLOT_BYTES].copy_from_slice(&slot.to_le_bytes());
+    }
+}
+
+/// Slots to little-endian bytes.
+#[inline]
+fn bytes_of(slots: &[u64; DIGEST_SLOTS]) -> [u8; DIGEST_BYTES] {
+    let mut out = [0u8; DIGEST_BYTES];
+    write_bytes(slots, &mut out);
+    out
+}
+
+/// A message block, aligned so its slots load as whole words.
+#[derive(Clone, Copy)]
+#[repr(C, align(8))]
+struct Block([u8; BLOCK_BYTES]);
+
+impl Block {
+    #[inline]
+    fn slots(&self) -> [u64; BLOCK_SLOTS] {
+        let mut m = [0u64; BLOCK_SLOTS];
+        for (i, slot) in m.iter_mut().enumerate() {
+            *slot = u64::from_le_bytes(
+                self.0[i * SLOT_BYTES..(i + 1) * SLOT_BYTES]
+                    .try_into()
+                    .unwrap(),
+            );
+        }
+        m
+    }
+}
+
 /// BLAKE2s-256 streaming hasher (unkeyed).
 #[derive(Clone)]
 pub struct Blake2s256 {
-    h: [u32; 8],
-    buf: [u8; BLOCK_BYTES],
+    h: [u64; DIGEST_SLOTS],
+    buf: Block,
     buf_len: usize,
     /// Bytes compressed so far, the counter `t` of the next compression.
     t: u64,
@@ -53,11 +183,9 @@ impl Default for Blake2s256 {
 
 impl Blake2s256 {
     pub fn new() -> Self {
-        let mut h = IV;
-        h[0] ^= PARAM_BLOCK_WORD0;
         Self {
-            h,
-            buf: [0u8; BLOCK_BYTES],
+            h: INITIAL_STATE,
+            buf: Block([0u8; BLOCK_BYTES]),
             buf_len: 0,
             t: 0,
         }
@@ -71,12 +199,12 @@ impl Blake2s256 {
                 // the last block, full or not, is compressed by `finalize`
                 // with the last-block flag.
                 self.t += BLOCK_BYTES as u64;
-                let block = self.buf;
-                compress_block(&mut self.h, &block, self.t, false);
+                let m = self.buf.slots();
+                compress(&mut self.h, &m, self.t, false);
                 self.buf_len = 0;
             }
             let take = (BLOCK_BYTES - self.buf_len).min(data.len());
-            self.buf[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
+            self.buf.0[self.buf_len..self.buf_len + take].copy_from_slice(&data[..take]);
             self.buf_len += take;
             data = &data[take..];
         }
@@ -84,14 +212,10 @@ impl Blake2s256 {
 
     pub fn finalize(mut self) -> [u8; DIGEST_BYTES] {
         self.t += self.buf_len as u64;
-        self.buf[self.buf_len..].fill(0);
-        let block = self.buf;
-        compress_block(&mut self.h, &block, self.t, true);
-        let mut out = [0u8; DIGEST_BYTES];
-        for (chunk, word) in out.chunks_exact_mut(4).zip(self.h) {
-            chunk.copy_from_slice(&word.to_le_bytes());
-        }
-        out
+        self.buf.0[self.buf_len..].fill(0);
+        let m = self.buf.slots();
+        compress(&mut self.h, &m, self.t, true);
+        bytes_of(&self.h)
     }
 
     pub fn digest(data: impl AsRef<[u8]>) -> [u8; DIGEST_BYTES] {
@@ -101,38 +225,47 @@ impl Blake2s256 {
     }
 }
 
-/// One compression of a 64-byte block: the block as 16 little-endian u32
-/// words, `t` as its two 32-bit halves.
-fn compress_block(h: &mut [u32; 8], block: &[u8; BLOCK_BYTES], t: u64, last: bool) {
-    let mut m = [0u32; 16];
-    for (word, chunk) in m.iter_mut().zip(block.chunks_exact(4)) {
-        *word = u32::from_le_bytes(chunk.try_into().unwrap());
+/// The compression function F(h, m, t, f) on slots: initialise the working
+/// vector from `h`, the IV, the counter and the flag, run `blake2sf`, and
+/// fold `v` back into `h`.
+#[inline]
+fn compress(h: &mut [u64; DIGEST_SLOTS], m: &[u64; BLOCK_SLOTS], t: u64, last: bool) {
+    let mut v = [
+        h[0],
+        h[1],
+        h[2],
+        h[3],
+        IV_SLOTS[0],
+        IV_SLOTS[1],
+        IV_SLOTS[2] ^ t,
+        IV_SLOTS[3] ^ if last { LAST_BLOCK_MASK } else { 0 },
+    ];
+    blake2sf(&mut v, m);
+    for i in 0..DIGEST_SLOTS {
+        h[i] ^= v[i] ^ v[i + DIGEST_SLOTS];
     }
-    let t = [t as u32, (t >> 32) as u32];
-    compress_f(h, &m, &t, last);
 }
 
-/// The compression function F: on the ZiSK target the `blake2sf` precompile
-/// through the guest hook, elsewhere the software function.
+/// The `blake2sf` permutation: on the ZiSK target the precompile through
+/// the guest hook, elsewhere the software function.
 #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
 #[inline]
-fn compress_f(h: &mut [u32; 8], m: &[u32; 16], t: &[u32; 2], f: bool) {
-    // SAFETY: the pointers reference exactly the 8-, 16- and 2-word arrays
-    // the hook reads and writes.
-    unsafe { super::ffi::blake2s_compress_c(h.as_mut_ptr(), m.as_ptr(), t.as_ptr(), f as u8) }
+fn blake2sf(v: &mut [u64; BLOCK_SLOTS], m: &[u64; BLOCK_SLOTS]) {
+    // SAFETY: both arrays are exactly the eight 8-aligned slots the hook
+    // reads and writes.
+    unsafe { super::ffi::blake2sf_c(v.as_mut_ptr(), m.as_ptr()) }
 }
 
 #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 #[inline]
-fn compress_f(h: &mut [u32; 8], m: &[u32; 16], t: &[u32; 2], f: bool) {
-    software::compress(h, m, t, f);
+fn blake2sf(v: &mut [u64; BLOCK_SLOTS], m: &[u64; BLOCK_SLOTS]) {
+    software::blake2sf(v, m);
 }
 
-/// Software RFC 7693 compression function F, the reference for what the
-/// `blake2sf` precompile computes.
+/// Software `blake2sf`, the reference for what the precompile computes.
 #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 pub mod software {
-    use super::IV;
+    use super::BLOCK_SLOTS;
 
     /// Message word permutation per round (RFC 7693, section 2.7).
     const SIGMA: [[usize; 16]; 10] = [
@@ -161,31 +294,32 @@ pub mod software {
         v[b] = (v[b] ^ v[c]).rotate_right(7);
     }
 
-    /// F(h, m, t, f): initialise the 16-word working vector from `h`, the IV,
-    /// the counter and the flag, run the ten rounds, and fold `v` back into
-    /// `h`.
-    pub fn compress(h: &mut [u32; 8], m: &[u32; 16], t: &[u32; 2], f: bool) {
-        let mut v = [0u32; 16];
-        v[..8].copy_from_slice(h);
-        v[8..12].copy_from_slice(&IV[..4]);
-        v[12] = t[0] ^ IV[4];
-        v[13] = t[1] ^ IV[5];
-        v[14] = if f { !IV[6] } else { IV[6] };
-        v[15] = IV[7];
-
-        for s in SIGMA {
-            g(&mut v, 0, 4, 8, 12, m[s[0]], m[s[1]]);
-            g(&mut v, 1, 5, 9, 13, m[s[2]], m[s[3]]);
-            g(&mut v, 2, 6, 10, 14, m[s[4]], m[s[5]]);
-            g(&mut v, 3, 7, 11, 15, m[s[6]], m[s[7]]);
-            g(&mut v, 0, 5, 10, 15, m[s[8]], m[s[9]]);
-            g(&mut v, 1, 6, 11, 12, m[s[10]], m[s[11]]);
-            g(&mut v, 2, 7, 8, 13, m[s[12]], m[s[13]]);
-            g(&mut v, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+    fn words(slots: &[u64; BLOCK_SLOTS]) -> [u32; 16] {
+        let mut words = [0u32; 16];
+        for (i, slot) in slots.iter().enumerate() {
+            words[2 * i] = *slot as u32;
+            words[2 * i + 1] = (*slot >> 32) as u32;
         }
+        words
+    }
 
-        for i in 0..8 {
-            h[i] ^= v[i] ^ v[i + 8];
+    /// The ten rounds over the working vector `v` with message block `m`,
+    /// both as the precompile's u64 slots.
+    pub fn blake2sf(v: &mut [u64; BLOCK_SLOTS], m: &[u64; BLOCK_SLOTS]) {
+        let mut w = words(v);
+        let m = words(m);
+        for s in SIGMA {
+            g(&mut w, 0, 4, 8, 12, m[s[0]], m[s[1]]);
+            g(&mut w, 1, 5, 9, 13, m[s[2]], m[s[3]]);
+            g(&mut w, 2, 6, 10, 14, m[s[4]], m[s[5]]);
+            g(&mut w, 3, 7, 11, 15, m[s[6]], m[s[7]]);
+            g(&mut w, 0, 5, 10, 15, m[s[8]], m[s[9]]);
+            g(&mut w, 1, 6, 11, 12, m[s[10]], m[s[11]]);
+            g(&mut w, 2, 7, 8, 13, m[s[12]], m[s[13]]);
+            g(&mut w, 3, 4, 9, 14, m[s[14]], m[s[15]]);
+        }
+        for (i, slot) in v.iter_mut().enumerate() {
+            *slot = super::slot(w[2 * i], w[2 * i + 1]);
         }
     }
 }
@@ -210,20 +344,16 @@ mod tests {
     }
 
     /// RFC 7693, Appendix B: BLAKE2s-256("abc") is one final block with
-    /// t = 3, so the software F alone must produce the published digest.
+    /// t = 3, so F over the software permutation alone must produce the
+    /// published digest.
     #[test]
-    fn software_f_reproduces_the_rfc7693_abc_vector() {
-        let mut h = IV;
-        h[0] ^= PARAM_BLOCK_WORD0;
-        let mut m = [0u32; 16];
-        m[0] = 0x0063_6261; // "abc", little-endian
-        software::compress(&mut h, &m, &[3, 0], true);
-        let mut digest = [0u8; 32];
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(h) {
-            chunk.copy_from_slice(&word.to_le_bytes());
-        }
+    fn f_reproduces_the_rfc7693_abc_vector() {
+        let mut h = INITIAL_STATE;
+        let mut m = [0u64; BLOCK_SLOTS];
+        m[0] = 0x0063_6261; // "abc", little-endian, in the low word of slot 0
+        compress(&mut h, &m, 3, true);
         assert_eq!(
-            alloy_primitives::hex::encode(digest),
+            alloy_primitives::hex::encode(bytes_of(&h)),
             "508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982"
         );
     }
@@ -268,16 +398,51 @@ mod tests {
         assert_eq!(h.finalize(), reference(&[&data]));
     }
 
-    /// The two-hash node shape of `block_roots::blake2s_compress`:
-    /// `blake2s(left32 ‖ right32)` fed as two updates.
+    /// `node_hash` is `blake2s(left32 ‖ right32)`, the streaming hasher fed
+    /// the same two halves, and the `blake2` crate.
     #[test]
-    fn two_hash_node_shape_matches_the_blake2_crate() {
-        let lhs = [0x11u8; 32];
-        let rhs = pattern(32);
-        let mut h = Blake2s256::new();
-        h.update(lhs);
-        h.update(&rhs);
-        assert_eq!(h.finalize(), reference(&[&lhs, &rhs]));
+    fn node_hash_matches_the_streaming_hasher_and_the_blake2_crate() {
+        let cases: [([u8; 32], [u8; 32]); 3] = [
+            ([0x11u8; 32], pattern(32).try_into().unwrap()),
+            ([0u8; 32], [0u8; 32]),
+            ([0xffu8; 32], pattern(32).try_into().unwrap()),
+        ];
+        for (lhs, rhs) in cases {
+            let mut h = Blake2s256::new();
+            h.update(lhs);
+            h.update(rhs);
+            let streamed = h.finalize();
+            assert_eq!(node_hash(&lhs, &rhs), streamed);
+            assert_eq!(streamed, reference(&[&lhs, &rhs]));
+        }
+    }
+
+    /// The children of a node arrive at every alignment (`B256` is
+    /// byte-aligned); the whole-word fast path and the byte-wise path of
+    /// `slots_of` must agree.
+    #[test]
+    fn node_hash_is_independent_of_the_children_alignment() {
+        #[repr(C, align(8))]
+        struct Aligned([u8; 40]);
+        let mut lhs = Aligned([0u8; 40]);
+        let mut rhs = Aligned([0u8; 40]);
+        lhs.0[..].copy_from_slice(&pattern(40));
+        rhs.0[..].copy_from_slice(&pattern(80)[40..]);
+        let aligned = node_hash(
+            lhs.0[..32].try_into().unwrap(),
+            rhs.0[..32].try_into().unwrap(),
+        );
+        assert_eq!(aligned, reference(&[&lhs.0[..32], &rhs.0[..32]]));
+        for offset in 1..8 {
+            let l: &[u8; 32] = lhs.0[offset..offset + 32].try_into().unwrap();
+            let r: &[u8; 32] = rhs.0[offset..offset + 32].try_into().unwrap();
+            assert_ne!(
+                l.as_ptr() as usize % 8,
+                0,
+                "offset {offset} is not unaligned"
+            );
+            assert_eq!(node_hash(l, r), reference(&[l, r]), "offset {offset}");
+        }
     }
 
     /// The `account_props` bytecode-hash shape: code, then padding, then the

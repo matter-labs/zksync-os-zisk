@@ -33,6 +33,7 @@
 //!   not one), 2 and above = validation error (any error halts the
 //!   precompile, exactly like the reference's parse errors).
 
+use ziskos::syscalls::{syscall_blake2sf, SyscallBlake2sfParams};
 use ziskos::zisklib;
 
 /// BN254 base-field modulus p, big-endian:
@@ -198,18 +199,15 @@ pub fn blake2b_compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 
     zisklib::blake2b_compress(rounds, h, m, t, f);
 }
 
-/// RFC 7693 BLAKE2s compression function F, the block function of the
-/// state-commitment hashes in `lib` (`account_props`, `block_roots`; see
-/// `lib/src/crypto/blake2s.rs`).
-///
-/// Backed by the ZiSK `blake2sf` syscall via `zisklib::blake2s_compress`: the
-/// ten rounds run in one precompile call over the 16 u32 working words, packed
-/// as eight u64 (word `2i` in the low half, `2i + 1` in the high half); the
-/// working-vector initialisation and the `h ^= v_lo ^ v_hi` feed-forward
-/// happen in zisklib.
+/// The ten-round BLAKE2s permutation of the working vector `v` with message
+/// block `m`, the `blake2sf` syscall: the compression function F of RFC 7693
+/// without its initialisation and feed-forward, which `lib` does on the same
+/// slots (`lib/src/crypto/blake2s.rs`). Both arrays hold 16 u32 words as
+/// eight u64 (word `2i` in the low half, `2i + 1` in the high half).
 #[inline]
-pub fn blake2s_compress(h: &mut [u32; 8], m: &[u32; 16], t: &[u32; 2], f: bool) {
-    zisklib::blake2s_compress(h, m, t, f);
+pub fn blake2sf(v: &mut [u64; 8], m: &[u64; 8]) {
+    let mut params = SyscallBlake2sfParams { state: v, input: m };
+    syscall_blake2sf(&mut params);
 }
 
 /// EIP-4844 KZG point evaluation for the `pointEvaluation` precompile (0x0a).
@@ -1058,56 +1056,66 @@ mod tests {
 
     // ---------- BLAKE2s ----------
 
-    /// zisklib's `blake2s_compress` (the `blake2sf` precompile on the target,
-    /// its software fallback here) agrees with lib's reference F on the
-    /// RFC 7693 "abc" block, so the hasher in `lib/src/crypto/blake2s.rs`
-    /// computes the same digest on both sides of the hook.
+    /// The `blake2sf` hook (the precompile on the target, ziskos's software
+    /// fallback here) agrees with lib's software permutation on patterned
+    /// working vectors and blocks, so the hasher in
+    /// `lib/src/crypto/blake2s.rs` computes the same digest on both sides
+    /// of the hook.
     #[test]
-    fn blake2s_rfc7693_abc_vector_matches_lib_reference() {
-        use zksync_os_zisk_lib::crypto::blake2s::{software, IV};
-        let mut h = IV;
-        h[0] ^= 0x0101_0020;
-        let mut m = [0u32; 16];
-        m[0] = 0x0063_6261;
-        let mut ours = h;
-        blake2s_compress(&mut ours, &m, &[3, 0], true);
-        let mut reference = h;
-        software::compress(&mut reference, &m, &[3, 0], true);
-        assert_eq!(ours, reference);
-        let mut digest = [0u8; 32];
-        for (chunk, word) in digest.chunks_exact_mut(4).zip(ours) {
-            chunk.copy_from_slice(&word.to_le_bytes());
-        }
-        assert_eq!(
-            digest,
-            hex!("508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")
-        );
-    }
-
-    /// Patterned states, blocks and counters, with and without the last-block
-    /// flag: zisklib's F and lib's reference F stay bit-identical.
-    #[test]
-    fn blake2s_compress_matches_lib_reference_on_patterned_inputs() {
+    fn blake2sf_matches_lib_software_permutation_on_patterned_inputs() {
         use zksync_os_zisk_lib::crypto::blake2s::software;
         let mut x = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = || {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            x as u32
+            x
         };
-        for f in [false, true] {
-            for _ in 0..32 {
-                let h: [u32; 8] = std::array::from_fn(|_| next());
-                let m: [u32; 16] = std::array::from_fn(|_| next());
-                let t = [next(), next()];
-                let mut ours = h;
-                blake2s_compress(&mut ours, &m, &t, f);
-                let mut reference = h;
-                software::compress(&mut reference, &m, &t, f);
-                assert_eq!(ours, reference, "blake2s mismatch (f {f})");
-            }
+        for _ in 0..32 {
+            let v: [u64; 8] = std::array::from_fn(|_| next());
+            let m: [u64; 8] = std::array::from_fn(|_| next());
+            let mut ours = v;
+            blake2sf(&mut ours, &m);
+            let mut reference = v;
+            software::blake2sf(&mut reference, &m);
+            assert_eq!(ours, reference);
         }
+    }
+
+    /// RFC 7693, Appendix B: F over the hook's permutation on the "abc" block
+    /// (t = 3, last block) gives the published BLAKE2s-256("abc"), pinning the
+    /// slot layout at the hook boundary.
+    #[test]
+    fn blake2sf_reproduces_the_rfc7693_abc_vector() {
+        use zksync_os_zisk_lib::crypto::blake2s::IV;
+        let slot = |lo: u32, hi: u32| lo as u64 | ((hi as u64) << 32);
+        let h = [
+            slot(IV[0] ^ 0x0101_0020, IV[1]),
+            slot(IV[2], IV[3]),
+            slot(IV[4], IV[5]),
+            slot(IV[6], IV[7]),
+        ];
+        let mut v = [
+            h[0],
+            h[1],
+            h[2],
+            h[3],
+            slot(IV[0], IV[1]),
+            slot(IV[2], IV[3]),
+            slot(IV[4], IV[5]) ^ 3,
+            slot(IV[6], IV[7]) ^ u32::MAX as u64,
+        ];
+        let mut m = [0u64; 8];
+        m[0] = 0x0063_6261;
+        blake2sf(&mut v, &m);
+        let mut digest = [0u8; 32];
+        for i in 0..4 {
+            digest[i * 8..(i + 1) * 8].copy_from_slice(&(h[i] ^ v[i] ^ v[i + 4]).to_le_bytes());
+        }
+        assert_eq!(
+            digest,
+            hex!("508c5e8c327c14e2e1a72ba34eeb452f37458b209ed63a294d999b4c86675982")
+        );
     }
 
     // ---------- BLAKE2b ----------
