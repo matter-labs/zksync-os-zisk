@@ -42,9 +42,10 @@ const ZISK_SNARK_PROOF_BYTES: usize = 768;
 const ZISK_PUBLIC_VALUES_BYTES: usize = 576;
 /// u64 words in ziskos's guest output region.
 const ZISK_PUBLICS_WORDS: usize = 64;
-/// Hash family the aggregator guest can verify. `verify_zisk_proof` fixes it,
-/// and its underlying `verifier()` panics on any other family, which would
-/// abort inside the zkVM.
+/// Hash family of this lane's proving key. The aggregator guest accepts only
+/// streams tagged with this family (`agg::EXPECTED_HASH_TAG`): its pinned body
+/// size is this family's, and ZiSK's in-guest verifier selects the verifier
+/// from that tag.
 const ZISK_PROOF_HASH_FAMILY: &str = "Poseidon1";
 /// Number of u64 words in the guest-ELF ROM root (program VK) and in the
 /// vadcop-final verification key.
@@ -536,7 +537,9 @@ async fn run_cancellable(
 // zisk-common's `Proof` struct. Rather than depending on zisk-common (which
 // pulls in the whole proofman stack), we mirror the exact struct shapes and
 // deserialize with serde + bincode 2. Shapes must match
-// zisk@v1.2.0-alpha `common/src/proof.rs` field-for-field.
+// zisk@v1.3.0-alpha `common/src/proof.rs` field-for-field (unchanged since
+// v1.2.0-alpha; that release changed only the serialized `get_proof_bytes()`
+// stream, which gained the trailing hash-family tag).
 //
 // The encoding carries no version tag, and the 0.18 and 1.2.0 streams share a
 // prefix, so an older file decodes part-way before it diverges. The daemon
@@ -747,7 +750,7 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
 ///
 /// Stream layout (u64 LE words):
 /// `[minimal=0][n_publics=69][is_vadcop_final_proof=1][program_vk(4)]
-/// [publics(64)][body][vadcop_vk(4)]`.
+/// [publics(64)][body][vadcop_vk(4)][hash_tag=0]`.
 pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     use zksync_os_zisk_guest_aggregator as agg;
 
@@ -779,8 +782,8 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
         "proof file carries a {kind:?} vadcop proof; the aggregator accepts \
          only a non-minimal leaf proof"
     );
-    // The in-guest verifier fixes the hash family, so a proof from another
-    // family would fail verification inside the zkVM with no diagnosis.
+    // The stream's tag below is derived from this family; the aggregator
+    // rejects any other tag, so refuse here with a diagnosis.
     anyhow::ensure!(
         hash == ZISK_PROOF_HASH_FAMILY,
         "proof file uses hash family {hash}, expected {ZISK_PROOF_HASH_FAMILY}"
@@ -824,6 +827,7 @@ pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     words.extend_from_slice(&publics_full);
     words.extend_from_slice(&proof);
     words.extend_from_slice(&zisk_vk);
+    words.push(agg::EXPECTED_HASH_TAG);
     debug_assert_eq!(words.len(), agg::PROOF_STREAM_WORDS);
 
     let mut bytes = Vec::with_capacity(words.len() * 8);
@@ -862,6 +866,10 @@ mod tests {
         }
     }
 
+    /// The specimens are ZiSK v1.2.0-alpha PLONK files. The bincode `Proof`
+    /// shape is unchanged in v1.3.0-alpha (only the serialized vadcop stream
+    /// changed), so they stay valid shape regressions until v1.3.0-alpha
+    /// specimens from a fixture session replace them.
     #[test]
     fn parses_real_alpha_plonk_files_with_recursion_flag() {
         for (file, program_vk) in [
@@ -1004,6 +1012,7 @@ mod tests {
         let frame = agg::ProofFrame::parse(words).unwrap();
         assert_eq!(frame.program_vk(), program_vk.as_slice());
         assert_eq!(frame.vadcop_vk(), zisk_vk.as_slice());
+        assert_eq!(frame.hash_tag(), agg::EXPECTED_HASH_TAG);
         assert_eq!(frame.commitment(), [0x11u8; 32]);
         let body_start =
             agg::HEADER_WORDS + agg::LEAF_FLAG_WORDS + agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS;
@@ -1075,18 +1084,29 @@ mod tests {
         assert!(err.contains("Minimal"), "unexpected error: {err}");
     }
 
-    /// The guest-side body-size constant must match the pinned
-    /// pil2-proofman verifier exactly — this is the only place the pin is
-    /// checked mechanically (see `VADCOP_FINAL_BODY_WORDS` docs). The
-    /// aggregator verifies through `ziskos::zisklib::verify_zisk_proof`, which
-    /// fixes the hash family at Poseidon1, so the size comes from that family.
+    /// The guest-side body-size constant and hash tag must match ZiSK's own
+    /// verifier crate at the pinned version exactly — this is the only place
+    /// the pin is checked mechanically (see `VADCOP_FINAL_BODY_WORDS` docs).
+    /// The aggregator verifies through `ziskos::zisklib::verify_zisk_proof`,
+    /// which selects the verifier from the stream's tag; this lane's proving
+    /// key is Poseidon1.
     #[test]
     fn vadcop_body_words_matches_pinned_verifier() {
-        use proofman_verifier::Verifier;
+        use zksync_os_zisk_guest_aggregator as agg;
         assert_eq!(
-            zksync_os_zisk_guest_aggregator::VADCOP_FINAL_BODY_WORDS * 8,
-            proofman_verifier::Poseidon1Verifier.expected_vadcop_final_proof_bytes(),
+            zisk_verifier::expected_proof_bytes(ZISK_PROOF_HASH_FAMILY, false),
+            Some(agg::VADCOP_FINAL_BODY_WORDS * 8),
         );
+        assert_eq!(
+            zisk_verifier::hash_tag(ZISK_PROOF_HASH_FAMILY),
+            Some(agg::EXPECTED_HASH_TAG)
+        );
+        assert_eq!(
+            zisk_verifier::expected_n_publics(false) as u64,
+            agg::EXPECTED_N_PUBLICS
+        );
+        assert_eq!(zisk_verifier::HASH_TAG_LEN_WORDS, agg::HASH_TAG_WORDS);
+        assert_eq!(zisk_verifier::VADCOP_VK_LEN_WORDS, agg::VADCOP_VK_WORDS);
     }
 
     #[test]

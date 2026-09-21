@@ -1,5 +1,7 @@
 //! Native (pure-Rust) verification of the intermediate `vadcop_final` STARK
-//! proof, via pil2-proofman's `proofman-verifier` (feature `stark-native`).
+//! proof, via ZiSK's `zisk-verifier` crate (feature `stark-native`): the same
+//! generated verifier `ziskos::zisklib::verify_zisk_proof` runs in the
+//! aggregator guest.
 //!
 //! This is the one cryptographic verification the pinned ZiSK toolchain exposes
 //! natively and dependency-light. It verifies the STARK layer, NOT the final
@@ -12,7 +14,7 @@
 //!
 //! ```text
 //! [minimal(1)][n_publics=69(1)][is_vadcop_final_proof(1)][program_vk(4)]
-//! [publics(64)][body][vadcop_vk(4)]
+//! [publics(64)][body][vadcop_vk(4)][hash_tag(1)]
 //! ```
 //!
 //! The prover holds these streams for the aggregated lane before it aggregates
@@ -23,30 +25,34 @@ use zksync_os_zisk_guest_aggregator as agg;
 
 use crate::VerifyError;
 
+/// The hash family of this lane's proving key; the parser pins its wire tag
+/// (`agg::EXPECTED_HASH_TAG`), and the proof-file decoder below checks the
+/// family string the file carries.
+const HASH_FAMILY: &str = "Poseidon1";
+
 /// Verify a serialized non-minimal `vadcop_final` STARK proof stream.
 ///
 /// The stream is parsed with the aggregator guest's own parser (shape, the
-/// non-minimal flag, the publics count, the leaf flag), then verified
-/// cryptographically with `proofman-verifier` at the pinned recursive setup.
-/// The hash family is Poseidon1, matching `ziskos::zisklib::verify_zisk_proof`,
-/// which is what the aggregator guest runs in-zkVM. Returns `Ok(())` only when
-/// the STARK proof verifies against the vadcop-final VK the stream carries.
+/// non-minimal flag, the publics count, the hash tag, the leaf flag), then
+/// verified cryptographically with ZiSK's `zisk-verifier` at the pinned
+/// recursive setup, the way `ziskos::zisklib::verify_zisk_proof` does in the
+/// aggregator guest. Returns `Ok(())` only when the STARK proof verifies
+/// against the vadcop-final VK the stream carries.
 pub fn verify_vadcop_final_stream(stream: &[u8]) -> Result<(), VerifyError> {
     let words =
         agg::words_from_bytes(stream).map_err(|e| VerifyError::StreamMalformed(e.to_string()))?;
     let frame =
         agg::ProofFrame::parse(words).map_err(|e| VerifyError::StreamMalformed(e.to_string()))?;
 
-    // proofman's `verify_vadcop_final_u64` consumes the `proof_with_publics`
-    // slice `[n_publics][program_vk ‖ publics][body]` and the vadcop-final VK
-    // separately. In the stream that is every word except the leading `minimal`
-    // flag and the trailing VK. See `zisk_common::Proof::verify` (Vadcop path).
+    // `verify_vadcop_final_proof` consumes `[minimal][n_publics][publics][body]`
+    // and the vadcop-final VK separately: the stream minus its
+    // `[vadcop_vk(4)][hash_tag(1)]` tail, exactly the split
+    // `ziskos::zisklib::verify_zisk_proof` makes.
     let all = frame.words();
-    let proof_with_publics = &all[1..all.len() - agg::VADCOP_VK_WORDS];
+    let proof = &all[..all.len() - agg::VADCOP_VK_WORDS - agg::HASH_TAG_WORDS];
     let vk = frame.vadcop_vk();
 
-    use proofman_verifier::Verifier;
-    if proofman_verifier::Poseidon1Verifier.verify_vadcop_final_u64(proof_with_publics, vk) {
+    if zisk_verifier_upstream::verify_vadcop_final_proof(proof, vk, HASH_FAMILY) {
         Ok(())
     } else {
         Err(VerifyError::StarkInvalid)
@@ -67,7 +73,7 @@ pub fn verify_vadcop_final_proof_file(bytes: &[u8]) -> Result<(), VerifyError> {
 
 /// Decode a `cargo-zisk` Vadcop-body proof file into a serialized stream.
 mod proof_file {
-    use super::agg;
+    use super::{agg, HASH_FAMILY};
     use crate::VerifyError;
 
     // Do not depend on bincode/serde in the crate's own dependency set; decode
@@ -174,9 +180,14 @@ mod proof_file {
                 "only a non-minimal leaf vadcop_final proof is accepted".into(),
             ));
         }
-        // hash: String — length-prefixed UTF-8, read to advance the reader.
+        // hash: String — length-prefixed UTF-8. The stream's tag is derived
+        // from this lane's family, so a file from another family is refused.
         let hash_len = r.varint()? as usize;
-        let _ = r.take(hash_len)?;
+        if r.take(hash_len)? != HASH_FAMILY.as_bytes() {
+            return Err(VerifyError::StreamMalformed(format!(
+                "proof file hash family is not {HASH_FAMILY}"
+            )));
+        }
         let publics_full = r.u64_vec()?;
 
         // program_vk: Vec<u64> (4 words), then the HashMode discriminant.
@@ -218,6 +229,7 @@ mod proof_file {
         words.extend_from_slice(&publics_full);
         words.extend_from_slice(&body);
         words.extend_from_slice(&zisk_vk);
+        words.push(agg::EXPECTED_HASH_TAG);
 
         let mut out = Vec::with_capacity(words.len() * 8);
         for w in &words {
@@ -240,14 +252,25 @@ mod tests {
         );
     }
 
+    /// The parser's pinned tag is this family's wire tag in ZiSK's verifier
+    /// crate, so the stream the daemon assembles is the one the guest verifies.
+    #[test]
+    fn pinned_hash_tag_is_the_upstream_tag() {
+        assert_eq!(
+            zisk_verifier_upstream::hash_tag(HASH_FAMILY),
+            Some(agg::EXPECTED_HASH_TAG)
+        );
+    }
+
     /// The committed real `vadcop_final` proof file (batch 1 of the
     /// binding-vector range) must verify natively. This is a full STARK
     /// verification, no external tooling.
     #[test]
+    #[ignore = "PENDING: real ZiSK v1.3.0-alpha vadcop_final fixture from fixture-session.yaml"]
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
+            "/../prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
         );
         let bytes = std::fs::read(path).expect("read committed vadcop_final fixture");
         assert_eq!(verify_vadcop_final_proof_file(&bytes), Ok(()));

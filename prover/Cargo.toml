@@ -25,9 +25,10 @@ vise-exporter = "0.3"
 zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator" }
 
 [dev-dependencies]
-# Pin cross-check only: asserts VADCOP_FINAL_BODY_WORDS against the real
-# pil2-proofman verifier at the pinned tag (see prover.rs tests).
-proofman-verifier = { version = "=1.2.0-alpha", default-features = false, features = ["verify"] }
+# Pin cross-check only: asserts VADCOP_FINAL_BODY_WORDS and the hash-family
+# tag against ZiSK's own verifier crate at the pinned version (see prover.rs
+# tests).
+zisk-verifier = { version = "=1.3.0-alpha", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

@@ -205,7 +205,7 @@ jq -n \
             "guest-aggregator/BINDING_VECTOR.md",
             "guest-aggregator/src/lib.rs",
             "prover/tests/real_aggregation_vector.rs",
-            "prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
+            "prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
         ]
     }' > "${SESSION_DIR}/fixture-values.json"
 

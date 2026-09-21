@@ -111,4 +111,4 @@ bytes `[32..96]`, bytes `[0..32]` equal to the aggregator programVK
 
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin` in a separate PR.
+`prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin` in a separate PR.
