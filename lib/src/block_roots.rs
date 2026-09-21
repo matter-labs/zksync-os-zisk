@@ -12,10 +12,15 @@
 //! with an all-zero bloom. The bloom is zero by design: the ZK block header
 //! commits a zero logs bloom, so a real per-receipt bloom would be prover work
 //! with no consumer.
+//!
+//! On the ZiSK target every hash here runs on the `blake2sf` precompile
+//! through `crate::crypto::blake2s`; the host keeps the `blake2` crate.
 
 use alloy_consensus::{Eip658Value, Receipt, RlpEncodableReceipt};
 use alloy_primitives::{Bloom, Log, B256};
-use blake2::digest::FixedOutput;
+#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+use crate::crypto::blake2s::Blake2s256;
+#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 
 /// Height of the per-block transaction and receipt trees.
@@ -25,7 +30,7 @@ fn blake2s_compress(lhs: &B256, rhs: &B256) -> B256 {
     let mut h = Blake2s256::new();
     h.update(lhs.as_slice());
     h.update(rhs.as_slice());
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 /// The empty-subtree hashes of a tree of the given height: entry `i` is the
 /// root of an empty subtree of height `i`, so entry `0` is the zero empty leaf
@@ -116,7 +121,7 @@ pub fn receipt_leaf(tx_type: u8, success: bool, cumulative_gas_used: u64, logs: 
 
     let mut h = Blake2s256::new();
     h.update(&encoded);
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 
 #[cfg(test)]
@@ -249,7 +254,7 @@ mod tests {
     fn blake2s(bytes: &[u8]) -> B256 {
         let mut h = Blake2s256::new();
         h.update(bytes);
-        B256::from_slice(&h.finalize_fixed())
+        B256::from_slice(&h.finalize())
     }
 
     /// The receipt leaf reproduces native's vector, and it commits the zero

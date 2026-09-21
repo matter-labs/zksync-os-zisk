@@ -270,6 +270,22 @@ pub extern "C" fn blake2b_compress_c(
     hooks::blake2b_compress(rounds, h, m, t, f != 0);
 }
 
+/// BLAKE2s compression function F for `lib`'s state-commitment hashes
+/// (`lib/src/crypto/blake2s.rs`: bytecode hashes and the per-block
+/// transaction/receipt trees).
+///
+/// `h` points to the 8-word state (updated in place), `m` to the 16-word
+/// message block, `t` to the 2-word offset counter; `f` is the finalization
+/// flag (0 or 1). Backed by the ZiSK `blake2sf` syscall via
+/// `zisklib::blake2s_compress`.
+#[no_mangle]
+pub extern "C" fn blake2s_compress_c(h: *mut u32, m: *const u32, t: *const u32, f: u8) {
+    let h = unsafe { &mut *(h as *mut [u32; 8]) };
+    let m = unsafe { &*(m as *const [u32; 16]) };
+    let t = unsafe { &*(t as *const [u32; 2]) };
+    hooks::blake2s_compress(h, m, t, f != 0);
+}
+
 /// KZG point evaluation for the `pointEvaluation` precompile (0x0a,
 /// EIP-4844).
 ///
