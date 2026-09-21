@@ -1,21 +1,27 @@
-# rootCVadcopFinal for the ZiSK v1.2.0-alpha proving-key setup.
+# rootCVadcopFinal for the ZiSK v1.3.0-alpha proving-key setup.
 #
 # Unlike a programVK, this commits to ZiSK's pinned vadcop-final circuit and
 # does not rotate when either repository guest ELF changes. Fixture generation
 # reads this record as its single source of truth and proves that both emitted
 # proof forms carry it.
 #
-# Source: ZiSK v1.2.0-alpha `zisk-contracts/ZiskVerifier.sol`,
-# `getRootCVadcopFinal()`, limbs
-# [6218392583875695404, 9353885302538021251,
-#  8280779842059074605, 10684020678174455855].
+# Source: ZiSK v1.3.0-alpha (`pre-develop-1.3.0-alpha`)
+# `zisk-contracts/ZiskVerifier.sol`, `getRootCVadcopFinal()`, limbs
+# [360399122715172445, 11878402726895691845,
+#  13091834582632818813, 5448516663002979456].
+# Serialization: the four u64 limbs, big-endian, in order (the same
+# conversion reproduces the retired v1.2.0-alpha value from its limbs).
 #
 # INVARIANT: this is the plain vadcop-final verification key. ZiSK stamps a
 # recurser key instead when its own recursion layer folds a proof, and this
 # lane never uses that layer: the aggregator is an ordinary guest program, so
 # its proof is a plain one. A wrong pin fails closed — the reconstructed SNARK
 # public signal differs, the pairing rejects, and the batch does not settle.
-0x564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f
+0x05006517b6ccde5da4d890587ba62845b5af8a307c00e87d4b9d05099b16dc80
 
+# History: 0x564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f
+# (retired 2026-09-21 with the move from ZiSK v1.2.0-alpha to v1.3.0-alpha;
+# limbs [6218392583875695404, 9353885302538021251,
+#        8280779842059074605, 10684020678174455855]).
 # History: 0xcf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d
 # (retired 2026-08-28 with the move from ZiSK v0.18.0 to v1.2.0-alpha).

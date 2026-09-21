@@ -22,10 +22,14 @@
 # The tarball is x86_64 only, so the image is linux/amd64. The GPU binaries
 # link only the driver's libcuda.so.1, which the NVIDIA container toolkit
 # mounts at run time, so the base is plain Ubuntu. The proving keys are NOT
-# in the image (26 GB compressed); see README.md next to this file.
+# in the image (27 GB compressed); see README.md next to this file.
 
-ARG ZISK_VERSION=1.2.0-alpha
-ARG ZISK_TARBALL_SHA256=e3605dafb5fcdb2fa8271ea945334694f42704737f31ef0bdf93d663f2b14866
+ARG ZISK_VERSION=1.3.0-alpha
+# PENDING: the v1.3.0-alpha GitHub release (cargo_zisk_linux_amd64.tar.gz) is
+# not published yet. Record its sha256 here on release day. The toolchain
+# stage refuses to build while this reads PENDING, and `sha256sum -c` rejects
+# a tarball whose digest differs, so a stale value cannot ship silently.
+ARG ZISK_TARBALL_SHA256=PENDING
 ARG UBUNTU_TAG=24.04
 
 # ---------------------------------------------------------------------------
@@ -35,7 +39,9 @@ ARG ZISK_VERSION
 ARG ZISK_TARBALL_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL --retry 5 -o /tmp/cargo_zisk.tar.gz \
+RUN test "${ZISK_TARBALL_SHA256}" != "PENDING" \
+    || { echo "ERROR: ZISK_TARBALL_SHA256 is PENDING; record the sha256 of the v${ZISK_VERSION} cargo_zisk_linux_amd64.tar.gz release asset" >&2; exit 1; } \
+    && curl -fsSL --retry 5 -o /tmp/cargo_zisk.tar.gz \
         "https://github.com/0xPolygonHermez/zisk/releases/download/v${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
     && echo "${ZISK_TARBALL_SHA256}  /tmp/cargo_zisk.tar.gz" | sha256sum -c - \
     && mkdir -p /opt/zisk-dist \

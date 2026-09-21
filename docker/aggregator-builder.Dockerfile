@@ -21,11 +21,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         clang libclang-dev llvm-18 \
     && rm -rf /var/lib/apt/lists/*
 
-# The `zisk` toolchain installed below provides rustc but no cargo. Rustup's
-# cargo fallback only applies to toolchains named stable/beta/nightly, so a
-# pinned cargo is copied into the zisk toolchain directly (see below).
+# rustup provides the `cargo`/`rustc` proxies and the `toolchain link` that
+# `cargo-zisk toolchain install` performs. No host toolchain is needed: the
+# zisk-4.x toolchain tarball ships its own cargo next to its rustc, and
+# `cargo-zisk build` runs that one (`cargo +zisk build`).
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
-        --default-toolchain 1.87.0 --profile minimal
+        --default-toolchain none --profile minimal
 ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 
 # cargo-zisk from the pinned release. The `toolchain install` command fetches
@@ -34,17 +35,21 @@ ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 # _init_stack_top, _kernel_heap_bottom and _kernel_heap_top, so the guest
 # needs it to link.
 #
-# By default `toolchain install` picks the highest `zisk-3.x.y` tag, and that
+# By default `toolchain install` picks the highest `zisk-4.x.y` tag, and that
 # reference floats. A newer toolchain release can drop the link script from
 # the target, so the guest fails to link and the recorded ELF stops
 # reproducing. Pin the toolchain to the release that matches cargo-zisk
-# 1.2.0-alpha. Download the exact artifact, verify its sha256, and hand it to
-# `toolchain install` through ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then
-# installs from the local file and makes no network fetch, so the toolchain
-# no longer floats.
-ARG ZISK_VERSION=1.2.0-alpha
-ARG ZISK_TOOLCHAIN_TAG=zisk-3.0.0
-ARG ZISK_TOOLCHAIN_SHA256=74190d265b2d8f10424cdf666b71a5b5670c3a685785cd668ee5f49318fa149e
+# 1.3.0-alpha (zisk-4.0.0: rustc 1.94.0-dev, LLVM 21.1.8). Download the exact
+# artifact, verify its sha256, and hand it to `toolchain install` through
+# ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then installs from the local file and
+# makes no network fetch, so the toolchain no longer floats.
+#
+# The cargo-zisk tarball below is the v${ZISK_VERSION} GitHub release asset;
+# `cargo-zisk build` only orchestrates `cargo +zisk build`, so the CPU build
+# of the tarball is all this image needs from it.
+ARG ZISK_VERSION=1.3.0-alpha
+ARG ZISK_TOOLCHAIN_TAG=zisk-4.0.0
+ARG ZISK_TOOLCHAIN_SHA256=c4c44b5612dd025f630c2f984ae5f8a862b885c4b14bfc57c980eb8073b8cf62
 RUN curl -fsSL -o /tmp/cargo_zisk.tar.gz \
         https://github.com/0xPolygonHermez/zisk/releases/download/v${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz \
     && mkdir -p /root/.zisk \
@@ -58,8 +63,7 @@ RUN curl -fsSL -o /tmp/cargo_zisk.tar.gz \
     && echo "${ZISK_TOOLCHAIN_SHA256}  /tmp/zisk-toolchain/rust-toolchain-x86_64-unknown-linux-gnu.tar.gz" | sha256sum -c - \
     && ZISK_TOOLCHAIN_SOURCE_DIR=/tmp/zisk-toolchain cargo-zisk toolchain install \
     && rm -rf /tmp/zisk-toolchain \
-    && cp /root/.rustup/toolchains/1.87.0-x86_64-unknown-linux-gnu/bin/cargo \
-          /root/.rustup/toolchains/zisk/bin/cargo
+    && cargo +zisk --version && rustc +zisk --version
 
 WORKDIR /build
 COPY guest-aggregator /build/guest-aggregator

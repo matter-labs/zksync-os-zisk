@@ -107,7 +107,7 @@ main() {
     local free_gb
     free_gb="$(df -Pk "$KEYS_DIR" | awk 'NR==2 { printf "%d", $4 / 1024 / 1024 }')"
     if (( free_gb < MIN_FREE_GB )); then
-        die "${KEYS_DIR} has ${free_gb} GB free; the keys need about ${MIN_FREE_GB} GB during installation (26 GB of tarballs plus the unpacked keys). Set ZISK_KEYS_MIN_FREE_GB to override."
+        die "${KEYS_DIR} has ${free_gb} GB free; the keys need about ${MIN_FREE_GB} GB during installation (27 GB of tarballs plus the unpacked keys). Set ZISK_KEYS_MIN_FREE_GB to override."
     fi
 
     log "installing ZiSK ${ZISK_VERSION} proving keys into ${KEYS_DIR} (${free_gb} GB free)"

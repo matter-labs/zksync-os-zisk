@@ -9,7 +9,7 @@ name: GPU stack smoke test
 #
 # Dispatch only. It runs on matterlabs-ci-gpu-runner, an ephemeral GKE pod
 # (Docker-in-Docker with the NVIDIA driver, one H100, A100 or L4). Every run
-# downloads the 26 GB of proving keys from Polygon's GCS bucket and rebuilds
+# downloads the 27 GB of proving keys from Polygon's GCS bucket and rebuilds
 # the constant trees, because nothing persists between pods. The run fails
 # fast with a clear message when the runner lacks Docker, GPU containers, or
 # the 70 GB of free disk the keys need.
