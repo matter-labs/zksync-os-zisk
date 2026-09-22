@@ -120,9 +120,12 @@ jobs:
             --registry local --tag smoke
 
       # The keys go to a directory on the runner's disk; the compose override
-      # binds the named volume to it so prepare-keys' free-space check and the
-      # worker see the same files. No sequencer exists here, so the daemon
-      # service is never started (the override still needs its variables).
+      # binds the named volume to it so the key installation's free-space
+      # check and the worker see the same files. The worker runs as the
+      # image's zisk user (uid 998) and installs the keys itself, so the
+      # directory must be writable by it. No sequencer exists here, so the
+      # daemon service is never started (the override still needs its
+      # variables).
       - name: Write the compose environment and override
         env:
           ALLOW_UNPINNED: ${{ inputs.allow_unpinned_keys && '1' || '0' }}
@@ -130,6 +133,7 @@ jobs:
           set -euo pipefail
           KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
           mkdir -p "$KEYS_HOST_DIR"
+          chmod a+rwX "$KEYS_HOST_DIR"
           # The prover container runs as the image's zisk user (uid 998) and
           # writes the proofs into this bind mount, which the runner user owns.
           chmod -R a+rwX "${GITHUB_WORKSPACE}/bundle/session"
@@ -158,7 +162,7 @@ jobs:
         run: |
           set -euo pipefail
           docker compose -f compose.yaml -f compose.ci.yaml up -d worker
-          docker compose -f compose.yaml -f compose.ci.yaml logs prepare-keys
+          docker compose -f compose.yaml -f compose.ci.yaml logs worker
 
       # `remote setup` succeeds only once a worker has registered, which
       # happens after the worker finishes loading its keys.

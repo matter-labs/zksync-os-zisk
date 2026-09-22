@@ -1,17 +1,17 @@
 # The ZiSK proving stack on one GPU machine: a resident coordinator, one GPU
 # worker that holds the proving keys, and the ZKsync OS prover daemon that
-# feeds them batches from the sequencer. All four services run the same image;
-# the command picks the process.
+# feeds them batches from the sequencer. All three services run the same
+# image; the command picks the process.
 #
 #   cp .env.example .env      # set ZISK_SEQUENCER_URL, image tag, GPU
 #   docker compose up -d      # first start downloads 27 GB of keys
 #   docker compose logs -f prover
 #
-# Start order: prepare-keys runs to completion (a no-op once the key volume
-# is populated), then the worker joins the coordinator, then the daemon
-# registers the guest ELFs and starts polling. The daemon retries its startup
-# setup until a worker has loaded its keys, which takes several minutes on a
-# cold start.
+# Start order: the worker's entrypoint installs the proving keys (a no-op
+# once the key volume is populated), then the worker joins the coordinator,
+# then the daemon registers the guest ELFs and starts polling. The daemon
+# retries its startup setup until a worker has loaded its keys, which takes
+# several minutes on a cold start.
 #
 # Requirements on the host: the NVIDIA container toolkit, a GPU with 16 GB or
 # more of VRAM, 64 GB or more of RAM for the resident PLONK key, and about
@@ -52,36 +52,23 @@ services:
       start_period: 20s
       retries: 3
 
-  # One-shot: fetch, verify and install the proving keys into the key volume
-  # and generate the constant trees. Exits 0 immediately when the volume
-  # already holds keys for the image's ZiSK version.
-  prepare-keys:
-    image: *image
-    <<: *gpu
-    user: root
-    command: ["zisk-prepare-keys"]
-    restart: "no"
-    environment:
-      ZISK_KEYS_ALLOW_UNPINNED: ${ZISK_KEYS_ALLOW_UNPINNED:-0}
-      ZISK_KEYS_GPU: ${ZISK_KEYS_GPU:-1}
-    volumes:
-      - zisk-keys:/opt/zisk/keys
-
   worker:
     image: *image
     <<: *gpu
     restart: unless-stopped
     depends_on:
-      prepare-keys:
-        condition: service_completed_successfully
       coordinator:
         condition: service_healthy
-    # --preload-plonk keeps the PLONK key resident: that is the point of the
-    # coordinator mode. --emulator selects the standard emulator; drop it to
-    # use the ASM emulator (faster witness generation, needs the memlock
-    # ulimit below and the build toolchain the image carries).
+    # The entrypoint fetches, verifies and installs the proving keys into the
+    # key volume and generates the constant trees on the first start (a no-op
+    # once the volume holds keys for the image's ZiSK version), then runs
+    # zisk-worker with the arguments below. --preload-plonk keeps the PLONK
+    # key resident: that is the point of the coordinator mode. --emulator
+    # selects the standard emulator; drop it to use the ASM emulator (faster
+    # witness generation, needs the memlock ulimit below and the build
+    # toolchain the image carries).
     command:
-      - zisk-worker
+      - zisk-worker-entrypoint
       - --config
       - /etc/zisk/worker.toml
       - --proving-key
@@ -95,6 +82,9 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      # Key installation on the first start.
+      ZISK_KEYS_ALLOW_UNPINNED: ${ZISK_KEYS_ALLOW_UNPINNED:-0}
+      ZISK_KEYS_GPU: ${ZISK_KEYS_GPU:-1}
     ulimits:
       memlock: -1
     shm_size: ${ZISK_WORKER_SHM_SIZE:-8gb}

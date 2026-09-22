@@ -11,6 +11,7 @@
 !docker/zisk-stack/coordinator-core.toml
 !docker/zisk-stack/worker.toml
 !docker/zisk-stack/prepare-keys.sh
+!docker/zisk-stack/worker-entrypoint.sh
 !docker/zisk-stack/keys.sha256
 !guest-aggregator
 !prover

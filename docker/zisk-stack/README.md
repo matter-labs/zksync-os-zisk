@@ -8,9 +8,9 @@ all four programs; the container command picks one.
 | Command | Role | Needs |
 |---|---|---|
 | `zisk-coordinator --config /etc/zisk/coordinator.toml` | Job queue and client API | CPU only |
-| `zisk-worker --config /etc/zisk/worker.toml ...` | Proves. Holds the STARK and PLONK proving keys resident | an NVIDIA GPU, the key volume |
+| `zisk-worker-entrypoint --config /etc/zisk/worker.toml ...` | Installs the proving keys on the first start, then runs `zisk-worker`, which holds the STARK and PLONK keys resident and proves | an NVIDIA GPU, the key volume |
 | `zksync-os-zisk-prover-service ...` | Polls the sequencer, drives the coordinator through `cargo-zisk remote` | the sequencer and the coordinator |
-| `zisk-prepare-keys` | One-shot: downloads, verifies and installs the proving keys | the GPU (constant-tree generation), the key volume |
+| `zisk-prepare-keys` | The key installation on its own: downloads, verifies and installs the proving keys | the GPU (constant-tree generation), the key volume |
 
 One tag pins coordinator, worker and daemon together. Every ZiSK binary comes
 out of the same release tarball, verified against the sha256 pinned in the
@@ -25,12 +25,17 @@ image is `linux/amd64`.
 ## Proving keys
 
 The STARK key (3.8 GB compressed) and the PLONK key (21.9 GB compressed)
-are not in the image. `zisk-prepare-keys`, run as a one-shot service before
-the worker, downloads both from Polygon's `zisk-setup` bucket for the
-image's ZiSK version, checks the bucket's md5 sidecars and the sha256 pins in
-[`keys.sha256`](keys.sha256), extracts them into the key volume, and runs the
-same constant-tree generation `ziskup` performs. A marker in the volume makes
-later runs a no-op.
+are not in the image. The worker's entrypoint runs `zisk-prepare-keys`
+before the worker: it downloads both from Polygon's `zisk-setup` bucket for
+the image's ZiSK version, checks the bucket's md5 sidecars and the sha256
+pins in [`keys.sha256`](keys.sha256), extracts them into the key volume, and
+runs the same constant-tree generation `ziskup` performs. A marker in the
+volume makes later starts a no-op, so only a fresh volume pays the download.
+The step runs as the image's `zisk` user, so the volume's root must be
+writable by it: Docker gives a fresh named volume the image directory's
+ownership, a Kubernetes local-path volume is world-writable, and other
+provisioners take the pod's `fsGroup`. `zisk-prepare-keys` also runs on its
+own, as root if need be, to fill a volume ahead of time.
 
 Both pins were recorded from full downloads whose md5 matched the sidecars.
 When a new ZiSK version rotates the keys, a pin that reads `PENDING` stops
@@ -48,13 +53,13 @@ docker compose up -d         # first start fetches the keys
 docker compose logs -f worker prover
 ```
 
-[`compose.yaml`](compose.yaml) wires the pieces: `prepare-keys` completes,
-the worker joins the coordinator on its cluster port, and the daemon
-registers both guest ELFs through `cargo-zisk remote setup` and starts
-polling the sequencer in aggregated mode. The daemon retries that setup until
-a worker has finished loading its keys, which takes several minutes on a
-cold start, and re-runs it once whenever a prove fails, so a coordinator
-restart heals without restarting the daemon.
+[`compose.yaml`](compose.yaml) wires the pieces: the worker's entrypoint
+installs the keys, the worker joins the coordinator on its cluster port, and
+the daemon registers both guest ELFs through `cargo-zisk remote setup` and
+starts polling the sequencer in aggregated mode. The daemon retries that
+setup until a worker has finished loading its keys, which takes several
+minutes on a cold start, and re-runs it once whenever a prove fails, so a
+coordinator restart heals without restarting the daemon.
 
 Ports on loopback: 7000 (coordinator client API), 9090 (coordinator metrics
 and `/health`), 3313 (daemon metrics).
@@ -99,6 +104,7 @@ released assets and publishes it to GHCR and GAR with the release tag.
 | `Dockerfile`, `Dockerfile.dockerignore` | The `stack` target plus the `prover-export` helper |
 | `coordinator.toml`, `coordinator-core.toml` | Coordinator service and core config (ports, JSON logs, no proof persistence) |
 | `worker.toml` | Worker config; key paths and GPU flags stay on the command line |
+| `worker-entrypoint.sh` | Installed as `zisk-worker-entrypoint`: key installation, then `exec zisk-worker` |
 | `prepare-keys.sh` | Installed as `zisk-prepare-keys` |
 | `keys.sha256` | sha256 pins of the key tarballs |
 | `compose.yaml`, `.env.example` | Single-machine deployment |

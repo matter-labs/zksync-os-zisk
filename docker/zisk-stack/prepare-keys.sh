@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # zisk-prepare-keys: fetch, verify and install the ZiSK proving keys into the
 # worker's key volume, then generate the constant-tree files, the way ziskup
-# does for a host install. Runs as a one-shot container before the worker.
+# does for a host install. Runs before the worker: `zisk-worker-entrypoint`
+# calls it in the worker's own container, or run it as a one-shot container.
 #
 # Idempotent: a marker file records the installed version and the tarball
 # digests, and a marker for the current ZISK_VERSION makes the run a no-op.
@@ -128,11 +129,14 @@ main() {
     "$CARGO_ZISK_DEV" "${check_args[@]}"
 
     # The worker writes generated artefacts next to the keys at run time, so
-    # the tree must be writable by the worker user.
+    # the tree must be writable by the worker user. Run as root (a one-shot
+    # container), hand the tree to ZISK_KEYS_OWNER. Run as the worker user
+    # itself (zisk-worker-entrypoint), the files are already its own, and the
+    # volume's root directory is not ours to change.
     if [[ "$(id -u)" -eq 0 ]]; then
         chown -R "$OWNER" "$KEYS_DIR"
+        chmod -R u+rwX,g+rwX,o-rwx "$KEYS_DIR"
     fi
-    chmod -R u+rwX,g+rwX,o-rwx "$KEYS_DIR"
 
     {
         echo "version=${ZISK_VERSION}"
