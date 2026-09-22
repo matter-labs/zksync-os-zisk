@@ -130,7 +130,7 @@ accepts:
 ```bash
 cd prover
 cargo run --release -- \
-  --sequencer-url http://localhost:3124 \
+  --sequencer-urls http://localhost:3124 \
   --zisk-binary ~/.zisk/bin/cargo-zisk \
   --elf-path ../out/zksync-os-zisk-guest \
   --aggregation --aggregator-elf ../out/zksync-os-zisk-guest-aggregator \
