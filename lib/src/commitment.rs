@@ -1,9 +1,9 @@
 //! Batch commitment computation: Keccak-based hashing for state commitments,
 //! batch output hashes, L2→L1 log merkle trees, DA commitments, and priority ops.
 
-use alloy_primitives::B256;
 #[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
 use crate::crypto::blake2s::Blake2s256;
+use alloy_primitives::B256;
 #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 
