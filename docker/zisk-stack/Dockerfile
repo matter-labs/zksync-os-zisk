@@ -76,7 +76,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # choice a runtime flag instead of an image variant.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
-        libgmp10 libgomp1 libomp5-18 libopenmpi3t64 libsodium23 \
+        libgmp10 libgomp1 libomp5-18 libopenmpi3t64 openmpi-bin openmpi-common libsodium23 \
         build-essential libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 # Same uid/gid as ZiSK's own images.
@@ -122,12 +122,17 @@ COPY --chown=root:root --chmod=0755 out/zksync-os-zisk-prover-service /usr/local
 # ZiSK path layout the binaries resolve through ZISK_HOME and ZISK_CACHE_DIR,
 # and the NVIDIA container toolkit request for the GPU processes (harmless
 # for the CPU ones).
+# The 1.3.0 binaries initialise OpenMPI (singleton mode forks orted, hence
+# openmpi-bin above); zisk-prepare-keys runs as root, which orted refuses
+# without these two flags.
 ENV ZISK_HOME=/opt/zisk \
     ZISK_CACHE_DIR=/var/cache/zisk \
     ZISK_VERSION=${ZISK_VERSION} \
     PATH=/opt/zisk/bin:$PATH \
     NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 # coordinator API | coordinator cluster port | coordinator metrics | daemon metrics
 EXPOSE 7000 50051 9090 3313
 LABEL org.opencontainers.image.title="zksync-os-zisk-prover" \

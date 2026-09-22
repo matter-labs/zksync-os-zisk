@@ -8,10 +8,6 @@ environment = "production"
 [server]
 host = "0.0.0.0"
 port = 50051
-# The prover daemon receives every proof over the API and writes it to its
-# own work directory, so the coordinator keeps none on disk. Without this the
-# coordinator writes each proof under its working directory forever.
-no_save_proofs = true
 
 [logging]
 level = "info"
