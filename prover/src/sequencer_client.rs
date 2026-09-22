@@ -81,6 +81,9 @@ struct AggregationSubmitPayload {
     public_values: String,
 }
 
+/// How long to wait for a TCP connection to a sequencer.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 impl SequencerClient {
     /// Create a new client, extracting credentials from the URL if present.
     ///
@@ -91,6 +94,7 @@ impl SequencerClient {
         raw_url: &str,
         prover_id: &str,
         supported_vk_hashes: &[String],
+        request_timeout: Duration,
     ) -> anyhow::Result<Self> {
         let mut url = Url::parse(raw_url)?;
         let mut headers = HeaderMap::new();
@@ -114,8 +118,13 @@ impl SequencerClient {
             url.set_password(None).ok();
         }
 
+        // The overall timeout covers large picks and proof uploads and comes
+        // from the command line; the connect limit is fixed and short so a
+        // sequencer that drops packets does not stall the poll cycle for the
+        // whole request timeout.
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(request_timeout)
+            .connect_timeout(CONNECT_TIMEOUT)
             .default_headers(headers)
             .build()?;
 
@@ -306,6 +315,7 @@ impl SequencerClient {
 #[cfg(test)]
 mod tests {
     use super::SequencerClient;
+    use std::time::Duration;
 
     #[test]
     fn pick_urls_advertise_complete_zisk_identities() {
@@ -315,6 +325,7 @@ mod tests {
             "http://localhost:3124",
             "prover one",
             &[first.clone(), second.clone()],
+            Duration::from_secs(30),
         )
         .unwrap();
 
@@ -331,7 +342,9 @@ mod tests {
 
     #[test]
     fn empty_capability_list_keeps_legacy_pick_query() {
-        let client = SequencerClient::new("http://localhost:3124", "p", &[]).unwrap();
+        let client =
+            SequencerClient::new("http://localhost:3124", "p", &[], Duration::from_secs(30))
+                .unwrap();
         let url = client.pick_url("ZiSK/pick");
         assert_eq!(url.query(), Some("id=p"));
     }

@@ -68,7 +68,7 @@ prover_input_generator:
 
 ```bash
 cargo run --release -- \
-  --sequencer-url http://localhost:3124 \
+  --sequencer-urls http://localhost:3124 \
   --zisk-binary ~/.zisk/bin/cargo-zisk \
   --elf-path /path/to/zksync-os-zisk-guest \
   --aggregation --aggregator-elf /path/to/zksync-os-zisk-guest-aggregator \
@@ -80,7 +80,21 @@ cargo run --release -- \
 
 ```bash
 cargo run --release -- \
-  --sequencer-url http://user:password@sequencer.example.com:3124 \
+  --sequencer-urls http://user:password@sequencer.example.com:3124 \
+  ...
+```
+
+### With several sequencers
+
+One daemon can prove for several chains. The sequencers are polled
+round-robin: one with work is served at once, and the daemon sleeps for the
+poll interval only after a full cycle in which none had any, so each still
+sees one poll per interval and one chain's backlog never starves another's.
+Log lines carry the sequencer URL (credentials stripped).
+
+```bash
+cargo run --release -- \
+  --sequencer-urls http://sequencer-a:3124,http://sequencer-b:3124 \
   ...
 ```
 
@@ -108,7 +122,7 @@ cargo run --release -- \
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--sequencer-url` | required | Sequencer URL. Supports `http://user:pass@host:port`. |
+| `--sequencer-urls` | required | Sequencer URL(s), comma-separated or the flag repeated; several are polled round-robin. Each supports `http://user:pass@host:port`. `--sequencer-url` still works as an alias. |
 | `--zisk-binary` | required | The pinned `cargo-zisk` binary. Under `--coordinator-url` only its `remote` subcommands run. |
 | `--elf-path` | required | Path to the ZiSK state-transition guest ELF. |
 | `--proving-key` | required | ZiSK STARK proving key directory. Omit it under `--coordinator-url`; the worker supplies it. |
@@ -119,6 +133,7 @@ cargo run --release -- \
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. Conflicts with `--coordinator-url`. |
 | `--coordinator-url` | (none) | ZiSK coordinator client API URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. |
 | `--work-dir` | `/tmp/zisk_proofs` | Intermediate proof files (cleaned after each proof). |
+| `--request-timeout-secs` | `300` | HTTP timeout per sequencer request, as on the Airbender prover service. Covers a large pick or a proof upload; connecting has a fixed 10 s limit, so an unreachable sequencer fails fast. |
 | `--poll-interval-secs` | `5` | Seconds between polls when no work available. |
 | `--iterations` | `0` | Exit after N proofs (0 = unlimited). |
 | `--supported-vk` | (none) | Advertised combined ZiSK VK hashes. Repeatable. Empty = accept all. |
@@ -145,7 +160,7 @@ proving keys and the GPU:
 
 ```bash
 zksync-os-zisk-prover-service \
-  --sequencer-url http://sequencer:3124 \
+  --sequencer-urls http://sequencer:3124 \
   --zisk-binary ~/.zisk/bin/cargo-zisk \
   --elf-path /path/to/zksync-os-zisk-guest \
   --aggregation --aggregator-elf /path/to/zksync-os-zisk-guest-aggregator \
@@ -187,7 +202,7 @@ CUDA_VISIBLE_DEVICES=0 zisk-worker \
 
 # 3. Daemon: drives `cargo-zisk remote` against the coordinator's API port.
 zksync-os-zisk-prover-service \
-  --sequencer-url http://sequencer:3124 \
+  --sequencer-urls http://sequencer:3124 \
   --coordinator-url http://localhost:7000 \
   --zisk-binary ~/.zisk/bin/cargo-zisk \
   --elf-path /path/to/zksync-os-zisk-guest \

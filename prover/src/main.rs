@@ -32,9 +32,20 @@ use tokio_util::sync::CancellationToken;
     about = "ZiSK prover for ZKsync OS"
 )]
 struct Args {
-    /// Sequencer URL. Supports Basic Auth: http://user:pass@host:port
-    #[arg(short, long)]
-    sequencer_url: String,
+    /// Sequencer URL(s) to poll for work: comma-separated, or the flag
+    /// repeated. Several sequencers are polled round-robin; each supports
+    /// Basic Auth: http://user:pass@host:port
+    ///
+    ///   --sequencer-urls http://localhost:3124,http://user:pass@other:3124
+    #[arg(
+        short,
+        long,
+        alias = "sequencer-url",
+        value_delimiter = ',',
+        num_args = 1..,
+        required = true
+    )]
+    sequencer_urls: Vec<String>,
 
     /// Path to the pinned `cargo-zisk` binary. The coordinator backend uses
     /// its `remote` subcommands; the spawn backend proves with it directly.
@@ -102,6 +113,14 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     poll_interval_secs: u64,
 
+    /// Timeout for HTTP requests to a sequencer, in seconds. Must cover a
+    /// pick that downloads a large batch or a range of proof streams and a
+    /// submit that uploads a proof, so it matches the Airbender prover
+    /// service's default rather than a poll-only one. Connecting has its own
+    /// 10 s limit, so an unreachable sequencer fails fast either way.
+    #[arg(long, default_value_t = 300)]
+    request_timeout_secs: u64,
+
     /// Number of proofs to generate before exiting (0 = unlimited).
     #[arg(long, default_value_t = 0)]
     iterations: u64,
@@ -126,6 +145,59 @@ struct Args {
     /// hostname so concurrent daemons are distinguishable in server logs.
     #[arg(long)]
     prover_id: Option<String>,
+}
+
+/// What one poll of one sequencer amounted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Poll {
+    /// A proof was generated and submitted.
+    Proved,
+    /// The sequencer had no work.
+    Idle,
+    /// An attempt failed or a job was skipped; poll again without waiting,
+    /// as the single-sequencer loop always did.
+    Retry,
+    /// Shutdown was requested mid-proof.
+    Cancelled,
+}
+
+/// Decides when the round-robin loop sleeps: only once every sequencer in a
+/// row came back idle, so each sequencer still sees one poll per interval
+/// and one chain's backlog never starves another's. A proof resets the
+/// streak; a retry leaves it alone.
+struct IdleCycle {
+    sequencers: usize,
+    idle_streak: usize,
+}
+
+impl IdleCycle {
+    fn new(sequencers: usize) -> Self {
+        Self {
+            sequencers: sequencers.max(1),
+            idle_streak: 0,
+        }
+    }
+
+    /// Records the outcome; true when the caller should sleep for the poll
+    /// interval before the next sequencer.
+    fn record(&mut self, outcome: Poll) -> bool {
+        match outcome {
+            Poll::Idle => {
+                self.idle_streak += 1;
+                if self.idle_streak >= self.sequencers {
+                    self.idle_streak = 0;
+                    true
+                } else {
+                    false
+                }
+            }
+            Poll::Proved => {
+                self.idle_streak = 0;
+                false
+            }
+            Poll::Retry | Poll::Cancelled => false,
+        }
+    }
 }
 
 /// Resolve the prover identity: explicit flag, else hostname, else a fixed
@@ -207,7 +279,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         prover_id = %prover_id,
-        sequencer_url = %args.sequencer_url,
         zisk_binary = %args.zisk_binary.display(),
         elf_path = %args.elf_path.display(),
         coordinator_url = ?args.coordinator_url,
@@ -258,9 +329,20 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(exporter.start(metrics_addr));
     tracing::info!(address = %metrics_addr, "metrics server started");
 
-    let client =
-        sequencer_client::SequencerClient::new(&args.sequencer_url, &prover_id, &supported_vks)?;
-    tracing::info!(url = client.url(), "connected to sequencer");
+    // One client per sequencer, polled round-robin below. `url()` has the
+    // credentials stripped, so the list is safe to log.
+    let request_timeout = Duration::from_secs(args.request_timeout_secs);
+    let clients = args
+        .sequencer_urls
+        .iter()
+        .map(|url| {
+            sequencer_client::SequencerClient::new(url, &prover_id, &supported_vks, request_timeout)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    tracing::info!(
+        sequencers = ?clients.iter().map(|c| c.url()).collect::<Vec<_>>(),
+        "connected to sequencers"
+    );
 
     let prover = prover::ZiskProver::new(
         args.zisk_binary,
@@ -328,225 +410,345 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    loop {
+    // Poll the sequencers round-robin. A sequencer with work is served at
+    // once; the daemon sleeps only after a full cycle in which none had any.
+    let mut idle_cycle = IdleCycle::new(clients.len());
+    for client in clients.iter().cycle() {
         if cancel.is_cancelled() {
             tracing::info!("shutdown requested, exiting");
             break;
         }
 
-        // Aggregated mode: range jobs first — a formed range is the last
-        // missing piece of its MultiProof, so it beats new per-batch work.
-        if args.aggregation {
-            match client.pick_next_aggregation_job().await {
-                Ok(Some(job)) => {
-                    if !supported_vks.is_empty() {
-                        let vk_norm = normalize_vk_hash(&job.vk_hash);
-                        if job.vk_hash.is_empty() || !supported_vks.contains(&vk_norm) {
-                            tracing::warn!(
-                                from = job.from_batch,
-                                to = job.to_batch,
-                                vk_hash = %job.vk_hash,
-                                "aggregation server returned an unsupported ZiSK identity; skipping"
-                            );
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            continue;
-                        }
-                    }
-                    tracing::info!(
-                        from = job.from_batch,
-                        to = job.to_batch,
-                        proofs = job.streams.len(),
-                        vk_hash = %job.vk_hash,
-                        "picked ZiSK aggregation range"
-                    );
-                    let streams: Vec<Vec<u8>> =
-                        job.streams.into_iter().map(|(_, stream)| stream).collect();
-                    // A transient proof-gen/submit failure must not kill the
-                    // daemon: log + retry like the pick path above, so one bad
-                    // run doesn't take down the whole ZiSK lane.
-                    let result = match prover
-                        .generate_aggregated_proof(&streams, job.from_batch, job.to_batch, &cancel)
-                        .await
-                    {
-                        Ok(Some(result)) => result,
-                        Ok(None) => {
-                            tracing::info!("aggregated proof cancelled, exiting");
-                            break;
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                from = job.from_batch,
-                                to = job.to_batch,
-                                "aggregated proof generation failed, will retry: {e:#}"
-                            );
-                            continue;
-                        }
-                    };
-                    if let Err(e) = client
-                        .submit_aggregated_proof(
-                            job.from_batch,
-                            job.to_batch,
-                            &result.proof,
-                            &result.public_values,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            from = job.from_batch,
-                            to = job.to_batch,
-                            "aggregated proof submit failed, will retry: {e:#}"
-                        );
-                        continue;
-                    }
-                    prover
-                        .cleanup_range_work_dir(job.from_batch, job.to_batch)
-                        .await;
-                    tracing::info!(
-                        from = job.from_batch,
-                        to = job.to_batch,
-                        "aggregated proof submitted"
-                    );
-
-                    proofs_generated += 1;
-                    if args.iterations > 0 && proofs_generated >= args.iterations {
-                        tracing::info!(proofs_generated, "iteration limit reached");
-                        break;
-                    }
-                    continue;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("aggregation poll failed: {e:#}");
-                }
-            }
-        }
-
-        // Poll for per-batch work.
-        let batch = match client.pick_next_batch().await {
-            Ok(Some(batch)) => batch,
-            Ok(None) => {
-                tokio::select! {
-                    _ = tokio::time::sleep(poll_interval) => {}
-                    _ = cancel.cancelled() => break,
-                }
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!("poll failed: {e:#}");
-                tokio::select! {
-                    _ = tokio::time::sleep(poll_interval) => {}
-                    _ = cancel.cancelled() => break,
-                }
-                continue;
-            }
-        };
-
-        // VK hash filter.
-        if !supported_vks.is_empty() {
-            let vk_norm = normalize_vk_hash(&batch.vk_hash);
-            if !supported_vks.contains(&vk_norm) {
-                tracing::warn!(
-                    batch = batch.batch_number,
-                    vk_hash = %batch.vk_hash,
-                    "unsupported VK hash, skipping"
-                );
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                continue;
-            }
-        }
-
-        tracing::info!(
-            batch = batch.batch_number,
-            data_bytes = batch.zisk_data.len(),
-            vk_hash = %batch.vk_hash,
-            "picked ZiSK batch"
-        );
-
-        // Prove. Uses tokio::process internally — cancellation is instant.
-        // A transient proof-gen/submit failure must not kill the daemon: it is
-        // logged and the batch retried (via `continue`), exactly like the pick
-        // failures above — one bad run doesn't terminate the whole daemon.
-        if args.aggregation {
-            // Aggregated mode: keep the vadcop_final proof (no PLONK wrap)
-            // and submit the stream; its publics travel inside it.
-            let stream = match prover
-                .generate_vadcop_proof(&batch.zisk_data, batch.batch_number, &cancel)
-                .await
-            {
-                Ok(Some(stream)) => stream,
-                Ok(None) => {
-                    tracing::info!("proof cancelled, exiting");
+        let outcome =
+            poll_sequencer(client, &prover, args.aggregation, &supported_vks, &cancel).await;
+        match outcome {
+            Poll::Cancelled => break,
+            Poll::Proved => {
+                proofs_generated += 1;
+                if args.iterations > 0 && proofs_generated >= args.iterations {
+                    tracing::info!(proofs_generated, "iteration limit reached");
                     break;
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        batch = batch.batch_number,
-                        "proof generation failed, will retry: {e:#}"
-                    );
-                    continue;
-                }
-            };
-            tracing::info!(
-                batch = batch.batch_number,
-                stream_bytes = stream.len(),
-                "vadcop_final proof generated"
-            );
-            if let Err(e) = client
-                .submit_zisk_proof(batch.batch_number, &stream, &[])
-                .await
-            {
-                tracing::warn!(
-                    batch = batch.batch_number,
-                    "proof submit failed, will retry: {e:#}"
-                );
-                continue;
             }
-            prover.cleanup_batch_work_dir(batch.batch_number).await;
-        } else {
-            let result = match prover
-                .generate_proof(&batch.zisk_data, batch.batch_number, &cancel)
-                .await
-            {
-                Ok(Some(result)) => result,
-                Ok(None) => {
-                    tracing::info!("proof cancelled, exiting");
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        batch = batch.batch_number,
-                        "proof generation failed, will retry: {e:#}"
-                    );
-                    continue;
-                }
-            };
-            tracing::info!(
-                batch = batch.batch_number,
-                proof_bytes = result.proof.len(),
-                pv_bytes = result.public_values.len(),
-                "proof generated"
-            );
-            if let Err(e) = client
-                .submit_zisk_proof(batch.batch_number, &result.proof, &result.public_values)
-                .await
-            {
-                tracing::warn!(
-                    batch = batch.batch_number,
-                    "proof submit failed, will retry: {e:#}"
-                );
-                continue;
-            }
-            prover.cleanup_batch_work_dir(batch.batch_number).await;
+            Poll::Idle | Poll::Retry => {}
         }
-
-        tracing::info!(batch = batch.batch_number, "proof submitted");
-
-        proofs_generated += 1;
-        if args.iterations > 0 && proofs_generated >= args.iterations {
-            tracing::info!(proofs_generated, "iteration limit reached");
-            break;
+        if idle_cycle.record(outcome) {
+            tokio::select! {
+                _ = tokio::time::sleep(poll_interval) => {}
+                _ = cancel.cancelled() => break,
+            }
         }
     }
 
     Ok(())
+}
+
+/// One pass over one sequencer: in aggregated mode a range job first, since
+/// a formed range is the last missing piece of its MultiProof, then a batch.
+/// A transient proof or submit failure is logged and reported as `Retry`
+/// instead of killing the daemon, so one bad run never takes down the lane.
+async fn poll_sequencer(
+    client: &sequencer_client::SequencerClient,
+    prover: &prover::ZiskProver,
+    aggregation: bool,
+    supported_vks: &[String],
+    cancel: &CancellationToken,
+) -> Poll {
+    let sequencer = client.url();
+
+    if aggregation {
+        match client.pick_next_aggregation_job().await {
+            Ok(Some(job)) => {
+                if !supported_vks.is_empty() {
+                    let vk_norm = normalize_vk_hash(&job.vk_hash);
+                    if job.vk_hash.is_empty() || !supported_vks.contains(&vk_norm) {
+                        tracing::warn!(
+                            sequencer,
+                            from = job.from_batch,
+                            to = job.to_batch,
+                            vk_hash = %job.vk_hash,
+                            "aggregation server returned an unsupported ZiSK identity; skipping"
+                        );
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        return Poll::Retry;
+                    }
+                }
+                tracing::info!(
+                    sequencer,
+                    from = job.from_batch,
+                    to = job.to_batch,
+                    proofs = job.streams.len(),
+                    vk_hash = %job.vk_hash,
+                    "picked ZiSK aggregation range"
+                );
+                let streams: Vec<Vec<u8>> =
+                    job.streams.into_iter().map(|(_, stream)| stream).collect();
+                let result = match prover
+                    .generate_aggregated_proof(&streams, job.from_batch, job.to_batch, cancel)
+                    .await
+                {
+                    Ok(Some(result)) => result,
+                    Ok(None) => {
+                        tracing::info!("aggregated proof cancelled, exiting");
+                        return Poll::Cancelled;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            sequencer,
+                            from = job.from_batch,
+                            to = job.to_batch,
+                            "aggregated proof generation failed, will retry: {e:#}"
+                        );
+                        return Poll::Retry;
+                    }
+                };
+                if let Err(e) = client
+                    .submit_aggregated_proof(
+                        job.from_batch,
+                        job.to_batch,
+                        &result.proof,
+                        &result.public_values,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        sequencer,
+                        from = job.from_batch,
+                        to = job.to_batch,
+                        "aggregated proof submit failed, will retry: {e:#}"
+                    );
+                    return Poll::Retry;
+                }
+                prover
+                    .cleanup_range_work_dir(job.from_batch, job.to_batch)
+                    .await;
+                tracing::info!(
+                    sequencer,
+                    from = job.from_batch,
+                    to = job.to_batch,
+                    "aggregated proof submitted"
+                );
+                return Poll::Proved;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(sequencer, "aggregation poll failed: {e:#}");
+            }
+        }
+    }
+
+    // Per-batch work.
+    let batch = match client.pick_next_batch().await {
+        Ok(Some(batch)) => batch,
+        Ok(None) => return Poll::Idle,
+        Err(e) => {
+            tracing::warn!(sequencer, "poll failed: {e:#}");
+            return Poll::Idle;
+        }
+    };
+
+    // VK hash filter.
+    if !supported_vks.is_empty() {
+        let vk_norm = normalize_vk_hash(&batch.vk_hash);
+        if !supported_vks.contains(&vk_norm) {
+            tracing::warn!(
+                sequencer,
+                batch = batch.batch_number,
+                vk_hash = %batch.vk_hash,
+                "unsupported VK hash, skipping"
+            );
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            return Poll::Retry;
+        }
+    }
+
+    tracing::info!(
+        sequencer,
+        batch = batch.batch_number,
+        data_bytes = batch.zisk_data.len(),
+        vk_hash = %batch.vk_hash,
+        "picked ZiSK batch"
+    );
+
+    // Prove. Uses tokio::process internally, so cancellation is instant.
+    if aggregation {
+        // Aggregated mode: keep the vadcop_final proof (no PLONK wrap) and
+        // submit the stream; its publics travel inside it.
+        let stream = match prover
+            .generate_vadcop_proof(&batch.zisk_data, batch.batch_number, cancel)
+            .await
+        {
+            Ok(Some(stream)) => stream,
+            Ok(None) => {
+                tracing::info!("proof cancelled, exiting");
+                return Poll::Cancelled;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sequencer,
+                    batch = batch.batch_number,
+                    "proof generation failed, will retry: {e:#}"
+                );
+                return Poll::Retry;
+            }
+        };
+        tracing::info!(
+            batch = batch.batch_number,
+            stream_bytes = stream.len(),
+            "vadcop_final proof generated"
+        );
+        if let Err(e) = client
+            .submit_zisk_proof(batch.batch_number, &stream, &[])
+            .await
+        {
+            tracing::warn!(
+                sequencer,
+                batch = batch.batch_number,
+                "proof submit failed, will retry: {e:#}"
+            );
+            return Poll::Retry;
+        }
+    } else {
+        let result = match prover
+            .generate_proof(&batch.zisk_data, batch.batch_number, cancel)
+            .await
+        {
+            Ok(Some(result)) => result,
+            Ok(None) => {
+                tracing::info!("proof cancelled, exiting");
+                return Poll::Cancelled;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sequencer,
+                    batch = batch.batch_number,
+                    "proof generation failed, will retry: {e:#}"
+                );
+                return Poll::Retry;
+            }
+        };
+        tracing::info!(
+            batch = batch.batch_number,
+            proof_bytes = result.proof.len(),
+            pv_bytes = result.public_values.len(),
+            "proof generated"
+        );
+        if let Err(e) = client
+            .submit_zisk_proof(batch.batch_number, &result.proof, &result.public_values)
+            .await
+        {
+            tracing::warn!(
+                sequencer,
+                batch = batch.batch_number,
+                "proof submit failed, will retry: {e:#}"
+            );
+            return Poll::Retry;
+        }
+    }
+    prover.cleanup_batch_work_dir(batch.batch_number).await;
+    tracing::info!(sequencer, batch = batch.batch_number, "proof submitted");
+    Poll::Proved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The flags every invocation needs besides the sequencer list. The
+    /// coordinator backend keeps the proving-key flags optional.
+    fn parse(sequencer_flags: &[&str]) -> Result<Args, clap::Error> {
+        let mut argv = vec![
+            "zksync-os-zisk-prover-service",
+            "--zisk-binary",
+            "/opt/zisk/bin/cargo-zisk",
+            "--elf-path",
+            "/app/elf/guest",
+            "--coordinator-url",
+            "http://127.0.0.1:7000",
+        ];
+        argv.extend_from_slice(sequencer_flags);
+        Args::try_parse_from(argv)
+    }
+
+    #[test]
+    fn sequencer_urls_accepts_a_comma_separated_list() {
+        let args = parse(&["--sequencer-urls", "http://a:3124,http://user:pass@b:3124"]).unwrap();
+        assert_eq!(
+            args.sequencer_urls,
+            vec!["http://a:3124", "http://user:pass@b:3124"]
+        );
+    }
+
+    #[test]
+    fn sequencer_urls_accepts_the_flag_repeated() {
+        let args = parse(&[
+            "--sequencer-urls",
+            "http://a:3124",
+            "--sequencer-urls",
+            "http://b:3124",
+        ])
+        .unwrap();
+        assert_eq!(args.sequencer_urls, vec!["http://a:3124", "http://b:3124"]);
+    }
+
+    #[test]
+    fn the_old_singular_flag_still_works() {
+        let args = parse(&["--sequencer-url", "http://a:3124"]).unwrap();
+        assert_eq!(args.sequencer_urls, vec!["http://a:3124"]);
+    }
+
+    #[test]
+    fn a_sequencer_is_required() {
+        assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn request_timeout_defaults_like_the_airbender_prover_service() {
+        let args = parse(&["--sequencer-urls", "http://a:3124"]).unwrap();
+        assert_eq!(args.request_timeout_secs, 300);
+    }
+
+    #[test]
+    fn request_timeout_can_be_set() {
+        let args = parse(&[
+            "--sequencer-urls",
+            "http://a:3124",
+            "--request-timeout-secs",
+            "60",
+        ])
+        .unwrap();
+        assert_eq!(args.request_timeout_secs, 60);
+    }
+
+    #[test]
+    fn sleeps_only_after_every_sequencer_came_back_idle() {
+        let mut cycle = IdleCycle::new(2);
+        assert!(!cycle.record(Poll::Idle), "first idle of two: keep going");
+        assert!(cycle.record(Poll::Idle), "both idle: sleep");
+        assert!(
+            !cycle.record(Poll::Idle),
+            "a new cycle starts after sleeping"
+        );
+        assert!(!cycle.record(Poll::Proved), "work resets the streak");
+        assert!(
+            !cycle.record(Poll::Idle),
+            "the streak restarted after the proof"
+        );
+        assert!(cycle.record(Poll::Idle));
+    }
+
+    #[test]
+    fn a_single_sequencer_sleeps_on_every_idle_poll() {
+        let mut cycle = IdleCycle::new(1);
+        assert!(cycle.record(Poll::Idle));
+        assert!(cycle.record(Poll::Idle));
+    }
+
+    #[test]
+    fn a_retry_neither_sleeps_nor_counts_as_idle() {
+        let mut cycle = IdleCycle::new(2);
+        assert!(!cycle.record(Poll::Idle));
+        assert!(!cycle.record(Poll::Retry), "retry right away, as before");
+        assert!(cycle.record(Poll::Idle), "the earlier idle still counts");
+    }
 }
