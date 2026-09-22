@@ -129,6 +129,9 @@ jobs:
           set -euo pipefail
           KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
           mkdir -p "$KEYS_HOST_DIR"
+          # The prover container runs as the image's zisk user (uid 998) and
+          # writes the proofs into this bind mount, which the runner user owns.
+          chmod -R a+rwX "${GITHUB_WORKSPACE}/bundle/session"
           cat > docker/zisk-stack/.env <<EOT
           ZISK_SEQUENCER_URL=http://unused.invalid:3124
           ZISK_STACK_IMAGE=local/zksync-os-zisk-prover:smoke
