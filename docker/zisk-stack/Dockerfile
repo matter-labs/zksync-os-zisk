@@ -3,14 +3,16 @@
 # binary the three processes need; the process is chosen by the command:
 #
 #   zisk-coordinator --config /etc/zisk/coordinator.toml   CPU. Job queue and client API.
-#   zisk-worker --config /etc/zisk/worker.toml ...         GPU. Holds the proving keys
-#                                                          resident, proves.
+#   zisk-worker-entrypoint --config /etc/zisk/worker.toml ...
+#                                                          GPU. Installs the proving keys
+#                                                          on first start, then runs
+#                                                          zisk-worker, which holds them
+#                                                          resident and proves.
 #   zksync-os-zisk-prover-service ...                      CPU. Polls the sequencer and
 #                                                          drives the coordinator through
 #                                                          `cargo-zisk remote`.
-#   zisk-prepare-keys                                      One-shot. Fetches, verifies and
-#                                                          installs the proving keys into
-#                                                          the worker's key volume.
+#   zisk-prepare-keys                                      Standalone key installation,
+#                                                          the step the entrypoint runs.
 #
 # One tag therefore pins coordinator, worker and daemon together. Every ZiSK
 # binary comes from the same pinned release tarball, verified by sha256 before
@@ -107,6 +109,7 @@ COPY --from=toolchain --chown=zisk:zisk /opt/zisk-dist/zisk /opt/zisk/zisk
 COPY --chown=root:root docker/zisk-stack/coordinator.toml docker/zisk-stack/coordinator-core.toml \
      docker/zisk-stack/worker.toml /etc/zisk/
 COPY --chown=root:root --chmod=0755 docker/zisk-stack/prepare-keys.sh /usr/local/bin/zisk-prepare-keys
+COPY --chown=root:root --chmod=0755 docker/zisk-stack/worker-entrypoint.sh /usr/local/bin/zisk-worker-entrypoint
 COPY --chown=root:root docker/zisk-stack/keys.sha256 /opt/zisk/keys.sha256
 
 # Guest ELFs from the reproducible builds, re-verified against the recorded
@@ -123,8 +126,8 @@ COPY --chown=root:root --chmod=0755 out/zksync-os-zisk-prover-service /usr/local
 # and the NVIDIA container toolkit request for the GPU processes (harmless
 # for the CPU ones).
 # The 1.3.0 binaries initialise OpenMPI (singleton mode forks orted, hence
-# openmpi-bin above); zisk-prepare-keys runs as root, which orted refuses
-# without these two flags.
+# openmpi-bin above); a one-shot zisk-prepare-keys may run as root, which
+# orted refuses without these two flags.
 ENV ZISK_HOME=/opt/zisk \
     ZISK_CACHE_DIR=/var/cache/zisk \
     ZISK_VERSION=${ZISK_VERSION} \

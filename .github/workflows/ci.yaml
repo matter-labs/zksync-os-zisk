@@ -27,7 +27,7 @@ jobs:
       - run: bash -n .github/scripts/derive-vk.sh
       # The ZiSK stack scripts and compose file ship in the worker image and
       # drive the GPU deployment; keep them syntactically valid.
-      - run: bash -n docker/zisk-stack/prepare-keys.sh docker/zisk-stack/build-images.sh
+      - run: bash -n docker/zisk-stack/prepare-keys.sh docker/zisk-stack/worker-entrypoint.sh docker/zisk-stack/build-images.sh
       - run: >
           docker compose -f docker/zisk-stack/compose.yaml
           --env-file docker/zisk-stack/.env.example config --quiet
