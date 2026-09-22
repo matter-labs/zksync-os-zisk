@@ -77,7 +77,10 @@ jobs:
 
   smoke:
     name: boot the stack and prove one batch through the coordinator
-    runs-on: [matterlabs-ci-gpu-runner]
+    # TEMPORARY for the 1.3.0-alpha key-pin run: the matterlabs-ci-gpu-runner
+    # pool hands out L4s (23 GB), too small for the PLONK wrap. Revert to
+    # [matterlabs-ci-gpu-runner] after the run.
+    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
     needs: prepare
     timeout-minutes: 240
     permissions:
