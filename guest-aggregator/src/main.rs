@@ -1,12 +1,18 @@
 //! ZiSK aggregator guest: verifies N `vadcop_final` proofs of the STF guest
 //! and commits the L1 binding digest over their folded batch public inputs.
 //!
-//! Verification runs pil2-proofman's `proofman-verifier` via ZiSK's own
-//! `ziskos::zisklib::verify_zisk_proof` (no_std, Poseidon2-16 transcript and
-//! Merkle hashing through the ZiSK poseidon2 precompile). Only non-minimal
-//! proofs are accepted: the minimal/compressed variant hashes with
-//! Poseidon2-8, which has no precompile and would run the permutation in
-//! software.
+//! Verification runs ZiSK's own `ziskos::zisklib::verify_zisk_proof` (no_std;
+//! the `zisk-verifier` crate's generated Poseidon1 `vadcop_final` verifier,
+//! selected by the hash-family tag the stream carries). Only non-minimal
+//! proofs are accepted: the minimal/compressed variant strips the leaf flag
+//! and cannot be classified as a leaf.
+//!
+//! `verify_zisk_proof` takes the expected recursion setup key and the expected
+//! program VK as separate arguments and ignores the VK words appended to the
+//! stream. This guest passes the stream's own two VKs: it does not pin either
+//! key at compile time, because both are bound into the committed output
+//! digest and the L1 range verifier checks them against its pins (see
+//! `src/lib.rs`, "Committed output").
 //!
 //! Input framing (host writes consecutive `write_input_slice` frames; the
 //! assembler is `aggregator_input` in `prover/`):
@@ -42,7 +48,11 @@ fn main() {
             .ingest(&frame)
             .unwrap_or_else(|e| panic!("proof {i}: {e}"));
         assert!(
-            ziskos::zisklib::verify_zisk_proof(frame.words()),
+            ziskos::zisklib::verify_zisk_proof(
+                frame.words(),
+                frame.vadcop_vk(),
+                frame.program_vk()
+            ),
             "proof {i}: verification failed"
         );
     }

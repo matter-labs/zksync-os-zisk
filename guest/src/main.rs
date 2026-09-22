@@ -270,6 +270,20 @@ pub extern "C" fn blake2b_compress_c(
     hooks::blake2b_compress(rounds, h, m, t, f != 0);
 }
 
+/// The `blake2sf` permutation for `lib`'s BLAKE2s hashes
+/// (`lib/src/crypto/blake2s.rs`: storage-tree nodes and leaves, bytecode
+/// hashes, the per-block transaction/receipt trees).
+///
+/// `v` points to the 16-word working vector as eight u64 slots (permuted in
+/// place), `m` to the message block in the same layout. Backed by the ZiSK
+/// `blake2sf` syscall.
+#[no_mangle]
+pub extern "C" fn blake2sf_c(v: *mut u64, m: *const u64) {
+    let v = unsafe { &mut *(v as *mut [u64; 8]) };
+    let m = unsafe { &*(m as *const [u64; 8]) };
+    hooks::blake2sf(v, m);
+}
+
 /// KZG point evaluation for the `pointEvaluation` precompile (0x0a,
 /// EIP-4844).
 ///

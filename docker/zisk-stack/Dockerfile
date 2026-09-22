@@ -22,10 +22,14 @@
 # The tarball is x86_64 only, so the image is linux/amd64. The GPU binaries
 # link only the driver's libcuda.so.1, which the NVIDIA container toolkit
 # mounts at run time, so the base is plain Ubuntu. The proving keys are NOT
-# in the image (26 GB compressed); see README.md next to this file.
+# in the image (27 GB compressed); see README.md next to this file.
 
-ARG ZISK_VERSION=1.2.0-alpha
-ARG ZISK_TARBALL_SHA256=e3605dafb5fcdb2fa8271ea945334694f42704737f31ef0bdf93d663f2b14866
+ARG ZISK_VERSION=1.3.0-alpha
+# sha256 of the v1.3.0-alpha cargo_zisk_linux_amd64.tar.gz release asset
+# (released 2026-09-21, tag commit 02d2ae7b). The toolchain stage refuses to
+# build while this reads PENDING, and `sha256sum -c` rejects a tarball whose
+# digest differs, so a stale value cannot ship silently.
+ARG ZISK_TARBALL_SHA256=39e87f6c28eabc6de1226b1106054d61e6c03188bcdd94ac1d067c58b40145ca
 ARG UBUNTU_TAG=24.04
 
 # ---------------------------------------------------------------------------
@@ -35,7 +39,9 @@ ARG ZISK_VERSION
 ARG ZISK_TARBALL_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL --retry 5 -o /tmp/cargo_zisk.tar.gz \
+RUN test "${ZISK_TARBALL_SHA256}" != "PENDING" \
+    || { echo "ERROR: ZISK_TARBALL_SHA256 is PENDING; record the sha256 of the v${ZISK_VERSION} cargo_zisk_linux_amd64.tar.gz release asset" >&2; exit 1; } \
+    && curl -fsSL --retry 5 -o /tmp/cargo_zisk.tar.gz \
         "https://github.com/0xPolygonHermez/zisk/releases/download/v${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz" \
     && echo "${ZISK_TARBALL_SHA256}  /tmp/cargo_zisk.tar.gz" | sha256sum -c - \
     && mkdir -p /opt/zisk-dist \
@@ -70,7 +76,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 # choice a runtime flag instead of an image variant.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
-        libgmp10 libgomp1 libomp5-18 libopenmpi3t64 libsodium23 \
+        libgmp10 libgomp1 libomp5-18 libopenmpi3t64 openmpi-bin openmpi-common libsodium23 \
         build-essential libgmp-dev \
     && rm -rf /var/lib/apt/lists/*
 # Same uid/gid as ZiSK's own images.
@@ -116,12 +122,17 @@ COPY --chown=root:root --chmod=0755 out/zksync-os-zisk-prover-service /usr/local
 # ZiSK path layout the binaries resolve through ZISK_HOME and ZISK_CACHE_DIR,
 # and the NVIDIA container toolkit request for the GPU processes (harmless
 # for the CPU ones).
+# The 1.3.0 binaries initialise OpenMPI (singleton mode forks orted, hence
+# openmpi-bin above); zisk-prepare-keys runs as root, which orted refuses
+# without these two flags.
 ENV ZISK_HOME=/opt/zisk \
     ZISK_CACHE_DIR=/var/cache/zisk \
     ZISK_VERSION=${ZISK_VERSION} \
     PATH=/opt/zisk/bin:$PATH \
     NVIDIA_VISIBLE_DEVICES=all \
-    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
 # coordinator API | coordinator cluster port | coordinator metrics | daemon metrics
 EXPOSE 7000 50051 9090 3313
 LABEL org.opencontainers.image.title="zksync-os-zisk-prover" \

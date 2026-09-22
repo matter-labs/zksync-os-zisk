@@ -3,9 +3,16 @@
 //! The storage tree is a depth-64 binary Merkle tree with Blake2s-256 as the hash function.
 //! Leaves are `(key: B256, value: B256, next_index: u64)` forming a sorted linked list.
 //! This module verifies inclusion/exclusion proofs against a known root hash.
+//!
+//! On the ZiSK target every hash here runs on the `blake2sf` precompile
+//! through `crate::crypto::blake2s`; the host keeps the `blake2` crate for
+//! the leaf and key preimages. Node hashes take `node_hash` on both targets.
 
+use crate::crypto::blake2s::node_hash;
+#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+use crate::crypto::blake2s::Blake2s256;
 use alloy_primitives::B256;
-use blake2::digest::FixedOutput;
+#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 use serde::{Deserialize, Serialize};
 
@@ -19,14 +26,11 @@ pub const TREE_DEPTH: u8 = 64;
 pub fn blake2s(data: &[u8]) -> B256 {
     let mut h = Blake2s256::new();
     h.update(data);
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 
 fn blake2s_compress(lhs: &B256, rhs: &B256) -> B256 {
-    let mut h = Blake2s256::new();
-    h.update(lhs.as_slice());
-    h.update(rhs.as_slice());
-    B256::from_slice(&h.finalize_fixed())
+    B256::new(node_hash(&lhs.0, &rhs.0))
 }
 
 /// Hash a leaf: Blake2s(key || value || next_index_le_8).
@@ -722,7 +726,7 @@ pub fn derive_flat_storage_key(address: &[u8; 20], slot: &B256) -> B256 {
     h.update([0u8; 12]);
     h.update(address);
     h.update(slot.as_slice());
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 
 /// The special address where account properties are stored.

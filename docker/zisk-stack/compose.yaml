@@ -4,7 +4,7 @@
 # the command picks the process.
 #
 #   cp .env.example .env      # set ZISK_SEQUENCER_URL, image tag, GPU
-#   docker compose up -d      # first start downloads 26 GB of keys
+#   docker compose up -d      # first start downloads 27 GB of keys
 #   docker compose logs -f prover
 #
 # Start order: prepare-keys runs to completion (a no-op once the key volume
@@ -142,7 +142,7 @@ services:
       retries: 3
 
 volumes:
-  # 26 GB of tarballs during installation, roughly 40 GB of keys after.
+  # 27 GB of tarballs during installation, plus the unpacked keys after.
   zisk-keys:
   worker-cache:
   coordinator-cache:

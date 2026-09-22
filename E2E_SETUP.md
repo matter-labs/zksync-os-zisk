@@ -19,10 +19,10 @@ proof generation on a GPU, and the on-chain verification in era-contracts.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
-# ZiSK toolchain, pinned at v1.2.0-alpha
+# ZiSK toolchain, pinned at v1.3.0-alpha
 curl -L https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/install.sh | bash
 source ~/.bashrc
-ziskup -v 1.2.0-alpha
+ziskup -v 1.3.0-alpha
 
 # PLONK proving key (a separate, multi-gigabyte download)
 ziskup setup_snark

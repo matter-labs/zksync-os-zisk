@@ -40,7 +40,7 @@ def values() -> dict:
             "selected_sha": "a" * 40,
             "run_url": "https://github.com/matter-labs/zksync-os-zisk/actions/runs/1",
             "session_date": "2026-08-24",
-            "zisk_version": "1.2.0-alpha",
+            "zisk_version": "1.3.0-alpha",
             "inner_elf_sha256": "b" * 64,
             "aggregator_elf_sha256": "c" * 64,
             "inner_program_vk": inner,
@@ -85,7 +85,12 @@ class FixturePublicationTests(unittest.TestCase):
         doc = self.copy("guest-aggregator/BINDING_VECTOR.md")
         guest = self.copy("guest-aggregator/src/lib.rs")
         prover = self.copy("prover/tests/real_aggregation_vector.rs")
-        vadcop = self.copy("prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin")
+        # The destination may not exist in the repository yet (a new ZiSK
+        # version's first session publishes it), so seed the temporary copy
+        # instead of copying the repository file.
+        vadcop = self.root / "prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
+        vadcop.parent.mkdir(parents=True, exist_ok=True)
+        vadcop.write_bytes(b"previous proof")
         source_vadcop = self.root / "new-vadcop.bin"
         source_vadcop.write_bytes(b"new validated proof")
 

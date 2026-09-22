@@ -1,6 +1,7 @@
 #[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use revm::precompile::DefaultCrypto;
 
+pub mod blake2s;
 mod ffi;
 mod impls;
 

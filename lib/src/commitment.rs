@@ -1,8 +1,10 @@
 //! Batch commitment computation: Keccak-based hashing for state commitments,
 //! batch output hashes, L2→L1 log merkle trees, DA commitments, and priority ops.
 
+#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+use crate::crypto::blake2s::Blake2s256;
 use alloy_primitives::B256;
-use blake2::digest::FixedOutput;
+#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 
 // Re-export the accelerated keccak256.
@@ -21,7 +23,9 @@ pub fn keccak_two(a: &B256, b: &B256) -> B256 {
 }
 
 // ---------------------------------------------------------------------------
-// State commitment (Blake2s)
+// State commitment (Blake2s). On the ZiSK target these run on the `blake2sf`
+// precompile through `crate::crypto::blake2s`: `block_hashes_blake` alone is
+// 128 compressions per call over the 256-entry block-hash ring.
 // ---------------------------------------------------------------------------
 
 /// Compute the state commitment hash:
@@ -39,7 +43,7 @@ pub fn state_commitment_hash(
     h.update(block_number.to_be_bytes());
     h.update(block_hashes_blake.as_slice());
     h.update(last_block_timestamp.to_be_bytes());
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 
 /// Compute the last_256_block_hashes_blake:
@@ -53,7 +57,7 @@ pub fn block_hashes_blake(previous_255_hashes: &[B256], current_block_hash: &B25
         h.update(hash.as_slice());
     }
     h.update(current_block_hash.as_slice());
-    B256::from_slice(&h.finalize_fixed())
+    B256::from_slice(&h.finalize())
 }
 
 // ---------------------------------------------------------------------------

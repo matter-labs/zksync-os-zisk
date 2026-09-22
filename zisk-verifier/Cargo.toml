@@ -11,15 +11,19 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 sha2 = { version = "0.10", default-features = false }
 ruint = { version = "1", default-features = false }
-proofman-verifier = { version = "=1.2.0-alpha", default-features = false, features = ["verify"], optional = true }
+# ZiSK's own verifier crate: the generated `vadcop_final` verifiers over
+# pil2-proofman's `proofman-verifier`. Renamed because this crate shares its
+# package name.
+zisk-verifier-upstream = { package = "zisk-verifier", version = "=1.3.0-alpha", default-features = false, optional = true }
 zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator", optional = true }
 
 [features]
 default = []
-# Enable the native (pure-Rust) vadcop_final STARK verifier via pil2-proofman.
-# Off by default: it adds the pil2-proofman verifier and the aggregator parser.
-# The base PLONK wire checks stay dependency-light without it.
-stark-native = ["dep:proofman-verifier", "dep:zksync-os-zisk-guest-aggregator"]
+# Enable the native (pure-Rust) vadcop_final STARK verifier via ZiSK's
+# zisk-verifier crate. Off by default: it adds pil2-proofman's verifier and
+# the aggregator parser. The base PLONK wire checks stay dependency-light
+# without it.
+stark-native = ["dep:zisk-verifier-upstream", "dep:zksync-os-zisk-guest-aggregator"]
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [

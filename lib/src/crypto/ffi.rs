@@ -37,6 +37,8 @@ extern "C" {
 
     pub fn blake2b_compress_c(rounds: u32, h: *mut u64, m: *const u64, t: *const u64, f: u8);
 
+    pub fn blake2sf_c(v: *mut u64, m: *const u64);
+
     pub fn secp256r1_ecdsa_verify_c(msg: *const u8, sig: *const u8, pk: *const u8) -> bool;
 
     pub fn verify_kzg_proof_c(

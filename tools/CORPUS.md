@@ -114,9 +114,9 @@ runs through the rig itself, so both lanes report on one comparison.
    blocks and their dumps matter.
 3. **Fixtures** — in `tests/evm_tester/` run `./download_ethereum_fixtures.sh`
    (EEST v5.4.0, ~13 GB unpacked, ~250 MB download).
-4. **ZiSK v1.2.0-alpha toolchain** — release tarball
-   `cargo_zisk_linux_amd64.tar.gz` from the zisk v1.2.0-alpha GitHub release
-   into `~/.zisk-1.2.0-alpha/`. On machines without root, extract the runtime libs
+4. **ZiSK v1.3.0-alpha toolchain** — release tarball
+   `cargo_zisk_linux_amd64.tar.gz` from the zisk v1.3.0-alpha GitHub release
+   into `~/.zisk-1.3.0-alpha/`. On machines without root, extract the runtime libs
    from Ubuntu debs (`libomp5-18`, `libopenmpi3`, `libhwloc15`,
    `libevent-core/pthreads`) via `dpkg -x` into a user dir and export it as
    `LD_LIBRARY_PATH` (the runner's default points at

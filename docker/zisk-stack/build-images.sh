@@ -92,7 +92,11 @@ case "$PROVER_SOURCE" in
         ;;
     bin)
         [[ -f "$PROVER_BIN" ]] || die "no such file: $PROVER_BIN"
-        cp "$PROVER_BIN" out/zksync-os-zisk-prover-service
+        # The staged path itself is a valid --prover-bin; cp refuses to copy a
+        # file onto itself.
+        if ! [[ "$PROVER_BIN" -ef out/zksync-os-zisk-prover-service ]]; then
+            cp "$PROVER_BIN" out/zksync-os-zisk-prover-service
+        fi
         ;;
     "")
         die "the daemon binary needs --prover-from-docker, --prover-from-release TAG or --prover-bin PATH"

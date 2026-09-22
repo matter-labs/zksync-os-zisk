@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZISK_VERSION: "1.2.0-alpha"
+  ZISK_VERSION: "1.3.0-alpha"
 
 jobs:
   prepare:
@@ -264,13 +264,17 @@ jobs:
             --values session/fixture-values.json \
             --vadcop session/vadcop-batch-1.bin \
             --repo-root .
-          mapfile -t changed < <(git diff --name-only)
           expected=(
             guest-aggregator/BINDING_VECTOR.md
             guest-aggregator/src/lib.rs
-            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin
             prover/tests/real_aggregation_vector.rs
           )
+          # The fixture file is untracked until the first session of a new
+          # ZiSK version publishes it; intent-to-add makes it show in the
+          # diff like the replaced files do.
+          git add --intent-to-add "${expected[@]}"
+          mapfile -t changed < <(git diff --name-only)
           if [[ "${changed[*]}" != "${expected[*]}" ]]; then
             echo "ERROR: generated paths differ from the reviewed publication set" >&2
             printf 'changed:  %s\nexpected: %s\n' "${changed[*]}" "${expected[*]}" >&2
@@ -310,7 +314,7 @@ jobs:
             guest-aggregator/BINDING_VECTOR.md \
             guest-aggregator/src/lib.rs \
             prover/tests/real_aggregation_vector.rs \
-            prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin
           git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
@@ -338,7 +342,7 @@ jobs:
           - \`guest-aggregator/BINDING_VECTOR.md\`
           - \`guest-aggregator/src/lib.rs\`
           - \`prover/tests/real_aggregation_vector.rs\`
-          - \`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin\`
+          - \`prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin\`
 
           The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests.
           EOF

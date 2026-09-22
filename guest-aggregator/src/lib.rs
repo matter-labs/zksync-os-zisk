@@ -16,18 +16,24 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof:
+//! `vadcop_final`** proof (ZiSK v1.3.0-alpha):
 //!
 //! ```text
-//! [minimal(1)][n_publics=68(1)][program_vk(4)][publics(64)]
-//! [proof body(41_947)][vadcop_vk(4)]
+//! [minimal=0(1)][n_publics=69(1)][is_vadcop_final_proof=1(1)][program_vk(4)]
+//! [publics(64)][proof body(46_141)][vadcop_vk(4)][hash_tag=0(1)]
 //! ```
+//!
+//! The trailing `hash_tag` names the hash family the recursion was proven
+//! with (`zisk_verifier::hash_tag`: 0 = Poseidon1, 1 = Poseidon2,
+//! 2 = blake3); ZiSK's in-guest verifier reads it to select the verifier.
+//! This lane's proving key is Poseidon1 and the body size below is that
+//! family's, so the parser accepts tag 0 only.
 //!
 //! `publics[0..8]` carry the STF guest's batch-commitment u32 words (one
 //! u32 per u64 word, packed little-endian by `ziskos::io::commit_slice`).
 //! Only non-minimal proofs are accepted: the minimal/compressed variant
-//! hashes with Poseidon2-8, which has no ZiSK precompile and would run the
-//! permutation in software.
+//! strips the `is_vadcop_final_proof` flag, so it cannot be told from an
+//! aggregated fold, and a leaf position must hold a leaf.
 //!
 //! # Committed output
 //!
@@ -79,6 +85,13 @@ pub const PROGRAM_VK_WORDS: usize = 4;
 pub const PUBLICS_WORDS: usize = 64;
 /// u64 words in the vadcop-final verification key appended to the stream.
 pub const VADCOP_VK_WORDS: usize = 4;
+/// u64 words in the hash-family tag that ends the stream
+/// (`zisk_verifier::HASH_TAG_LEN_WORDS`).
+pub const HASH_TAG_WORDS: usize = 1;
+/// The hash-family tag of this lane's proving key:
+/// `zisk_verifier::hash_tag("Poseidon1")`. A stream from another family
+/// carries a body of another size and is rejected before verification.
+pub const EXPECTED_HASH_TAG: u64 = 0;
 /// Publics words carrying the STF guest's batch commitment.
 pub const COMMITMENT_WORDS: usize = 8;
 /// u64 words in the leading `is_vadcop_final_proof` public. The non-minimal
@@ -92,17 +105,16 @@ pub const IS_VADCOP_FINAL_PROOF: u64 = 1;
 /// Expected `n_publics` header word: leaf flag + program VK + publics.
 pub const EXPECTED_N_PUBLICS: u64 = (LEAF_FLAG_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
 
-/// u64 words in a non-minimal `vadcop_final` proof body under the pinned
-/// pil2-proofman recursive setup
-/// (`Poseidon1Verifier::expected_vadcop_final_proof_bytes() / 8`).
-/// `ziskos::zisklib::verify_zisk_proof` fixes the hash family at Poseidon1,
-/// so the Poseidon2 size does not apply.
+/// u64 words in a non-minimal Poseidon1 `vadcop_final` proof body under the
+/// pinned ZiSK v1.3.0-alpha recursive setup
+/// (`zisk_verifier::expected_proof_bytes("Poseidon1", false) / 8`).
 ///
-/// Part of the proof-format pin: it changes only with a
-/// pil2-proofman upgrade, which rotates every VK anyway. A host test in
-/// `prover/` (`vadcop_body_words_matches_pinned_verifier`) asserts this
-/// constant against the real `proofman-verifier` crate at the same version.
-pub const VADCOP_FINAL_BODY_WORDS: usize = 46_078;
+/// Part of the proof-format pin: it changes only with a ZiSK / pil2-proofman
+/// upgrade, which rotates every VK anyway. A host test in `prover/`
+/// (`vadcop_body_words_matches_pinned_verifier`) asserts this constant and
+/// [`EXPECTED_HASH_TAG`] against the real `zisk-verifier` crate at the same
+/// version.
+pub const VADCOP_FINAL_BODY_WORDS: usize = 46_141;
 
 /// Total u64 words in a serialized non-minimal proof stream.
 pub const PROOF_STREAM_WORDS: usize = HEADER_WORDS
@@ -110,7 +122,8 @@ pub const PROOF_STREAM_WORDS: usize = HEADER_WORDS
     + PROGRAM_VK_WORDS
     + PUBLICS_WORDS
     + VADCOP_FINAL_BODY_WORDS
-    + VADCOP_VK_WORDS;
+    + VADCOP_VK_WORDS
+    + HASH_TAG_WORDS;
 /// Total bytes in a serialized non-minimal proof stream.
 pub const PROOF_STREAM_BYTES: usize = PROOF_STREAM_WORDS * 8;
 
@@ -134,6 +147,9 @@ pub enum AggError {
     MinimalProof { flag: u64 },
     /// The `n_publics` header word is not [`EXPECTED_N_PUBLICS`].
     BadPublicsCount { got: u64 },
+    /// The trailing hash-family tag is not [`EXPECTED_HASH_TAG`]: the proof
+    /// was produced under another hash family than this lane's key.
+    BadHashTag { got: u64 },
     /// The `is_vadcop_final_proof` public is not [`IS_VADCOP_FINAL_PROOF`],
     /// so the stream is an aggregated proof rather than a leaf.
     NotALeafProof { flag: u64 },
@@ -163,6 +179,9 @@ impl core::fmt::Display for AggError {
             }
             AggError::BadPublicsCount { got } => {
                 write!(f, "n_publics must be {EXPECTED_N_PUBLICS}, got {got}")
+            }
+            AggError::BadHashTag { got } => {
+                write!(f, "hash-family tag must be {EXPECTED_HASH_TAG} (Poseidon1), got {got}")
             }
             AggError::ProgramVkMismatch => write!(f, "program VK mismatch"),
             AggError::VadcopVkMismatch => write!(f, "vadcop VK mismatch"),
@@ -201,8 +220,9 @@ pub struct ProofFrame<'a> {
 
 impl<'a> ProofFrame<'a> {
     /// Validate the stream shape: exact length, non-minimal flag, publics
-    /// count. Cryptographic verification is the caller's job
-    /// (`ziskos::zisklib::verify_zisk_proof(frame.words())` in the guest).
+    /// count, hash-family tag, leaf flag. Cryptographic verification is the
+    /// caller's job (`ziskos::zisklib::verify_zisk_proof(frame.words(),
+    /// frame.vadcop_vk(), frame.program_vk())` in the guest).
     pub fn parse(words: &'a [u64]) -> Result<Self, AggError> {
         if words.len() != PROOF_STREAM_WORDS {
             return Err(AggError::WrongLength { words: words.len() });
@@ -212,6 +232,10 @@ impl<'a> ProofFrame<'a> {
         }
         if words[1] != EXPECTED_N_PUBLICS {
             return Err(AggError::BadPublicsCount { got: words[1] });
+        }
+        let tag = words[PROOF_STREAM_WORDS - HASH_TAG_WORDS];
+        if tag != EXPECTED_HASH_TAG {
+            return Err(AggError::BadHashTag { got: tag });
         }
         if words[HEADER_WORDS] != IS_VADCOP_FINAL_PROOF {
             return Err(AggError::NotALeafProof {
@@ -223,7 +247,7 @@ impl<'a> ProofFrame<'a> {
 
     /// The full stream, exactly what `verify_zisk_proof` consumes
     /// (`[minimal][n_publics][is_vadcop_final_proof][program_vk][publics]
-    /// [body][vadcop_vk]`).
+    /// [body][vadcop_vk][hash_tag]`).
     pub fn words(&self) -> &'a [u64] {
         self.words
     }
@@ -234,9 +258,16 @@ impl<'a> ProofFrame<'a> {
         &self.words[start..start + PROGRAM_VK_WORDS]
     }
 
-    /// The recursive-setup (vadcop-final) VK trailing the stream, 4 words.
+    /// The recursive-setup (vadcop-final) VK, the 4 words before the tag.
     pub fn vadcop_vk(&self) -> &'a [u64] {
-        &self.words[self.words.len() - VADCOP_VK_WORDS..]
+        let end = self.words.len() - HASH_TAG_WORDS;
+        &self.words[end - VADCOP_VK_WORDS..end]
+    }
+
+    /// The hash-family tag ending the stream; [`EXPECTED_HASH_TAG`] on a
+    /// parsed frame.
+    pub fn hash_tag(&self) -> u64 {
+        self.words[self.words.len() - HASH_TAG_WORDS]
     }
 
     /// The 64 publics words (each carries a u32 payload).
@@ -381,9 +412,10 @@ mod tests {
     const VADCOP_VK: [u64; 4] = [5, 6, 7, 8];
 
     /// A well-shaped synthetic stream: exact sizes, non-minimal, leaf flag
-    /// set, publics words carrying `commitment` packed one u32-LE per word
-    /// (the STF guest's `commit_slice` layout). The body is deterministic
-    /// filler — cryptographically invalid, structurally exact.
+    /// set, the Poseidon1 hash tag, publics words carrying `commitment`
+    /// packed one u32-LE per word (the STF guest's `commit_slice` layout).
+    /// The body is deterministic filler — cryptographically invalid,
+    /// structurally exact.
     fn synth_stream(program_vk: [u64; 4], vadcop_vk: [u64; 4], commitment: [u8; 32]) -> Vec<u64> {
         let mut words = Vec::with_capacity(PROOF_STREAM_WORDS);
         words.push(0); // non-minimal
@@ -397,6 +429,7 @@ mod tests {
         words.extend_from_slice(&publics);
         words.extend((0..VADCOP_FINAL_BODY_WORDS).map(|i| (i as u64) % (1 << 31)));
         words.extend_from_slice(&vadcop_vk);
+        words.push(EXPECTED_HASH_TAG);
         assert_eq!(words.len(), PROOF_STREAM_WORDS);
         words
     }
@@ -454,9 +487,26 @@ mod tests {
         let frame = ProofFrame::parse(&words).expect("well-shaped stream parses");
         assert_eq!(frame.program_vk(), &PROGRAM_VK);
         assert_eq!(frame.vadcop_vk(), &VADCOP_VK);
+        assert_eq!(frame.hash_tag(), EXPECTED_HASH_TAG);
         assert_eq!(frame.publics().len(), PUBLICS_WORDS);
         assert_eq!(frame.commitment(), [0x11u8; 32]);
         assert_eq!(frame.words().len(), PROOF_STREAM_WORDS);
+    }
+
+    /// A stream from another hash family (Poseidon2 = 1, blake3 = 2) or with
+    /// a garbage tag is refused: the pinned body size is Poseidon1's, and the
+    /// in-guest verifier would select another verifier from that word.
+    #[test]
+    fn parse_rejects_other_hash_families() {
+        for tag in [1u64, 2, 7] {
+            let mut words = synth_stream(PROGRAM_VK, VADCOP_VK, [1u8; 32]);
+            let last = words.len() - 1;
+            words[last] = tag;
+            assert_eq!(
+                ProofFrame::parse(&words),
+                Err(AggError::BadHashTag { got: tag })
+            );
+        }
     }
 
     #[test]

@@ -28,7 +28,8 @@
 //!
 //! - [`verify_vadcop_final_stream`] (feature `stark-native`): the native,
 //!   pure-Rust verifier for the intermediate `vadcop_final` STARK proof, via
-//!   pil2-proofman's `proofman-verifier`. This IS a full cryptographic check,
+//!   ZiSK's `zisk-verifier` crate (its generated Poseidon1 verifier over
+//!   pil2-proofman's `proofman-verifier`). This IS a full cryptographic check,
 //!   but of the STARK layer, not the PLONK wrap. It applies to the aggregated
 //!   lane's per-batch streams (the prover holds these before it aggregates
 //!   them). The final per-batch PLONK the server submits does not carry the

@@ -9,7 +9,7 @@ name: GPU stack smoke test
 #
 # Dispatch only. It runs on matterlabs-ci-gpu-runner, an ephemeral GKE pod
 # (Docker-in-Docker with the NVIDIA driver, one H100, A100 or L4). Every run
-# downloads the 26 GB of proving keys from Polygon's GCS bucket and rebuilds
+# downloads the 27 GB of proving keys from Polygon's GCS bucket and rebuilds
 # the constant trees, because nothing persists between pods. The run fails
 # fast with a clear message when the runner lacks Docker, GPU containers, or
 # the 70 GB of free disk the keys need.
@@ -77,6 +77,10 @@ jobs:
 
   smoke:
     name: boot the stack and prove one batch through the coordinator
+    # The PLONK wrap needs more than 24 GB of device memory: an L4 cannot run
+    # it. matterlabs-ci-hetzner-rtx6000-gpu is the RTX 6000 Ada (49 GB); the
+    # matterlabs-ci-gpu-runner pool hands out L4s and is used only when the
+    # RTX 6000 is reserved for other work.
     runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
@@ -126,6 +130,9 @@ jobs:
           set -euo pipefail
           KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
           mkdir -p "$KEYS_HOST_DIR"
+          # The prover container runs as the image's zisk user (uid 998) and
+          # writes the proofs into this bind mount, which the runner user owns.
+          chmod -R a+rwX "${GITHUB_WORKSPACE}/bundle/session"
           cat > docker/zisk-stack/.env <<EOT
           ZISK_SEQUENCER_URL=http://unused.invalid:3124
           ZISK_STACK_IMAGE=local/zksync-os-zisk-prover:smoke

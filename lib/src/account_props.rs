@@ -32,6 +32,11 @@
 //! only hashes it, so that change reaches nothing here.
 
 use crate::merkle::AccountProperties;
+// On the ZiSK target the bytecode hash runs on the `blake2sf` precompile
+// through `crate::crypto::blake2s`; the host keeps the `blake2` crate.
+#[cfg(all(target_os = "zkvm", target_vendor = "zisk"))]
+use crate::crypto::blake2s::Blake2s256;
+#[cfg(not(all(target_os = "zkvm", target_vendor = "zisk")))]
 use blake2::{Blake2s256, Digest};
 use revm::primitives::{keccak256, B256};
 

@@ -16,7 +16,7 @@ alloy-primitives = { version = "1", default-features = false, features = ["nativ
 # (Table syntax: the pinned container's cargo 1.87 rejects multi-line
 # inline tables.)
 [dependencies.ziskos]
-version = "=1.2.0-alpha"
+version = "=1.3.0-alpha"
 features = ["zisk-embedded-dlmalloc-alloc"]
 
 [profile.release]

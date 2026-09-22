@@ -8,7 +8,7 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.2.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
+- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.3.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
 - **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the PLONK wrap is verified through the external `snarkjs` executable, which must then be on `PATH`.
 
 ### Architecture
@@ -46,7 +46,7 @@ On an RTX 5090, per-batch proving runs from ~12 s (small batch) to ~80 s (1000-t
 
 ## Prerequisites
 
-- **ZiSK toolchain v1.2.0-alpha** (`ziskup -v 1.2.0-alpha`): `cargo-zisk`, passed as `--zisk-binary`. The coordinator backend uses only its `remote` subcommands, so the CPU build suffices there; the per-proof mode needs the GPU build.
+- **ZiSK toolchain v1.3.0-alpha** (`ziskup -v 1.3.0-alpha`): `cargo-zisk`, passed as `--zisk-binary`. The coordinator backend uses only its `remote` subcommands, so the CPU build suffices there; the per-proof mode needs the GPU build.
 - **ZiSK guest ELFs**: built from `zksync-os-zisk/guest/` and `zksync-os-zisk/guest-aggregator/` via the reproducible builds (`./build-guest.sh`, `./build-aggregator.sh`); their paths are passed as `--elf-path` and `--aggregator-elf`.
 - **STARK proving key**: `~/.zisk/provingKey/` (via `ziskup`), passed as `--proving-key`.
 - **PLONK proving key**: `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`), passed as `--proving-key-plonk`.

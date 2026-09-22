@@ -101,7 +101,7 @@ def render_binding_vector(values: dict) -> str:
         f"commitment_{index} = {value}" for index, value in enumerate(commitments, 1)
     )
     preimage = " ‖ ".join(f"commitment_{index}" for index in range(1, len(commitments) + 1))
-    return f"""## Inputs (real 4-batch aggregation session, ZiSK v1.2.0-alpha, {date})
+    return f"""## Inputs (real 4-batch aggregation session, ZiSK v1.3.0-alpha, {date})
 
 This vector was produced by [fixture-session run]({run_url}) from
 `{metadata['selected_ref']}` at `{metadata['selected_sha']}`. The inputs are
@@ -164,7 +164,7 @@ PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
 
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin` in a separate PR.
+`prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin` in a separate PR.
 """
 
 
@@ -180,7 +180,7 @@ def update_repository(root: Path, values: dict, vadcop: Path) -> None:
     update_rust_vector(
         root / "prover/tests/real_aggregation_vector.rs", values, include_range=False
     )
-    destination = root / "prover/tests/data/real_vadcop_final_zisk_v1.2.0-alpha.bin"
+    destination = root / "prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
     if not vadcop.is_file() or vadcop.stat().st_size == 0:
         raise ValueError(f"{vadcop}: missing vadcop_final fixture")
     shutil.copyfile(vadcop, destination)
