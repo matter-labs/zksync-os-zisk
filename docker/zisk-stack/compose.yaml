@@ -113,7 +113,7 @@ services:
         condition: service_started
     command:
       - zksync-os-zisk-prover-service
-      - --sequencer-url
+      - --sequencer-urls
       - ${ZISK_SEQUENCER_URL:?set ZISK_SEQUENCER_URL in .env}
       - --coordinator-url
       - http://coordinator:7000
