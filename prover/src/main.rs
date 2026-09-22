@@ -113,6 +113,14 @@ struct Args {
     #[arg(long, default_value_t = 5)]
     poll_interval_secs: u64,
 
+    /// Timeout for HTTP requests to a sequencer, in seconds. Must cover a
+    /// pick that downloads a large batch or a range of proof streams and a
+    /// submit that uploads a proof, so it matches the Airbender prover
+    /// service's default rather than a poll-only one. Connecting has its own
+    /// 10 s limit, so an unreachable sequencer fails fast either way.
+    #[arg(long, default_value_t = 300)]
+    request_timeout_secs: u64,
+
     /// Number of proofs to generate before exiting (0 = unlimited).
     #[arg(long, default_value_t = 0)]
     iterations: u64,
@@ -323,10 +331,13 @@ async fn main() -> anyhow::Result<()> {
 
     // One client per sequencer, polled round-robin below. `url()` has the
     // credentials stripped, so the list is safe to log.
+    let request_timeout = Duration::from_secs(args.request_timeout_secs);
     let clients = args
         .sequencer_urls
         .iter()
-        .map(|url| sequencer_client::SequencerClient::new(url, &prover_id, &supported_vks))
+        .map(|url| {
+            sequencer_client::SequencerClient::new(url, &prover_id, &supported_vks, request_timeout)
+        })
         .collect::<anyhow::Result<Vec<_>>>()?;
     tracing::info!(
         sequencers = ?clients.iter().map(|c| c.url()).collect::<Vec<_>>(),
@@ -689,6 +700,24 @@ mod tests {
     #[test]
     fn a_sequencer_is_required() {
         assert!(parse(&[]).is_err());
+    }
+
+    #[test]
+    fn request_timeout_defaults_like_the_airbender_prover_service() {
+        let args = parse(&["--sequencer-urls", "http://a:3124"]).unwrap();
+        assert_eq!(args.request_timeout_secs, 300);
+    }
+
+    #[test]
+    fn request_timeout_can_be_set() {
+        let args = parse(&[
+            "--sequencer-urls",
+            "http://a:3124",
+            "--request-timeout-secs",
+            "60",
+        ])
+        .unwrap();
+        assert_eq!(args.request_timeout_secs, 60);
     }
 
     #[test]

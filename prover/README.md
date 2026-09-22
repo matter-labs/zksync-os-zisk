@@ -133,6 +133,7 @@ cargo run --release -- \
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. Conflicts with `--coordinator-url`. |
 | `--coordinator-url` | (none) | ZiSK coordinator client API URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. |
 | `--work-dir` | `/tmp/zisk_proofs` | Intermediate proof files (cleaned after each proof). |
+| `--request-timeout-secs` | `300` | HTTP timeout per sequencer request, as on the Airbender prover service. Covers a large pick or a proof upload; connecting has a fixed 10 s limit, so an unreachable sequencer fails fast. |
 | `--poll-interval-secs` | `5` | Seconds between polls when no work available. |
 | `--iterations` | `0` | Exit after N proofs (0 = unlimited). |
 | `--supported-vk` | (none) | Advertised combined ZiSK VK hashes. Repeatable. Empty = accept all. |
