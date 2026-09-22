@@ -77,10 +77,11 @@ jobs:
 
   smoke:
     name: boot the stack and prove one batch through the coordinator
-    # TEMPORARY for the 1.3.0-alpha key-pin run: the matterlabs-ci-gpu-runner
-    # pool hands out L4s (23 GB), too small for the PLONK wrap. Revert to
-    # [matterlabs-ci-gpu-runner] after the run.
-    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
+    # The PLONK wrap needs more than 24 GB of device memory: an L4 cannot run
+    # it. matterlabs-ci-hetzner-rtx6000-gpu is the RTX 6000 Ada (49 GB); the
+    # matterlabs-ci-gpu-runner pool hands out L4s and is used only when the
+    # RTX 6000 is reserved for other work.
+    runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
     permissions:
