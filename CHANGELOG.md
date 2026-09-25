@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.0.6](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.5...0.0.6) (2026-09-25)
+
+
+### Features
+
+* move the ZiSK integration to 1.2.0-alpha ([#33](https://github.com/matter-labs/zksync-os-zisk/issues/33)) ([4369c63](https://github.com/matter-labs/zksync-os-zisk/commit/4369c630d265b86fa36618a5e718e24f8d59d63d))
+* move the ZiSK integration to 1.3.0-alpha ([#44](https://github.com/matter-labs/zksync-os-zisk/issues/44)) ([2116cf0](https://github.com/matter-labs/zksync-os-zisk/commit/2116cf0eb21000191cf814ecaf755dc8ca5933f7))
+* **prover:** poll several sequencers round-robin with --sequencer-urls ([#46](https://github.com/matter-labs/zksync-os-zisk/issues/46)) ([fdf9912](https://github.com/matter-labs/zksync-os-zisk/commit/fdf99129e768af52d2b242a19dc99167cd674158))
+* **stack:** zisk-worker-entrypoint installs the keys, then runs the worker ([#47](https://github.com/matter-labs/zksync-os-zisk/issues/47)) ([2ffeb96](https://github.com/matter-labs/zksync-os-zisk/commit/2ffeb96120b2bffe657002363e7d33bf3e49942a))
+
+
+### Bug Fixes
+
+* **prover:** export the daemon metrics, label them by job, add watermarks ([#48](https://github.com/matter-labs/zksync-os-zisk/issues/48)) ([a30b58f](https://github.com/matter-labs/zksync-os-zisk/commit/a30b58fa33996c67e64c8340fc70b21117f4f7f8))
+
 ## [0.0.5](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.4...0.0.5) (2026-09-07)
 
 
