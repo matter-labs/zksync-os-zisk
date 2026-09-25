@@ -18,7 +18,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
 bincode = { version = "2", features = ["serde"] }
 url = "2"
-vise = "0.2"
+vise = "0.3"
 vise-exporter = "0.3"
 # Shared aggregator-guest parsing/constants: the input assembler validates
 # streams with the guest's own parser (host build pulls only tiny-keccak).
