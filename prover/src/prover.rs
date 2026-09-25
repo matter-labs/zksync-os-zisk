@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::metrics::ZISK_PROVER_METRICS;
+use crate::metrics::{Job, ZISK_PROVER_METRICS};
 
 const ZISK_SNARK_PROOF_BYTES: usize = 768;
 // programVK(32, u64 big-endian) + guest publics(512: ziskos's full 64-word
@@ -198,7 +198,14 @@ impl ZiskProver {
             let proof_path = work_dir.join("proof.bin");
             tracing::info!(batch_number, "proving (STARK + PLONK wrap) starting");
             if !self
-                .run_prove(&self.elf_path, &input_path, &proof_path, true, cancel)
+                .run_prove(
+                    Job::Batch,
+                    &self.elf_path,
+                    &input_path,
+                    &proof_path,
+                    true,
+                    cancel,
+                )
                 .await?
             {
                 return Ok(None);
@@ -207,8 +214,14 @@ impl ZiskProver {
         }
         .await;
 
-        self.finish_run(&format!("batch {batch_number}"), &work_dir, start, result)
-            .await
+        self.finish_run(
+            Job::Batch,
+            &format!("batch {batch_number}"),
+            &work_dir,
+            start,
+            result,
+        )
+        .await
     }
 
     /// Generate a per-batch `vadcop_final` proof stream (no PLONK wrap) —
@@ -232,7 +245,14 @@ impl ZiskProver {
             let proof_path = work_dir.join("proof.bin");
             tracing::info!(batch_number, "proving (STARK, vadcop_final kept) starting");
             if !self
-                .run_prove(&self.elf_path, &input_path, &proof_path, false, cancel)
+                .run_prove(
+                    Job::Batch,
+                    &self.elf_path,
+                    &input_path,
+                    &proof_path,
+                    false,
+                    cancel,
+                )
                 .await?
             {
                 return Ok(None);
@@ -241,8 +261,14 @@ impl ZiskProver {
         }
         .await;
 
-        self.finish_run(&format!("batch {batch_number}"), &work_dir, start, result)
-            .await
+        self.finish_run(
+            Job::Batch,
+            &format!("batch {batch_number}"),
+            &work_dir,
+            start,
+            result,
+        )
+        .await
     }
 
     /// Prove an aggregation range: verify the N per-batch `vadcop_final`
@@ -279,7 +305,14 @@ impl ZiskProver {
                 "proving aggregation range (in-zkVM verification + PLONK wrap) starting"
             );
             if !self
-                .run_prove(&aggregator_elf, &input_path, &proof_path, true, cancel)
+                .run_prove(
+                    Job::Range,
+                    &aggregator_elf,
+                    &input_path,
+                    &proof_path,
+                    true,
+                    cancel,
+                )
                 .await?
             {
                 return Ok(None);
@@ -289,6 +322,7 @@ impl ZiskProver {
         .await;
 
         self.finish_run(
+            Job::Range,
             &format!("range {from_batch}..{to_batch}"),
             &work_dir,
             start,
@@ -302,6 +336,7 @@ impl ZiskProver {
     /// Returns `Ok(false)` if cancelled.
     async fn run_prove(
         &self,
+        job: Job,
         elf: &Path,
         input_path: &Path,
         proof_path: &Path,
@@ -330,9 +365,7 @@ impl ZiskProver {
         if !attempt? {
             return Ok(false);
         }
-        ZISK_PROVER_METRICS
-            .prove_time
-            .observe(prove_start.elapsed());
+        ZISK_PROVER_METRICS.prove_time[&job].observe(prove_start.elapsed());
         anyhow::ensure!(proof_path.exists(), "proof file not generated");
         Ok(true)
     }
@@ -344,19 +377,20 @@ impl ZiskProver {
     /// run's dir is removed here.
     async fn finish_run<T>(
         &self,
+        job: Job,
         label: &str,
         work_dir: &Path,
         start: Instant,
         result: anyhow::Result<Option<T>>,
     ) -> anyhow::Result<Option<T>> {
         let elapsed = start.elapsed();
-        ZISK_PROVER_METRICS.proof_generation_time.observe(elapsed);
+        ZISK_PROVER_METRICS.proof_generation_time[&job].observe(elapsed);
         let outcome = match &result {
             Ok(Some(_)) => crate::metrics::ProofOutcome::Success,
             Ok(None) => crate::metrics::ProofOutcome::Cancelled,
             Err(_) => crate::metrics::ProofOutcome::Failure,
         };
-        ZISK_PROVER_METRICS.proofs[&outcome].inc();
+        ZISK_PROVER_METRICS.proofs[&(job, outcome)].inc();
 
         match &result {
             Ok(Some(_)) => {
@@ -1371,6 +1405,7 @@ mod tests {
         let proof_path = base.join("proof.bin");
         let done = prover
             .run_prove(
+                Job::Batch,
                 &elf,
                 &base.join("input.bin"),
                 &proof_path,
@@ -1406,7 +1441,7 @@ mod tests {
         tokio::fs::create_dir_all(&success_dir).await.unwrap();
         let ok: anyhow::Result<Option<()>> = Ok(Some(()));
         prover
-            .finish_run("batch 1", &success_dir, Instant::now(), ok)
+            .finish_run(Job::Batch, "batch 1", &success_dir, Instant::now(), ok)
             .await
             .unwrap();
         assert!(
@@ -1419,7 +1454,7 @@ mod tests {
         tokio::fs::create_dir_all(&failure_dir).await.unwrap();
         let err: anyhow::Result<Option<()>> = Err(anyhow::anyhow!("boom"));
         let _ = prover
-            .finish_run("batch 2", &failure_dir, Instant::now(), err)
+            .finish_run(Job::Batch, "batch 2", &failure_dir, Instant::now(), err)
             .await;
         assert!(failure_dir.exists(), "work dir must survive a failed run");
 
@@ -1428,7 +1463,13 @@ mod tests {
         tokio::fs::create_dir_all(&cancelled_dir).await.unwrap();
         let cancelled: anyhow::Result<Option<()>> = Ok(None);
         prover
-            .finish_run("batch 3", &cancelled_dir, Instant::now(), cancelled)
+            .finish_run(
+                Job::Batch,
+                "batch 3",
+                &cancelled_dir,
+                Instant::now(),
+                cancelled,
+            )
             .await
             .unwrap();
         assert!(

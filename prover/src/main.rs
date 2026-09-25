@@ -19,7 +19,7 @@
 //!   the range's streams inside the aggregator guest, and submits one
 //!   PLONK-wrapped range proof — one ZiSK proof per Airbender SNARK range.
 
-use zksync_os_zisk_prover_service::{prover, sequencer_client};
+use zksync_os_zisk_prover_service::{metrics, prover, sequencer_client};
 
 use clap::Parser;
 use std::path::PathBuf;
@@ -522,6 +522,9 @@ async fn poll_sequencer(
                 prover
                     .cleanup_range_work_dir(job.from_batch, job.to_batch)
                     .await;
+                metrics::ZISK_PROVER_METRICS
+                    .latest_aggregated_batch
+                    .set(job.to_batch);
                 tracing::info!(
                     sequencer,
                     from = job.from_batch,
@@ -646,6 +649,9 @@ async fn poll_sequencer(
         }
     }
     prover.cleanup_batch_work_dir(batch.batch_number).await;
+    metrics::ZISK_PROVER_METRICS
+        .latest_proven_batch
+        .set(batch.batch_number);
     tracing::info!(sequencer, batch = batch.batch_number, "proof submitted");
     Poll::Proved
 }

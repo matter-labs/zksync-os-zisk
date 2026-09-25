@@ -147,11 +147,14 @@ Prometheus metrics are served at `--metrics-address` (default `:3313`):
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `zisk_prover_http_latency` | Histogram | HTTP latency, labelled by method (`pick`, `submit`, `pick_aggregation`, `submit_aggregation`) |
-| `zisk_prover_proof_generation_time` | Histogram | Total proof time per batch or range |
-| `zisk_prover_prove_time` | Histogram | Toolchain prove time (STARK, plus the PLONK wrap where the flow uses it) |
-| `zisk_prover_program_setup_time` | Histogram | One-time per-ELF program setup |
-| `zisk_prover_proofs` | Counter | Proof attempts by outcome (success/failure/cancelled) |
+| `zisk_prover_http_latency_seconds` | Histogram | Sequencer request latency, labelled by `method` (`pick`, `submit`, `pick_aggregation`, `submit_aggregation`); failed requests included |
+| `zisk_prover_http_errors` | Counter | Sequencer requests that failed, by `method`: transport errors and any status other than success or 503 |
+| `zisk_prover_proof_generation_time_seconds` | Histogram | Total proof time (input write + prove + parse), labelled by `job` (`batch`, `range`) |
+| `zisk_prover_prove_time_seconds` | Histogram | Toolchain prove time (STARK, plus the PLONK wrap where the flow uses it), by `job` |
+| `zisk_prover_program_setup_time_seconds` | Histogram | One-time per-ELF program setup |
+| `zisk_prover_proofs` | Counter | Proof attempts by `job` and `outcome` (`success`, `failure`, `cancelled`) |
+| `zisk_prover_latest_proven_batch` | Gauge | Highest batch whose proof this daemon submitted since start; the ZiSK counterpart of `fri_prover_latest_proven_batch` |
+| `zisk_prover_latest_aggregated_batch` | Gauge | Last batch of the most recent aggregation range this daemon submitted since start |
 
 ## Deployment
 

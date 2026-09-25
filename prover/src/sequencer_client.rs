@@ -166,15 +166,38 @@ impl SequencerClient {
         url
     }
 
+    /// Send one request, timing it under `method` and counting it in
+    /// `http_errors` when it fails: a transport error, or any status other
+    /// than success and 503 (the lane is disabled server-side, a normal
+    /// answer while a rollout parks the daemon).
+    async fn send(
+        &self,
+        method: Method,
+        request: reqwest::RequestBuilder,
+    ) -> anyhow::Result<reqwest::Response> {
+        let started_at = Instant::now();
+        let result = request.send().await;
+        ZISK_PROVER_METRICS.http_latency[&method].observe(started_at.elapsed());
+        let failed = match &result {
+            Ok(resp) => {
+                let status = resp.status();
+                !(status.is_success() || status == reqwest::StatusCode::SERVICE_UNAVAILABLE)
+            }
+            Err(_) => true,
+        };
+        if failed {
+            ZISK_PROVER_METRICS.http_errors[&method].inc();
+        }
+        Ok(result?)
+    }
+
     /// Pick the next assigned ZiSK batch from the server.
     ///
     /// Returns `None` if no batches are available.
     pub async fn pick_next_batch(&self) -> anyhow::Result<Option<ZiskBatchData>> {
         let url = self.pick_url("ZiSK/pick");
 
-        let started_at = Instant::now();
-        let resp = self.client.post(url).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::Pick].observe(started_at.elapsed());
+        let resp = self.send(Method::Pick, self.client.post(url)).await?;
 
         if resp.status() == reqwest::StatusCode::NO_CONTENT
             || resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
@@ -219,9 +242,9 @@ impl SequencerClient {
             self.base_url, self.prover_id
         );
 
-        let started_at = Instant::now();
-        let resp = self.client.post(&url).json(&payload).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::Submit].observe(started_at.elapsed());
+        let resp = self
+            .send(Method::Submit, self.client.post(&url).json(&payload))
+            .await?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
@@ -241,9 +264,9 @@ impl SequencerClient {
     ) -> anyhow::Result<Option<ZiskAggregationJobData>> {
         let url = self.pick_url("ZiSK-AGG/pick");
 
-        let started_at = Instant::now();
-        let resp = self.client.post(url).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::PickAggregation].observe(started_at.elapsed());
+        let resp = self
+            .send(Method::PickAggregation, self.client.post(url))
+            .await?;
 
         if resp.status() == reqwest::StatusCode::NO_CONTENT
             || resp.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE
@@ -297,9 +320,12 @@ impl SequencerClient {
             self.base_url, self.prover_id
         );
 
-        let started_at = Instant::now();
-        let resp = self.client.post(&url).json(&payload).send().await?;
-        ZISK_PROVER_METRICS.http_latency[&Method::SubmitAggregation].observe(started_at.elapsed());
+        let resp = self
+            .send(
+                Method::SubmitAggregation,
+                self.client.post(&url).json(&payload),
+            )
+            .await?;
 
         if !resp.status().is_success() {
             let body = resp.text().await.unwrap_or_default();
