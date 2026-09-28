@@ -143,9 +143,10 @@ jobs:
           ALLOW_UNPINNED: ${{ inputs.allow_unpinned_keys && '1' || '0' }}
         run: |
           set -euo pipefail
-          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-2523-keys-${GITHUB_RUN_ID}"
-          mkdir -p "$KEYS_HOST_DIR"
-          chmod a+rwX "$KEYS_HOST_DIR"
+          # Reuse the GPU runner's installed 1.3 keys. They belong to the
+          # container's zisk user; do not chmod them from the host runner.
+          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
+          test -d "$KEYS_HOST_DIR"
           # The prover container runs as the image's zisk user (uid 998) and
           # writes the proofs into this bind mount, which the runner user owns.
           chmod -R a+rwX "${GITHUB_WORKSPACE}/bundle/session"
@@ -186,6 +187,7 @@ jobs:
           until docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
                   cargo-zisk remote --coordinator http://coordinator:7000 setup -e /app/elf/zksync-os-zisk-guest; do
             (( SECONDS < deadline )) || { echo "::error::no worker registered within 30 minutes"; exit 1; }
+            docker compose -f compose.yaml -f compose.ci.yaml logs --tail 15 worker
             echo "worker not ready yet; retrying in 30s"
             sleep 30
           done
