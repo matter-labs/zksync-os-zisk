@@ -54,7 +54,7 @@ jobs:
 
       - name: Build fixture tools
         working-directory: tools/test-utils
-        run: cargo build --release --bin gen_session_inputs
+        run: cargo build --release --bin gen_session_inputs --bin check_binding_digest
 
       - name: Generate the deterministic fixture inputs
         run: tools/test-utils/target/release/gen_session_inputs session
@@ -64,7 +64,8 @@ jobs:
           mkdir -p bundle/out bundle/session bundle/tools
           cp out/zksync-os-zisk-guest out/zksync-os-zisk-guest-aggregator \
              out/zksync-os-zisk-prover-service bundle/out/
-          cp session/batch-1.bin session/input-manifest.json bundle/session/
+          cp session/batch-*.bin session/input-manifest.json bundle/session/
+          cp tools/test-utils/target/release/check_binding_digest bundle/tools/
           cp prover/target/release/aggregator_input prover/target/release/inspect_proof bundle/tools/
           ls -laR bundle
 
@@ -81,7 +82,7 @@ jobs:
     # it. matterlabs-ci-hetzner-rtx6000-gpu is the RTX 6000 Ada (49 GB); the
     # matterlabs-ci-gpu-runner pool hands out L4s and is used only when the
     # RTX 6000 is reserved for other work.
-    runs-on: [matterlabs-ci-gpu-runner]
+    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
     needs: prepare
     timeout-minutes: 240
     permissions:
@@ -178,40 +179,8 @@ jobs:
             sleep 30
           done
 
-      - name: Prove the fixture batch, vadcop_final and PLONK-wrapped
-        working-directory: docker/zisk-stack
-        run: |
-          set -euo pipefail
-          run() {
-            docker compose -f compose.yaml -f compose.ci.yaml run --rm --no-deps prover \
-              cargo-zisk remote --coordinator http://coordinator:7000 prove \
-              -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin --timeout 0 "$@"
-          }
-          run -o /session/proof-vadcop.bin
-          run -o /session/proof-plonk.bin --plonk
-          ls -la "${GITHUB_WORKSPACE}/bundle/session"
-
-      - name: Check the proofs with the host tools
-        run: |
-          set -euo pipefail
-          session="${GITHUB_WORKSPACE}/bundle/session"
-          tools="${GITHUB_WORKSPACE}/bundle/tools"
-          native="$(jq -er '.batches[0].native_commitment' "$session/input-manifest.json")"
-          inner_vk="$(sed 's/#.*//' guest/GUEST_PROGRAM_VK | tr -d '[:space:]')"
-
-          # The vadcop_final proof must parse into the aggregator's stream and
-          # commit the native commitment.
-          "$tools/aggregator_input" -o "$session/agg-input.bin" "$session/proof-vadcop.bin" \
-            2> "$session/aggregator-input.txt"
-          cat "$session/aggregator-input.txt"
-          proved="$(grep -oE 'commitment 0x[0-9a-f]{64}' "$session/aggregator-input.txt" | head -1 | awk '{print $2}')"
-          test "$proved" = "$native"
-          echo "vadcop commitment matches native: $proved"
-
-          # The PLONK proof must carry the pinned inner programVK.
-          "$tools/inspect_proof" "$session/proof-plonk.bin" | tee "$session/plonk-inspect.txt"
-          test "$(grep -m1 '^program_vk' "$session/plonk-inspect.txt" | sed 's/.*= //')" = "$inner_vk"
-          echo "PLONK programVK matches guest/GUEST_PROGRAM_VK"
+      - name: Prove and validate the four-batch contracts fixture
+        run: bash .github/scripts/contracts-fixture-session.sh
 
       - name: Collect stack logs
         if: always()
@@ -226,7 +195,7 @@ jobs:
           name: zisk-stack-smoke-results
           path: |
             stack.log
-            bundle/session/aggregator-input.txt
-            bundle/session/plonk-inspect.txt
+            bundle/session
+            bundle/out/*guest*
           if-no-files-found: ignore
           retention-days: 14
