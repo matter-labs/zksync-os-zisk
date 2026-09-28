@@ -17,6 +17,10 @@ name: GPU stack smoke test
 on:
   workflow_dispatch:
     inputs:
+      preparation_run:
+        description: "Reuse the immutable preparation bundle from a previous fixture run"
+        type: string
+        default: ""
       allow_unpinned_keys:
         description: "Accept PENDING sha256 pins in docker/zisk-stack/keys.sha256 (md5 check only) and print the digests to record"
         type: boolean
@@ -28,6 +32,7 @@ concurrency:
 
 jobs:
   prepare:
+    if: inputs.preparation_run == ''
     name: build ELFs, daemon binary, host tools, and a fixture input
     runs-on: matterlabs-ci-runner-high-performance
     timeout-minutes: 90
@@ -77,6 +82,9 @@ jobs:
           retention-days: 3
 
   smoke:
+    if: always() && !cancelled() && (needs.prepare.result == 'success' || inputs.preparation_run != '')
+    env:
+      COMPOSE_PROJECT_NAME: contracts-2523-${{ github.run_id }}
     name: boot the stack and prove one batch through the coordinator
     # The PLONK wrap needs more than 24 GB of device memory: an L4 cannot run
     # it. matterlabs-ci-hetzner-rtx6000-gpu is the RTX 6000 Ada (49 GB); the
@@ -87,6 +95,7 @@ jobs:
     timeout-minutes: 240
     permissions:
       contents: read
+      actions: read
     defaults:
       run:
         shell: bash
@@ -109,6 +118,8 @@ jobs:
         with:
           name: zisk-stack-smoke-bundle
           path: bundle
+          run-id: ${{ inputs.preparation_run || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Build the stack image from the bundle
         run: |
@@ -132,7 +143,7 @@ jobs:
           ALLOW_UNPINNED: ${{ inputs.allow_unpinned_keys && '1' || '0' }}
         run: |
           set -euo pipefail
-          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-stack-keys"
+          KEYS_HOST_DIR="${RUNNER_TEMP}/zisk-2523-keys-${GITHUB_RUN_ID}"
           mkdir -p "$KEYS_HOST_DIR"
           chmod a+rwX "$KEYS_HOST_DIR"
           # The prover container runs as the image's zisk user (uid 998) and
