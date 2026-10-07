@@ -14,7 +14,7 @@ ruint = { version = "1", default-features = false }
 # ZiSK's own verifier crate: the generated `vadcop_final` verifiers over
 # pil2-proofman's `proofman-verifier`. Renamed because this crate shares its
 # package name.
-zisk-verifier-upstream = { package = "zisk-verifier", version = "=1.3.0-alpha", default-features = false, optional = true }
+zisk-verifier-upstream = { package = "zisk-verifier", version = "=1.3.1-alpha", default-features = false, optional = true }
 zksync-os-zisk-guest-aggregator = { path = "../guest-aggregator", optional = true }
 
 [features]

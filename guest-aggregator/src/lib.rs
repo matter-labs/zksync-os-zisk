@@ -16,7 +16,7 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof (ZiSK v1.3.0-alpha):
+//! `vadcop_final`** proof (ZiSK v1.3.1-alpha):
 //!
 //! ```text
 //! [minimal=0(1)][n_publics=69(1)][is_vadcop_final_proof=1(1)][program_vk(4)]
@@ -106,7 +106,7 @@ pub const IS_VADCOP_FINAL_PROOF: u64 = 1;
 pub const EXPECTED_N_PUBLICS: u64 = (LEAF_FLAG_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
 
 /// u64 words in a non-minimal Poseidon1 `vadcop_final` proof body under the
-/// pinned ZiSK v1.3.0-alpha recursive setup
+/// pinned ZiSK v1.3.1-alpha recursive setup
 /// (`zisk_verifier::expected_proof_bytes("Poseidon1", false) / 8`).
 ///
 /// Part of the proof-format pin: it changes only with a ZiSK / pil2-proofman
