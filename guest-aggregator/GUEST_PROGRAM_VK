@@ -6,11 +6,15 @@
 # ROM image share it.
 # Serialization: the four ROM root-hash u64 limbs, big-endian, in order.
 #
-# PENDING: derived by the Rotate program VK pins workflow on the 1.3.1-alpha
-# ELF, from the reproducible container ELF whose sha256
-# guest-aggregator/GUEST_ELF_SHA256 records:
+# Derived with cargo-zisk 1.3.1-alpha on 2026-10-07 by
+# https://github.com/matter-labs/zksync-os-zisk/actions/runs/37651777050
+# from the reproducible container ELF with sha256
+# 785e8cafb6964e77143eb554d8b588ee10e0fabe36e40e9274f072436f70ec8f:
 #   cargo-zisk setup -e out/zksync-os-zisk-guest-aggregator -k ~/.zisk/provingKey
-PENDING
+#
+# Root hash limbs: [6164019948910977635, 7973810742582399440,
+#                   3461995896039003778, 12431424231396127143]
+0x558aff7c3342a2636ea8aa9f91d151d0300b7aeccd43d682ac854a79548cb1a7
 
 # History: 0x27e68756ce585201b839f16f08d58eab314871d3f7fad020b41061570c7bcf2a
 # (retired 2026-10-07 with the move from ZiSK v1.3.0-alpha to v1.3.1-alpha;
