@@ -291,12 +291,11 @@ pub(super) fn build_verified_accounts(
                     // data and must fail the proof.
                     let props = merkle::AccountProperties::decode(preimage)
                         .expect("account preimage must decode as account properties");
+                    // REVM uses KECCAK_EMPTY internally for every account without code,
+                    // including persisted trivial records. EXTCODEHASH separately checks
+                    // account emptiness and still returns zero for those records.
                     let code_hash = if props.observable_bytecode_hash.is_zero() {
-                        if props.nonce == 0 && props.balance == [0u8; 32] {
-                            B256::ZERO
-                        } else {
-                            KECCAK_EMPTY
-                        }
+                        KECCAK_EMPTY
                     } else {
                         props.observable_bytecode_hash
                     };
@@ -423,4 +422,134 @@ pub(super) fn build_proven_db(input: &BatchInput) -> ProvenDB {
     verify_witness_block_hashes(&input.blocks, meta);
 
     ProvenDB::from_parts(verified_storage, verified_accounts, bytecodes, HashMap::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use revm::{context::TxEnv, database::CacheDB, primitives::address, ExecuteEvm};
+    use zksync_os_revm::{zk_context, ZKsyncTx, ZkBuilder, ZkSpecId};
+
+    const CALLER: Address = address!("0000000000000000000000000000000000100001");
+    const FACTORY: Address = address!("0000000000000000000000000000000000100002");
+
+    // Start at the authenticated account-decoding boundary shared by the collecting
+    // and streaming builders. None models a proven non-existent account.
+    fn db_for_account(address: Address, preimage: Option<Vec<u8>>) -> ProvenDB {
+        let key = merkle::derive_account_properties_key(&address.into_array());
+        let hash = preimage
+            .as_ref()
+            .map(|bytes| merkle::AccountProperties::hash(bytes));
+        let storage = HashMap::from([(key, hash)]);
+        let block = BlockInput {
+            number: 3,
+            timestamp: 3,
+            base_fee: 0,
+            gas_limit: 10_000_000,
+            coinbase: CALLER,
+            prev_randao: B256::ZERO,
+            transactions: vec![],
+            account_preimages: preimage.into_iter().map(|bytes| (address, bytes)).collect(),
+            block_hashes: vec![],
+            storage_proofs: vec![],
+            block_header_hash: B256::ZERO,
+            l2_to_l1_logs: vec![],
+            expected_tree_root: B256::ZERO,
+        };
+        let accounts = build_verified_accounts(&[block], &storage, &HashMap::new());
+        ProvenDB::from_parts(storage, accounts, HashMap::new(), HashMap::new())
+    }
+
+    fn execute_factory(db: ProvenDB, code: Vec<u8>) -> U256 {
+        let mut cache = CacheDB::new(db);
+        cache.insert_account_info(CALLER, AccountInfo::default());
+        cache.insert_account_info(
+            FACTORY,
+            AccountInfo {
+                nonce: 1,
+                code: Some(Bytecode::new_raw(code.into())),
+                ..Default::default()
+            },
+        );
+        let mut evm = zk_context(cache, ZkSpecId::AtlasV4)
+            .modify_block_chained(|block| {
+                block.basefee = 0;
+                block.beneficiary = CALLER;
+            })
+            .build_zk();
+        evm.0.ctx.journaled_state.set_tx_number(0);
+        let tx = ZKsyncTx::builder()
+            .base(
+                TxEnv::builder()
+                    .caller(CALLER)
+                    .to(FACTORY)
+                    .gas_limit(1_000_000)
+                    .gas_price(0),
+            )
+            .tx_hash(B256::repeat_byte(0x17))
+            .build_fill()
+            .unwrap();
+        let result = evm.transact(tx).unwrap().result;
+        assert!(result.is_success(), "{result:?}");
+        U256::from_be_slice(result.output().unwrap())
+    }
+
+    #[test]
+    fn persisted_empty_account_uses_revm_empty_code_hash() {
+        let db = db_for_account(FACTORY, Some(vec![0; 124]));
+        let info = db.basic_ref(FACTORY).unwrap().unwrap();
+        assert_eq!(info.code_hash, KECCAK_EMPTY);
+        assert!(info.is_empty());
+        // Native code fields stay byte-for-byte empty for post-state verification.
+        assert_eq!(db.pre_state_code_fields(&FACTORY), CodeFields::empty());
+        assert!(db_for_account(FACTORY, None)
+            .basic_ref(FACTORY)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn create2_redeploys_over_a_persisted_empty_account() {
+        let mut initcode = vec![0x73]; // PUSH20 beneficiary; SELFDESTRUCT
+        initcode.extend_from_slice(CALLER.as_slice());
+        initcode.push(0xff);
+        let child = FACTORY.create2_from_code(B256::ZERO, &initcode);
+        // Native persisted this trivial record after creating and destroying
+        // the prefunded child in an earlier batch. Reload it through ProvenDB.
+        let db = db_for_account(child, Some(vec![0; 124]));
+        let len = initcode.len() as u8;
+        // CODECOPY initcode; CREATE2 with zero salt/value; return its address.
+        let mut code = vec![
+            0x60, len, 0x60, 0, 0x5f, 0x39, 0x5f, 0x60, len, 0x5f, 0x5f, 0xf5, 0x5f, 0x52, 0x60,
+            0x20, 0x5f, 0xf3,
+        ];
+        code[3] = code.len() as u8;
+        code.extend_from_slice(&initcode);
+        assert_eq!(
+            execute_factory(db, code),
+            U256::from_be_slice(child.as_slice())
+        );
+    }
+
+    #[test]
+    fn extcodehash_distinguishes_empty_accounts_from_funded_codeless_accounts() {
+        let target = address!("0000000000000000000000000000000000100003");
+        let mut code = vec![0x73]; // PUSH20 target; EXTCODEHASH; return its value
+        code.extend_from_slice(target.as_slice());
+        code.extend_from_slice(&[0x3f, 0x5f, 0x52, 0x60, 0x20, 0x5f, 0xf3]);
+        assert_eq!(
+            execute_factory(db_for_account(target, None), code.clone()),
+            U256::ZERO
+        );
+        assert_eq!(
+            execute_factory(db_for_account(target, Some(vec![0; 124])), code.clone()),
+            U256::ZERO
+        );
+        let mut funded = vec![0; 124];
+        funded[47] = 1; // balance = 1 wei
+        assert_eq!(
+            execute_factory(db_for_account(target, Some(funded)), code),
+            U256::from_be_slice(KECCAK_EMPTY.as_slice())
+        );
+    }
 }

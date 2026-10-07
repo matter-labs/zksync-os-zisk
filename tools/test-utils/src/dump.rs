@@ -312,12 +312,10 @@ impl revm::DatabaseRef for RecordingDb {
         let Some(props) = self.read_account_props(address)? else {
             return Ok(None);
         };
+        // Match ProvenDB's internal no-code representation, including trivial
+        // records, so tracking follows the same CREATE/CREATE2 paths as the guest.
         let code_hash = if props.observable_bytecode_hash.is_zero() {
-            if props.nonce == 0 && props.balance == [0u8; 32] {
-                B256::ZERO
-            } else {
-                KECCAK_EMPTY
-            }
+            KECCAK_EMPTY
         } else {
             props.observable_bytecode_hash
         };
@@ -1082,6 +1080,30 @@ pub fn build_batch_input(d: &StateDumpBundle, header_hash_check: HeaderHashCheck
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn recording_db_normalizes_persisted_empty_accounts() {
+        use revm::DatabaseRef;
+
+        let address = Address::repeat_byte(0x42);
+        let key = derive_account_properties_key(&address.into_array());
+        let preimage = vec![0; 124];
+        let hash = AccountProperties::hash(&preimage);
+        let rec = RecordingDb {
+            storage: HashMap::from([(key, hash)]),
+            preimages: HashMap::from([(hash, preimage)]),
+            code: HashMap::new(),
+            block_hashes: HashMap::new(),
+            read_slots: RefCell::new(BTreeSet::new()),
+            read_accounts: RefCell::new(BTreeSet::new()),
+        };
+        let info = rec.basic_ref(address).unwrap().unwrap();
+        assert_eq!(info.code_hash, KECCAK_EMPTY);
+        assert!(info.is_empty());
+        assert!(rec.read_accounts.borrow().contains(&address));
+        assert!(rec.read_slots.borrow().contains(&key));
+        assert!(rec.basic_ref(Address::ZERO).unwrap().is_none());
+    }
 
     fn synthetic_bundle_json() -> String {
         let zero = "00".repeat(32);
