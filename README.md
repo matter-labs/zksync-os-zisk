@@ -45,7 +45,7 @@ Each `programVK` pinned on L1 and in the server's drift tripwires is the ROM
 merkle root of a guest ELF, so a given source revision must map to exactly
 one binary. `docker/guest-builder.Dockerfile` and
 `docker/aggregator-builder.Dockerfile` pin everything that influences the
-build: the base image, the cargo-zisk release (v1.3.0-alpha) and the ZiSK
+build: the base image, the cargo-zisk release (v1.3.1-alpha) and the ZiSK
 Rust toolchain it installs (zisk-4.0.0, sha256-pinned, with the cargo that
 orchestrates the build), the committed `Cargo.lock`, and a fixed `/build`
 source path.
@@ -117,8 +117,8 @@ in the server's compiled release registry and in the L1 verifier.
 
 ## Development
 
-The ZiSK toolchain is pinned at v1.3.0-alpha. Install it with
-`ziskup -v 1.3.0-alpha`.
+The ZiSK toolchain is pinned at v1.3.1-alpha. Install it with
+`ziskup -v 1.3.1-alpha`.
 
 ```bash
 # Run lib tests (includes the proven-path end-to-end tests)

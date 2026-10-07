@@ -46,7 +46,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.19.9
-      # zisk-verifier 1.3.0-alpha (the pin cross-check dev-dependency) depends
+      # zisk-verifier 1.3.1-alpha (the pin cross-check dev-dependency) depends
       # through proofman-fields, unconditionally on x86_64, on
       # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
       # cargo builds. These packages are that build's inputs (nasm for the
@@ -150,7 +150,7 @@ jobs:
       # of the reproducible guest builds, so CI holds it to the strict bar. The
       # --all-features run also builds the stark-native path (ZiSK's
       # zisk-verifier crate) and runs the real-fixture vadcop_final STARK test.
-      # zisk-verifier 1.3.0-alpha depends through proofman-fields,
+      # zisk-verifier 1.3.1-alpha depends through proofman-fields,
       # unconditionally on x86_64, on
       # proofman-starks-lib-c, which compiles the pil2-stark C++ library while
       # cargo builds. These packages are that build's inputs (nasm for the

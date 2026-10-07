@@ -26,12 +26,12 @@
 # mounts at run time, so the base is plain Ubuntu. The proving keys are NOT
 # in the image (27 GB compressed); see README.md next to this file.
 
-ARG ZISK_VERSION=1.3.0-alpha
-# sha256 of the v1.3.0-alpha cargo_zisk_linux_amd64.tar.gz release asset
-# (released 2026-09-21, tag commit 02d2ae7b). The toolchain stage refuses to
+ARG ZISK_VERSION=1.3.1-alpha
+# sha256 of the v1.3.1-alpha cargo_zisk_linux_amd64.tar.gz release asset
+# (released 2026-09-30, from two full downloads). The toolchain stage refuses to
 # build while this reads PENDING, and `sha256sum -c` rejects a tarball whose
 # digest differs, so a stale value cannot ship silently.
-ARG ZISK_TARBALL_SHA256=39e87f6c28eabc6de1226b1106054d61e6c03188bcdd94ac1d067c58b40145ca
+ARG ZISK_TARBALL_SHA256=13e590784e79a195db7e85465eef75e0820be7148d12f829e478047542aadef8
 ARG UBUNTU_TAG=24.04
 
 # ---------------------------------------------------------------------------
