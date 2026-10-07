@@ -283,6 +283,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # The prover's zisk-verifier dev-dependency compiles the pil2-stark C++
+      # library on x86_64 (see ci.yaml); without these inputs `cargo test` fails
+      # to build and the fixture never publishes.
+      - run: >
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends
+          build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
+          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
+          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
+          protobuf-compiler libgrpc++-dev
+
       - name: Test the updated aggregator vector
         working-directory: guest-aggregator
         run: cargo test
