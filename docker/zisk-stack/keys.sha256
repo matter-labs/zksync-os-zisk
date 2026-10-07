@@ -6,19 +6,19 @@
 # accepted only with ZISK_KEYS_ALLOW_UNPINNED=1, in which case the step
 # prints the digest it observed so it can be recorded here and reviewed.
 #
-# The 1.3.1-alpha tarballs (last modified 2026-09-29, md5 sidecars present)
-# are recorded from the gpu-stack-smoke run with allow_unpinned_keys=true,
-# which prints the digest it observed against the bucket md5 sidecar. Note
-# that the bucket also serves a zisk-provingkey-<version>.hash file; its value
-# is NOT the sha256 of the tarball and must not be used as a pin. The bucket
-# also holds zisk-provingkey-<version>-blake3.tar.gz, the blake3-family key;
-# this lane proves under the default Poseidon1 key, the only family with a
-# PLONK setup.
+# The 1.3.1-alpha pins were recorded on 2026-10-07 from the gpu-stack-smoke
+# run 37653982860 with allow_unpinned_keys=true, whose full downloads matched
+# the bucket md5 sidecars (tarballs last modified 2026-09-29). Note that the
+# bucket also serves a zisk-provingkey-<version>.hash file; its value is NOT
+# the sha256 of the tarball and must not be used as a pin. The bucket also
+# holds zisk-provingkey-<version>-blake3.tar.gz, the blake3-family key; this
+# lane proves under the default Poseidon1 key, the only family with a PLONK
+# setup.
 #
 # Format: <sha256 or PENDING>  <tarball file name>
 
-PENDING  zisk-provingkey-1.3.1-alpha.tar.gz
-PENDING  zisk-provingkey-plonk-1.3.1-alpha.tar.gz
+fbd1679b0209db922254d27706ced05fe2890aad1e29311b05110cc5ec91d113  zisk-provingkey-1.3.1-alpha.tar.gz
+1ba770d09f3685004f7ff3b5a88a21f7147aaaf0056da9223ddaf8f19da18af6  zisk-provingkey-plonk-1.3.1-alpha.tar.gz
 
 # History (ZiSK v1.3.0-alpha, retired 2026-10-07; recorded 2026-09-22 from two
 # independent full downloads matching the bucket md5 sidecars
