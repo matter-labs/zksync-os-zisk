@@ -4,6 +4,11 @@ name: Fixture session
 # is added for the required pre-merge GPU validation, then removed again.
 on:
   workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Branch the publish job checks out and the fixture PR targets (default the dispatched ref, so a toolchain bump publishes onto its own branch)
+        required: false
+        type: string
 
 concurrency:
   group: fixture-session-${{ github.ref }}
@@ -240,13 +245,13 @@ jobs:
       contents: write
       pull-requests: write
     env:
-      BASE_REF: main
+      BASE_REF: ${{ inputs.base_ref || github.ref_name }}
       AUTOMATION_BRANCH: automation/fixture-session
     steps:
       - name: Checkout the publication base
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.base_ref || github.ref_name }}
           fetch-depth: 0
           # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
           # checkout's GITHUB_TOKEN override that URL credential.
