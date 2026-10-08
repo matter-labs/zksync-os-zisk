@@ -215,11 +215,10 @@ mod tests {
     /// binding-vector range) must load unchanged — the regression anchor
     /// for the stream framing accepted by the in-guest verifier.
     #[test]
-    #[ignore = "PENDING: real ZiSK v1.3.0-alpha vadcop_final fixture from fixture-session.yaml"]
     fn load_accepts_the_real_vadcop_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
+            "/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin"
         );
         let loaded = load_proof_stream(Path::new(path)).unwrap();
         assert!(!loaded.is_empty());

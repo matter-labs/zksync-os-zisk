@@ -266,11 +266,10 @@ mod tests {
     /// binding-vector range) must verify natively. This is a full STARK
     /// verification, no external tooling.
     #[test]
-    #[ignore = "PENDING: real ZiSK v1.3.0-alpha vadcop_final fixture from fixture-session.yaml"]
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
+            "/../prover/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin"
         );
         let bytes = std::fs::read(path).expect("read committed vadcop_final fixture");
         assert_eq!(verify_vadcop_final_proof_file(&bytes), Ok(()));

@@ -88,7 +88,7 @@ class FixturePublicationTests(unittest.TestCase):
         # The destination may not exist in the repository yet (a new ZiSK
         # version's first session publishes it), so seed the temporary copy
         # instead of copying the repository file.
-        vadcop = self.root / "prover/tests/data/real_vadcop_final_zisk_v1.3.0-alpha.bin"
+        vadcop = self.root / "prover/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin"
         vadcop.parent.mkdir(parents=True, exist_ok=True)
         vadcop.write_bytes(b"previous proof")
         source_vadcop = self.root / "new-vadcop.bin"

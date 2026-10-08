@@ -571,7 +571,7 @@ async fn run_cancellable(
 // zisk-common's `Proof` struct. Rather than depending on zisk-common (which
 // pulls in the whole proofman stack), we mirror the exact struct shapes and
 // deserialize with serde + bincode 2. Shapes must match
-// zisk@v1.3.0-alpha `common/src/proof.rs` field-for-field (unchanged since
+// zisk@v1.3.1-alpha `common/src/proof.rs` field-for-field (unchanged since
 // v1.2.0-alpha; that release changed only the serialized `get_proof_bytes()`
 // stream, which gained the trailing hash-family tag).
 //
@@ -901,8 +901,8 @@ mod tests {
     }
 
     /// The specimens are ZiSK v1.2.0-alpha PLONK files. The bincode `Proof`
-    /// shape is unchanged in v1.3.0-alpha (only the serialized vadcop stream
-    /// changed), so they stay valid shape regressions until v1.3.0-alpha
+    /// shape is unchanged since v1.3.0-alpha (only the serialized vadcop stream
+    /// changed), so they stay valid shape regressions until v1.3.1-alpha
     /// specimens from a fixture session replace them.
     #[test]
     fn parses_real_alpha_plonk_files_with_recursion_flag() {

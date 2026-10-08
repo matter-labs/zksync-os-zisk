@@ -16,7 +16,7 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof (ZiSK v1.3.0-alpha):
+//! `vadcop_final`** proof (ZiSK v1.3.1-alpha):
 //!
 //! ```text
 //! [minimal=0(1)][n_publics=69(1)][is_vadcop_final_proof=1(1)][program_vk(4)]
@@ -106,7 +106,7 @@ pub const IS_VADCOP_FINAL_PROOF: u64 = 1;
 pub const EXPECTED_N_PUBLICS: u64 = (LEAF_FLAG_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
 
 /// u64 words in a non-minimal Poseidon1 `vadcop_final` proof body under the
-/// pinned ZiSK v1.3.0-alpha recursive setup
+/// pinned ZiSK v1.3.1-alpha recursive setup
 /// (`zisk_verifier::expected_proof_bytes("Poseidon1", false) / 8`).
 ///
 /// Part of the proof-format pin: it changes only with a ZiSK / pil2-proofman
@@ -762,9 +762,9 @@ mod tests {
     #[test]
     fn cross_stack_binding_vector() {
         const INNER_PROGRAM_VK: &str =
-            "189d6b11c50ef1db9885fed376479ed97dde719a59574a7946d8d612e25da97a";
+            "93172dbe40432534d5ad84e95b3d2324c6e9a28c1fbd6b770776e4c8d31ec4b9";
         const ROOT_C_VADCOP_FINAL: &str =
-            "564c2b1bcbd5932c81cfad1fa786a98372eb3d6495257c2d944544334f84382f";
+            "c3f12b9f8707c6a1e96df2bf6702c2ebdfbafedabeac654644a380befe091ac4";
         const COMMITMENTS: [&str; 4] = [
             "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
             "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
@@ -774,7 +774,7 @@ mod tests {
         const RANGE_PUBLIC_INPUT: &str =
             "00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5";
         const DIGEST: &str =
-            "77808e06c21c5f1608738e0345b0074f0bc67ef937abfc873b2499eab7953ce4";
+            "3d7f030cacc8d291c78c7550d5f0c7cbc5fa54095165dda50f899d8eb3809bcd";
 
         let program_vk = vk_words(unhex32(INNER_PROGRAM_VK));
         let vadcop_vk = vk_words(unhex32(ROOT_C_VADCOP_FINAL));

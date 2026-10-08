@@ -39,7 +39,7 @@ ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 # reference floats. A newer toolchain release can drop the link script from
 # the target, so the guest fails to link and the recorded ELF stops
 # reproducing. Pin the toolchain to the release that matches cargo-zisk
-# 1.3.0-alpha (zisk-4.0.0: rustc 1.94.0-dev, LLVM 21.1.8). Download the exact
+# 1.3.1-alpha (zisk-4.0.0, unchanged: rustc 1.94.0-dev, LLVM 21.1.8). Download the exact
 # artifact, verify its sha256, and hand it to `toolchain install` through
 # ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then installs from the local file and
 # makes no network fetch, so the toolchain no longer floats.
@@ -47,7 +47,7 @@ ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 # The cargo-zisk tarball below is the v${ZISK_VERSION} GitHub release asset;
 # `cargo-zisk build` only orchestrates `cargo +zisk build`, so the CPU build
 # of the tarball is all this image needs from it.
-ARG ZISK_VERSION=1.3.0-alpha
+ARG ZISK_VERSION=1.3.1-alpha
 ARG ZISK_TOOLCHAIN_TAG=zisk-4.0.0
 ARG ZISK_TOOLCHAIN_SHA256=c4c44b5612dd025f630c2f984ae5f8a862b885c4b14bfc57c980eb8073b8cf62
 RUN curl -fsSL -o /tmp/cargo_zisk.tar.gz \
