@@ -901,7 +901,7 @@ mod tests {
     }
 
     /// The specimens are ZiSK v1.2.0-alpha PLONK files. The bincode `Proof`
-    /// shape is unchanged since v1.3.0-alpha (only the serialized vadcop stream
+    /// shape is unchanged in v1.3.1-alpha (only the serialized vadcop stream
     /// changed), so they stay valid shape regressions until v1.3.1-alpha
     /// specimens from a fixture session replace them.
     #[test]
