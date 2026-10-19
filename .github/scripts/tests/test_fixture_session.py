@@ -52,7 +52,7 @@ def values() -> dict:
             "batches": [
                 {
                     "input_filename": f"batch-{index}.bin",
-                    "wire_version": 5,
+                    "wire_version": 6,
                     "spec_id": 3,
                     "protocol_version_minor": 32,
                     "framed_input_sha256": f"{index}" * 64,
@@ -96,7 +96,7 @@ class FixturePublicationTests(unittest.TestCase):
 
         fixture_session.update_repository(self.root, values(), source_vadcop)
 
-        self.assertIn("wire-v5 protocol-v32", doc.read_text())
+        self.assertIn("wire-v6 protocol-v32", doc.read_text())
         self.assertIn("AtlasV4 fixtures", doc.read_text())
         self.assertIn(word(0x31)[2:], guest.read_text())
         self.assertIn(word(0x41)[2:], guest.read_text())
