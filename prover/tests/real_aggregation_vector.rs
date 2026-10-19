@@ -9,10 +9,9 @@
 //!   UNCONDITIONALLY against the committed batch-1 fixture
 //!   (`tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin`), so a normal CI run
 //!   verifies the pinned `innerProgramVK`, `rootCVadcopFinal`, and
-//!   `commitment_1` rather than passing while checking nothing. It is
-//!   `#[ignore]`d until the fixture-session workflow publishes the
-//!   v1.3.2-alpha fixture and rotates the constants below (they hold the
-//!   v1.3.1-alpha session's values).
+//!   `commitment_1` rather than passing while checking nothing. The fixture
+//!   and the constants below come from the 2026-10-19 fixture session
+//!   (ZiSK v1.3.2-alpha); `guest-aggregator/BINDING_VECTOR.md` records it.
 //! - [`real_proofs_reproduce_binding_vector`] reproduces the full 4-batch
 //!   range digest, but the other three ~370 KB proofs live outside the
 //!   repo; point `ZISK_AGG_SESSION_DIR` at a directory holding
@@ -22,16 +21,16 @@
 use zksync_os_zisk_guest_aggregator as agg;
 use zksync_os_zisk_prover_service::aggregator_input::load_proof_stream;
 
-const INNER_PROGRAM_VK: &str = "93172dbe40432534d5ad84e95b3d2324c6e9a28c1fbd6b770776e4c8d31ec4b9";
+const INNER_PROGRAM_VK: &str = "c883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f";
 const ROOT_C_VADCOP_FINAL: &str =
-    "c3f12b9f8707c6a1e96df2bf6702c2ebdfbafedabeac654644a380befe091ac4";
+    "6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265";
 const COMMITMENTS: [&str; 4] = [
     "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
     "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
     "d5a7b4485d1aece18348655132e73c86b23fa0f251adb173f80123d05a914f15",
     "c5ed165443011bac65df4d0f4240de3429c033996e9fce630a631e117537cd61",
 ];
-const DIGEST: &str = "3d7f030cacc8d291c78c7550d5f0c7cbc5fa54095165dda50f899d8eb3809bcd";
+const DIGEST: &str = "975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -52,7 +51,6 @@ fn vk_hex(words: &[u64]) -> String {
 /// `real_proof_parse.rs` and guarantees a green CI run has actually checked
 /// the shared wire constants the L1 range verifier depends on.
 #[test]
-#[ignore = "PENDING: real ZiSK v1.3.2-alpha vadcop_final fixture from fixture-session.yaml"]
 fn binding_vector_batch1_matches_committed_fixture() {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
