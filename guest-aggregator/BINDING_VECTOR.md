@@ -42,10 +42,10 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
 The settlement layer rejects a non-zero carried hash, so a range carries
 no continuation input.
 
-## Inputs (real 4-batch aggregation session, ZiSK v1.3.1-alpha, 2026-10-07)
+## Inputs (real 4-batch aggregation session, ZiSK v1.3.2-alpha, 2026-10-19)
 
-This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/37659618382) from
-`aba/zisk-1.3.1-revm-0.3.3` at `c6afaa3afab8df9ecc5a0e184c0a5a7a5b6e7c77`. The inputs are
+This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/39233983801) from
+`feat/zisk-1.3.2-alpha` at `52cfa36c05cf09d6433d8912b3f8c523f7b50630`. The inputs are
 deterministic wire-v5 protocol-v32 AtlasV4 fixtures (wire version 5, spec ID 3,
 protocol minor 32), encoded by `tools/test-utils` and executed natively through
 the version-dispatching bincode entry point. They carry the four-word public
@@ -57,8 +57,8 @@ in batch order, with the commitments extracted from all four guest proofs
 before PLONK wrapping or recursive proving. All four pairs were equal.
 
 Session data: inner ELF SHA-256
-`00ae72a83e2c74af0d06c588b965c5064ca17abde860c735d5495c324fa92623`, aggregator ELF SHA-256
-`785e8cafb6964e77143eb554d8b588ee10e0fabe36e40e9274f072436f70ec8f`.
+`81deb9c3dde386dd9c4baa0022708d7f8f9b12d39d59adbec2184ec3518bc6aa`, aggregator ELF SHA-256
+`2c32095410aa67c1bb08119212ab12ef23dece381d576a087e44078795c7b126`.
 
 Framed inputs:
 
@@ -68,8 +68,8 @@ Framed inputs:
 - `batch-4.bin`: framed SHA-256 `72b7f175f112ea7f3f3645cafbc4614f82d4378efd1b35b8523a7c77e2839781`
 
 ```text
-innerProgramVK   = 0x93172dbe40432534d5ad84e95b3d2324c6e9a28c1fbd6b770776e4c8d31ec4b9
-rootCVadcopFinal = 0xc3f12b9f8707c6a1e96df2bf6702c2ebdfbafedabeac654644a380befe091ac4
+innerProgramVK   = 0xc883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f
+rootCVadcopFinal = 0x6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265
 ```
 
 Batch commitments, in order:
@@ -100,15 +100,15 @@ formula.
 
 ```text
 rangePublicInput = 0x00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5
-digest           = 0x3d7f030cacc8d291c78c7550d5f0c7cbc5fa54095165dda50f899d8eb3809bcd
+digest           = 0x975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf
 ```
 
 The real aggregated proof of this range commits the same digest: the
 PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
 `digest`, bytes `[0..32]` equal to the aggregator programVK
-`0x558aff7c3342a2636ea8aa9f91d151d0300b7aeccd43d682ac854a79548cb1a7`, and bytes `[544..576]` equal to
+`0x9e2ea93a5e08c2ddb5b93323a593ada955dc74d00fac433d45c97da5b90e5e08`, and bytes `[544..576]` equal to
 `rootCVadcopFinal`.
 
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin` in a separate PR.
+`prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin` in a separate PR.

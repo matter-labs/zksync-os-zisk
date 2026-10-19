@@ -218,7 +218,7 @@ mod tests {
     fn load_accepts_the_real_vadcop_fixture() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin"
+            "/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin"
         );
         let loaded = load_proof_stream(Path::new(path)).unwrap();
         assert!(!loaded.is_empty());
