@@ -111,4 +111,4 @@ PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
 
 The fixture publisher automatically updates this document,
 `guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.3.1-alpha.bin` in a separate PR.
+`prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin` in a separate PR.

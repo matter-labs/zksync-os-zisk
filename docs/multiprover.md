@@ -251,14 +251,14 @@ is caught at the layer that notices first:
 | `rootCVadcopFinal` | ZiSK vadcop-final circuit VK | server release manifest, L1 `ZiskVerifier.rootCVadcopFinal()`, binding digest |
 | ZiSK VK hash | `keccak256` over the three pins above, in that order | server capability registry and startup check, L1 `ZiskVerifier.verificationKeyHash()` |
 
-Current values, with ZiSK v1.3.1-alpha:
+Current values, with ZiSK v1.3.2-alpha:
 
 ```text
 guest ELF sha256      = pending the reproducible build (guest/GUEST_ELF_SHA256)
 guest programVK       = pending the rotation workflow (guest/GUEST_PROGRAM_VK)
 aggregator ELF sha256 = pending the reproducible build (guest-aggregator/GUEST_ELF_SHA256)
 aggregator programVK  = pending the rotation workflow (guest-aggregator/GUEST_PROGRAM_VK)
-rootCVadcopFinal      = 0xc3f12b9f8707c6a1e96df2bf6702c2ebdfbafedabeac654644a380befe091ac4
+rootCVadcopFinal      = 0x6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265
 ```
 
 The programVKs derive from the exact ELF bytes, so guest binaries come from
