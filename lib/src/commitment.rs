@@ -268,29 +268,76 @@ pub fn batch_output_hash_native(
     keccak256(&data)
 }
 
+/// The chain-config preimage layout a spec commits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ChainConfigLayout {
+    /// AtlasV4: `(chain_id, fri_proof_verification_enabled, max_tx_gas_limit,
+    /// pubdata_content)`.
+    AtlasV4,
+    /// AtlasV5 (ZKsync OS 0.6.0): the AtlasV4 words followed by
+    /// `l1_tx_filtering_enabled` and `large_contracts_enabled`.
+    AtlasV5,
+}
+
+/// The chain-config fields [`chain_config_hash`] commits.
+#[derive(Clone, Copy, Debug)]
+pub struct ChainConfig {
+    pub chain_id: u64,
+    pub fri_proof_verification_enabled: bool,
+    pub max_tx_gas_limit: u64,
+    pub pubdata_content: u8,
+    pub l1_tx_filtering_enabled: bool,
+    pub large_contracts_enabled: bool,
+}
+
+impl ChainConfig {
+    /// The chain config `input` commits: the chain id of the batch and the
+    /// chain-config fields of its `BatchMeta`.
+    pub fn of_batch(input: &crate::types::BatchInput) -> Self {
+        let meta = &input.batch_meta;
+        Self {
+            chain_id: input.chain_id,
+            fri_proof_verification_enabled: meta.fri_proof_verification_enabled,
+            max_tx_gas_limit: meta.max_tx_gas_limit,
+            pubdata_content: meta.pubdata_content,
+            l1_tx_filtering_enabled: meta.l1_tx_filtering_enabled,
+            large_contracts_enabled: meta.large_contracts_enabled,
+        }
+    }
+}
+
 /// Canonical keccak256 commitment to the chain config, matching zksync-os
-/// `ChainConfig::hash` (zk_ee .../metadata/chain_config.rs):
-///   chain_id (uint256 BE), fri_proof_verification_enabled (32-byte word,
-///   last byte 0/1), max_tx_gas_limit (u64 BE, right-aligned in a 32-byte
-///   word), pubdata_content (32-byte word, last byte the mode id).
+/// `ChainConfig::hash` (zk_ee .../metadata/chain_config.rs) of the spec's
+/// release. One 32-byte word per field, in [`ChainConfigLayout`] order:
+///   chain_id (uint256 BE), fri_proof_verification_enabled (last byte 0/1),
+///   max_tx_gas_limit (u64 BE, right-aligned), pubdata_content (last byte the
+///   mode id), and from AtlasV5 l1_tx_filtering_enabled and
+///   large_contracts_enabled (last byte 0/1 each). The AtlasV4 layout leaves
+///   the two flags out.
 ///
-/// era-contracts `Executor._getBatchProofPublicInputZKsyncOS` holds the same
+/// era-contracts `ZKChainBase._getZKsyncOSChainConfigHash` holds the same
 /// encoding, so L1 can gate the two proving lanes against each other.
-pub fn chain_config_hash(
-    chain_id: u64,
-    fri_proof_verification_enabled: bool,
-    max_tx_gas_limit: u64,
-    pubdata_content: u8,
-) -> B256 {
-    let mut data = [0u8; 128];
-    // chain_id as U256 BE
-    data[24..32].copy_from_slice(&chain_id.to_be_bytes());
-    // fri word: last byte 0/1
-    data[63] = u8::from(fri_proof_verification_enabled);
-    // max_tx_gas_limit right-aligned in the third 32-byte word
-    data[88..96].copy_from_slice(&max_tx_gas_limit.to_be_bytes());
-    // pubdata_content mode id in the last byte of the fourth 32-byte word
-    data[127] = pubdata_content;
+pub fn chain_config_hash(layout: ChainConfigLayout, config: &ChainConfig) -> B256 {
+    let flag_word = |flag: bool| {
+        let mut word = [0u8; 32];
+        word[31] = u8::from(flag);
+        word
+    };
+    let mut data = Vec::with_capacity(192);
+    let mut chain_id_word = [0u8; 32];
+    chain_id_word[24..].copy_from_slice(&config.chain_id.to_be_bytes());
+    data.extend_from_slice(&chain_id_word);
+    data.extend_from_slice(&flag_word(config.fri_proof_verification_enabled));
+    let mut max_tx_gas_limit_word = [0u8; 32];
+    max_tx_gas_limit_word[24..].copy_from_slice(&config.max_tx_gas_limit.to_be_bytes());
+    data.extend_from_slice(&max_tx_gas_limit_word);
+    let mut pubdata_content_word = [0u8; 32];
+    pubdata_content_word[31] = config.pubdata_content;
+    data.extend_from_slice(&pubdata_content_word);
+    if layout == ChainConfigLayout::AtlasV5 {
+        data.extend_from_slice(&flag_word(config.l1_tx_filtering_enabled));
+        data.extend_from_slice(&flag_word(config.large_contracts_enabled));
+    }
     keccak256(&data)
 }
 
@@ -364,8 +411,8 @@ pub fn da_commitment_blobs(versioned_hashes: &[B256]) -> B256 {
 ///
 /// - AtlasV1 through AtlasV3 (`chain_config_hash = None`): three words,
 ///   `keccak256(state_before ‖ state_after ‖ batch_output_hash)`.
-/// - AtlasV4 (`chain_config_hash = Some(..)`): four words, with the chain-config
-///   commitment as the third.
+/// - AtlasV4 onwards (`chain_config_hash = Some(..)`): four words, with the
+///   chain-config commitment as the third.
 ///
 /// The caller passes the option so the layout choice stays a single explicit
 /// decision at the spec gate.
@@ -453,30 +500,25 @@ mod tests {
         }
     }
 
-    /// Native's own golden vector for `ChainConfig::hash`
-    /// (`.../zk/post_tx_op/public_input.rs`, `chain_config_hash_golden_vector`):
-    /// chain id 37, FRI proof verification disabled, the EIP-7825 default
-    /// per-transaction gas cap and full pubdata. era-contracts
-    /// `Executor._getBatchProofPublicInputZKsyncOS` pins the same value, so a
-    /// move here must move there too.
-    #[test]
-    fn chain_config_matches_the_native_golden_vector() {
-        let expected: B256 =
-            "0x9bba8b838beaad59a5dec253b49be1f496d47df8c2086b561298cae2cc232c0a"
-                .parse()
-                .unwrap();
-        assert_eq!(chain_config_hash(37, false, 1 << 24, 0), expected);
+    /// The chain config of native's golden vectors
+    /// (`.../zk/post_tx_op/public_input.rs`, `sample_chain_config`): chain id
+    /// 37, FRI proof verification disabled, the EIP-7825 default
+    /// per-transaction gas cap, full pubdata, and both 0.6.0 flags off.
+    fn sample_chain_config() -> ChainConfig {
+        ChainConfig {
+            chain_id: 37,
+            fri_proof_verification_enabled: false,
+            max_tx_gas_limit: 1 << 24,
+            pubdata_content: 0,
+            l1_tx_filtering_enabled: false,
+            large_contracts_enabled: false,
+        }
     }
 
-    /// Native's own golden vector for the whole batch public input
-    /// (`.../zk/post_tx_op/public_input.rs`,
-    /// `batch_public_input_hash_golden_vector`): zero state commitments, the
-    /// chain config above, and the batch output of
-    /// `atlas_v4_batch_output_matches_the_native_golden_vector`. era-contracts
-    /// `ZKsyncOSPublicInput.t.sol::PUBLIC_INPUT_HASH_GOLDEN` pins the same value.
-    #[test]
-    fn batch_public_input_matches_the_native_golden_vector() {
-        let batch_output = batch_output_hash_native(
+    /// The batch output of native's `BATCH_OUTPUT_HASH_GOLDEN`, as in
+    /// `atlas_v4_batch_output_matches_the_native_golden_vector`.
+    fn sample_batch_output() -> B256 {
+        batch_output_hash_native(
             BatchOutputLayout::AtlasV4,
             37,
             1,
@@ -490,32 +532,135 @@ mod tests {
             &B256::ZERO,
             &B256::ZERO,
             9,
-        );
-        let expected: B256 =
+        )
+    }
+
+    /// The public input over zero state commitments that native's golden
+    /// vectors hash.
+    fn sample_public_input(layout: ChainConfigLayout, config: &ChainConfig) -> B256 {
+        batch_public_input_hash(
+            &B256::ZERO,
+            &B256::ZERO,
+            Some(&chain_config_hash(layout, config)),
+            &sample_batch_output(),
+        )
+    }
+
+    /// Native 0.5.x's golden vectors for `ChainConfig::hash` and the whole
+    /// batch public input (`chain_config_hash_golden_vector`,
+    /// `batch_public_input_hash_golden_vector` at zksync-os v0.5.6).
+    #[test]
+    fn atlas_v4_chain_config_matches_the_native_golden_vectors() {
+        let config = sample_chain_config();
+        let expected_config: B256 =
+            "0x9bba8b838beaad59a5dec253b49be1f496d47df8c2086b561298cae2cc232c0a"
+                .parse()
+                .unwrap();
+        let expected_public_input: B256 =
             "0x0a5143e28ed3fc1728ef4d96319f2306bb5a81bfccd908154e44029988ef9e7c"
                 .parse()
                 .unwrap();
         assert_eq!(
-            batch_public_input_hash(
-                &B256::ZERO,
-                &B256::ZERO,
-                Some(&chain_config_hash(37, false, 1 << 24, 0)),
-                &batch_output,
-            ),
-            expected,
+            chain_config_hash(ChainConfigLayout::AtlasV4, &config),
+            expected_config
+        );
+        assert_eq!(
+            sample_public_input(ChainConfigLayout::AtlasV4, &config),
+            expected_public_input
         );
     }
 
+    /// Native 0.6.0's golden vectors (`chain_config_hash_golden_vector`,
+    /// `batch_public_input_hash_golden_vector` and
+    /// `batch_public_input_hash_flag_golden_vectors` on `draft-0.6.0`). The
+    /// asymmetric flag pairs pin which flag takes which word. era-contracts
+    /// `TestConstants.sol` (`PUBLIC_INPUT_HASH_GOLDEN*`) pins the same public
+    /// inputs.
+    #[test]
+    fn atlas_v5_chain_config_matches_the_native_golden_vectors() {
+        for (filtering, large_contracts, expected_config, expected_public_input) in [
+            (
+                false,
+                false,
+                "0xa37baa17e852b9c326cea601ab0565fb733b0e0c4590f5a39efc8da5e3ec485c",
+                "0x115e07747f99e4785e3f1c91d3ff85f05eee22c99004e6a81adc37b1b21495fe",
+            ),
+            (
+                true,
+                false,
+                "0xf376cdd377febdda64444c8e0ba5b368ebb3347f597404ffa51a6c19299479c2",
+                "0x7bb4bea265b944d45623d3e57de083aceb9c7d9f30240c3a917fa187a4444282",
+            ),
+            (
+                false,
+                true,
+                "0x7431a77ce6e77c295d5f7e097382054ac118b993f7b311c765a41f744e99d448",
+                "0xac58d82a0990197b31c12ec9cc33b330e5dbda74011eafd37b7e78a5241f0ec7",
+            ),
+            (
+                true,
+                true,
+                "0xd8fab3201bc811330f9f0f5d5a68ed7c30713d11d513da418f93c59f01cd2a0c",
+                "0xa78ab15446de058e9f871114c4b0333d8ab23ec8959f89b582c33409751aa837",
+            ),
+        ] {
+            let config = ChainConfig {
+                l1_tx_filtering_enabled: filtering,
+                large_contracts_enabled: large_contracts,
+                ..sample_chain_config()
+            };
+            assert_eq!(
+                chain_config_hash(ChainConfigLayout::AtlasV5, &config),
+                expected_config.parse::<B256>().unwrap(),
+                "filtering={filtering} large_contracts={large_contracts}",
+            );
+            assert_eq!(
+                sample_public_input(ChainConfigLayout::AtlasV5, &config),
+                expected_public_input.parse::<B256>().unwrap(),
+                "filtering={filtering} large_contracts={large_contracts}",
+            );
+        }
+    }
+
     /// Every chain-config word reaches the commitment, so a change in any one
-    /// of the four moves the hash. Native pins the same property per field
-    /// (`batch_public_input_hash_commits_to_*`).
+    /// of them moves the hash. Native pins the same property per field
+    /// (`batch_public_input_hash_commits_to_*`). The AtlasV4 layout has no
+    /// flag words, so the flags leave its hash alone.
     #[test]
     fn chain_config_commits_to_every_word() {
-        let base = chain_config_hash(37, false, 1 << 24, 0);
-        assert_ne!(base, chain_config_hash(38, false, 1 << 24, 0));
-        assert_ne!(base, chain_config_hash(37, true, 1 << 24, 0));
-        assert_ne!(base, chain_config_hash(37, false, 1 << 25, 0));
-        assert_ne!(base, chain_config_hash(37, false, 1 << 24, 1));
+        let base = sample_chain_config();
+        let variants = [
+            ChainConfig { chain_id: 38, ..base },
+            ChainConfig { fri_proof_verification_enabled: true, ..base },
+            ChainConfig { max_tx_gas_limit: 1 << 25, ..base },
+            ChainConfig { pubdata_content: 1, ..base },
+        ];
+        for layout in [ChainConfigLayout::AtlasV4, ChainConfigLayout::AtlasV5] {
+            for variant in &variants {
+                assert_ne!(
+                    chain_config_hash(layout, &base),
+                    chain_config_hash(layout, variant),
+                    "{layout:?} {variant:?}",
+                );
+            }
+        }
+        for flags in [
+            ChainConfig { l1_tx_filtering_enabled: true, ..base },
+            ChainConfig { large_contracts_enabled: true, ..base },
+        ] {
+            assert_ne!(
+                chain_config_hash(ChainConfigLayout::AtlasV5, &base),
+                chain_config_hash(ChainConfigLayout::AtlasV5, &flags),
+            );
+            assert_eq!(
+                chain_config_hash(ChainConfigLayout::AtlasV4, &base),
+                chain_config_hash(ChainConfigLayout::AtlasV4, &flags),
+            );
+        }
+        assert_ne!(
+            chain_config_hash(ChainConfigLayout::AtlasV4, &base),
+            chain_config_hash(ChainConfigLayout::AtlasV5, &base),
+        );
     }
 
     /// The three layouts are distinct, and the v30 and v31 preimages keep the

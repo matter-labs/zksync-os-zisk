@@ -141,6 +141,16 @@ pub struct StateDumpBundle {
     /// full-pubdata chain, which is the only mode the dump rig configures.
     #[serde(default)]
     pub chain_config_pubdata_content: u8,
+    /// Chain-config L1 transaction filtering (ZKsync OS 0.6.0 onwards). The
+    /// native state-dump hook does not export the field, so a bundle without
+    /// it has filtering off, as every bundle before 0.6.0 does.
+    #[serde(default)]
+    pub chain_config_l1_tx_filtering_enabled: bool,
+    /// Chain-config large contracts (ZKsync OS 0.6.0 onwards). Not exported by
+    /// the native state-dump hook either, so a bundle without it keeps the
+    /// EIP-170 limits.
+    #[serde(default)]
+    pub chain_config_large_contracts_enabled: bool,
     /// Pre-block chain position (hook commit a37838a8): both feed the
     /// pre-block ChainStateCommitment. Old bundles (chain-start blocks)
     /// lack them: block_number_before falls back to block.number - 1 and
@@ -188,12 +198,13 @@ fn haddr(s: &str) -> Address {
     Address::from_slice(&hbytes(s))
 }
 
-fn zk_spec(spec_id: u8) -> ZkSpecId {
+pub(crate) fn zk_spec(spec_id: u8) -> ZkSpecId {
     match spec_id {
         0 => ZkSpecId::AtlasV1,
         1 => ZkSpecId::AtlasV2,
         2 => ZkSpecId::AtlasV3,
         3 => ZkSpecId::AtlasV4,
+        4 => ZkSpecId::AtlasV5,
         x => panic!("unknown spec_id {x}"),
     }
 }
@@ -1053,6 +1064,8 @@ pub fn build_batch_input(d: &StateDumpBundle, header_hash_check: HeaderHashCheck
         fri_proof_verification_enabled: d.chain_config_fri,
         max_tx_gas_limit: resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit),
         pubdata_content: d.chain_config_pubdata_content,
+        l1_tx_filtering_enabled: d.chain_config_l1_tx_filtering_enabled,
+        large_contracts_enabled: d.chain_config_large_contracts_enabled,
         interop_proofs,
     };
 
@@ -1235,7 +1248,17 @@ pub(crate) mod tests {
             // value, not the legacy witness scalar.
             0,
         );
-        let ccfg = commitment::chain_config_hash(37, false, 1 << 24, 0);
+        let ccfg = commitment::chain_config_hash(
+            commitment::ChainConfigLayout::AtlasV4,
+            &commitment::ChainConfig {
+                chain_id: 37,
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
+            },
+        );
         // A v31 batch commits the three-word public input: released native on
         // that line carries no chain-config word.
         let pi = commitment::batch_public_input_hash(&sb, &sa, None, &bo);

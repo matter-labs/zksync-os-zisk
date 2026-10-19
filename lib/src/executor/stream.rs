@@ -147,6 +147,10 @@ impl<'de, 'a> Visitor<'de> for BatchInputVisitor<'a> {
                 let legacy: crate::wire::v3::BatchMeta = field!(seq, 5);
                 legacy.into()
             }
+            crate::wire::v5::BATCH_INPUT_VERSION => {
+                let legacy: crate::wire::v5::BatchMeta = field!(seq, 5);
+                legacy.into()
+            }
             BATCH_INPUT_VERSION => field!(seq, 5),
             other => {
                 return Err(de::Error::custom(format_args!(
@@ -268,7 +272,7 @@ impl<'de, 'a> Visitor<'de> for BlockVisitor<'a> {
                 let legacy: Vec<crate::wire::v3::TxInput> = field!(seq, 6);
                 legacy.into_iter().map(Into::into).collect()
             }
-            BATCH_INPUT_VERSION => field!(seq, 6),
+            crate::wire::v5::BATCH_INPUT_VERSION | BATCH_INPUT_VERSION => field!(seq, 6),
             other => {
                 return Err(de::Error::custom(format_args!(
                     "unsupported BatchInput wire-format version {other}"
@@ -289,7 +293,7 @@ impl<'de, 'a> Visitor<'de> for BlockVisitor<'a> {
                 let legacy: Vec<crate::wire::v3::L2ToL1LogEntry> = field!(seq, 11);
                 legacy.into_iter().map(Into::into).collect()
             }
-            BATCH_INPUT_VERSION => field!(seq, 11),
+            crate::wire::v5::BATCH_INPUT_VERSION | BATCH_INPUT_VERSION => field!(seq, 11),
             other => {
                 return Err(de::Error::custom(format_args!(
                     "unsupported BatchInput wire-format version {other}"
@@ -382,7 +386,9 @@ impl<'de, 'a> DeserializeSeed<'de> for OneProofSeed<'a> {
                     <(B256, crate::wire::v3::StorageProof)>::deserialize(d)?;
                 (key, legacy.into())
             }
-            BATCH_INPUT_VERSION => <(B256, StorageProof)>::deserialize(d)?,
+            crate::wire::v5::BATCH_INPUT_VERSION | BATCH_INPUT_VERSION => {
+                <(B256, StorageProof)>::deserialize(d)?
+            }
             other => {
                 return Err(de::Error::custom(format_args!(
                     "unsupported BatchInput wire-format version {other}"
@@ -691,6 +697,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             bytecodes: vec![(code_hash, code)],

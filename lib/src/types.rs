@@ -5,6 +5,10 @@ use serde::{Deserialize, Serialize};
 
 /// Current `BatchInput` wire-format version.
 ///
+/// **v6**: ZKsync OS 0.6.0 semantics under AtlasV5. `BatchMeta` carries the
+/// chain-config flags `l1_tx_filtering_enabled` and `large_contracts_enabled`
+/// (the fifth and sixth words of the AtlasV5 `chain_config_hash`).
+///
 /// **v5**: ZKsync OS 0.5.0 semantics under AtlasV4. `BatchMeta` carries the
 /// chain-config `pubdata_content` mode (the fourth word of
 /// `chain_config_hash`), and `BatchMeta.interop_proofs` carries the four
@@ -34,13 +38,14 @@ use serde::{Deserialize, Serialize};
 ///
 /// Compatibility rule: writers emit this current version. Readers dispatch on
 /// the leading version and may also accept frozen released schemas (currently
-/// wire v3; see [`crate::wire::v3`]), normalizing them into this in-memory
-/// representation. Any change to the current layout of `BatchInput` or
-/// anything it transitively contains bumps this constant in the same commit.
+/// wire v3 and v5; see [`crate::wire::v3`] and [`crate::wire::v5`]),
+/// normalizing them into this in-memory representation. Any change to the
+/// current layout of `BatchInput` or anything it transitively contains bumps
+/// this constant in the same commit.
 /// Unsupported versions fail before the rest of the positional payload is
 /// parsed. A version bump still implies a guest rebuild and therefore a VK
 /// rotation, independently of input compatibility.
-pub const BATCH_INPUT_VERSION: u32 = 5;
+pub const BATCH_INPUT_VERSION: u32 = 6;
 
 use crate::merkle::{BatchTreeUpdate, StorageProof};
 
@@ -121,8 +126,8 @@ pub struct BatchInput {
     pub version: u32,
     pub chain_id: u64,
     /// ZKsync OS state transition function tier: AtlasV1 = 0, AtlasV2 = 1,
-    /// AtlasV3 = 2, AtlasV4 = 3. This is the single source of truth for every
-    /// version-dependent formula the guest computes.
+    /// AtlasV3 = 2, AtlasV4 = 3, AtlasV5 = 4. This is the single source of
+    /// truth for every version-dependent formula the guest computes.
     pub spec_id: u8,
     /// L1 protocol version minor. Cross-checked against `spec_id` for
     /// consistency; it selects no formula of its own.
@@ -194,6 +199,16 @@ pub struct BatchMeta {
     /// `PubdataContent` discriminant ([`PUBDATA_CONTENT_FULL`] or
     /// [`PUBDATA_CONTENT_LOGS_ONLY`]). The executor rejects any other value.
     pub pubdata_content: u8,
+    /// Whether the operator may force-revert priority transactions
+    /// (`ChainConfig::l1_tx_filtering_enabled`). The witness carries a
+    /// force-revert as `force_fail` with the full gas limit as
+    /// `gas_used_override`, like any failed L1 transaction, so the flag reaches
+    /// only `chain_config_hash`. AtlasV5 onwards; `false` before.
+    pub l1_tx_filtering_enabled: bool,
+    /// Whether the chain raises the deployed-code limit to 64 KiB and the
+    /// initcode limit to 128 KiB (`ChainConfig::large_contracts_enabled`).
+    /// AtlasV5 onwards; `false` before.
+    pub large_contracts_enabled: bool,
     /// Authenticated proofs for the interop-derived scalars (`sl_chain_id`,
     /// `multichain_root`). Required for v31+ batches; `None` for v30.
     pub interop_proofs: Option<InteropSlotProofs>,

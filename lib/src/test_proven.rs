@@ -176,6 +176,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -267,10 +269,8 @@ mod tests {
             // The AtlasV4 four-word form of the same batch is a different value,
             // so the gate is doing work rather than agreeing by accident.
             let chain_config_hash = crate::commitment::chain_config_hash(
-                batch_input.chain_id,
-                batch_input.batch_meta.fri_proof_verification_enabled,
-                batch_input.batch_meta.max_tx_gas_limit,
-                batch_input.batch_meta.pubdata_content,
+                crate::commitment::ChainConfigLayout::AtlasV4,
+                &crate::commitment::ChainConfig::of_batch(&batch_input),
             );
             assert_ne!(
                 commitment,
@@ -354,6 +354,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -471,6 +473,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -780,6 +784,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs,
                 },
                 blocks: vec![BlockInput {
@@ -958,6 +964,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![block],
@@ -1303,6 +1311,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -1532,6 +1542,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_bh), mk_block(LAST, second_bh)],
@@ -1752,6 +1764,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_block_hashes.clone()), mk_block(LAST, second_bh)],
@@ -1906,6 +1920,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -2189,6 +2205,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![
@@ -2343,6 +2361,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
@@ -2497,6 +2517,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: Some(InteropSlotProofs {
                         // No writes => tree_root_after == tree_root_before, so all
                         // three proofs verify against `root`.
@@ -2732,6 +2754,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -2849,6 +2873,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![BlockInput {
@@ -2998,6 +3024,51 @@ mod tests {
             .is_none());
     }
 
+    /// A wire-v5 AtlasV4 input that the guest at `d5b1571` (release 0.0.8)
+    /// encoded from `atlas_v4_transfer_batch(History::Contract)` and committed,
+    /// before wire v6 existed. The guest must decode the exact bytes through
+    /// both paths, take both 0.6.0 chain-config flags as off, and keep the
+    /// commitment, which the same batch still produces as wire v6.
+    #[test]
+    fn released_wire_v5_atlas_v4_fixture_keeps_its_commitment() {
+        let framed = decode_hex_fixture(include_str!("../testdata/wire-v5-atlas-v4.hex"));
+        let len = u64::from_le_bytes(framed[..8].try_into().unwrap()) as usize;
+        let wire_bytes = &framed[8..8 + len];
+
+        assert_eq!(crate::wire::batch_input_version(wire_bytes).unwrap(), 5);
+        let legacy: crate::wire::v5::BatchInput = crate::wire::decode(wire_bytes).unwrap();
+        assert_eq!(
+            crate::wire::encode(&legacy).unwrap(),
+            wire_bytes,
+            "the frozen v5 schema must reproduce the historical bytes"
+        );
+
+        let normalized = crate::wire::decode_batch_input(wire_bytes).unwrap();
+        assert_eq!(normalized.version, 5);
+        assert_eq!(normalized.spec_id, 3);
+        assert_eq!(normalized.protocol_version_minor, 32);
+        assert!(!normalized.batch_meta.l1_tx_filtering_enabled);
+        assert!(!normalized.batch_meta.large_contracts_enabled);
+
+        let expected: B256 = "0xbe97814867f143a0cb4610871ee81a14a0ab943f9d7374606e2142aea8c96810"
+            .parse()
+            .unwrap();
+        let (out_collecting, commitment_collecting) =
+            executor::execute_and_commit_from_bincode(wire_bytes).unwrap();
+        let (out_streaming, commitment_streaming) =
+            executor::execute_and_commit_streaming(wire_bytes).unwrap();
+        assert_eq!(commitment_collecting, expected);
+        assert_eq!(commitment_streaming, expected);
+        assert_eq!(
+            crate::wire::encode(&out_collecting).unwrap(),
+            crate::wire::encode(&out_streaming).unwrap()
+        );
+
+        let current = atlas_v4_transfer_batch(History::Contract);
+        assert_eq!(current.version, crate::types::BATCH_INPUT_VERSION);
+        assert_eq!(executor::execute_and_commit(&current).1, expected);
+    }
+
     /// Read-spam batch: N distinct cold storage slots (each with a valid
     /// depth-64 Existing proof) plus the sender account, driven by a single
     /// `force_fail` L1 tx so execution is trivial and the witness (all the
@@ -3075,6 +3146,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -3215,6 +3288,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3351,6 +3426,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![
@@ -3511,6 +3588,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3800,6 +3879,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
@@ -3823,6 +3904,46 @@ mod tests {
                 expected_tree_root: B256::ZERO,
             }],
             bytecodes: vec![],
+        }
+    }
+
+    /// AtlasV5 runs an AtlasV4 batch unchanged and commits the six-word chain
+    /// config of ZKsync OS 0.6.0. Each flag moves the commitment, and the
+    /// streaming path agrees.
+    #[test]
+    fn atlas_v5_commits_the_six_word_chain_config() {
+        use crate::commitment::{
+            batch_public_input_hash, chain_config_hash, ChainConfig, ChainConfigLayout,
+        };
+
+        let atlas_v4 = atlas_v4_transfer_batch(History::Contract);
+        let mut commitments = vec![executor::execute_and_commit(&atlas_v4).1];
+        for (filtering, large_contracts) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut batch = atlas_v4.clone();
+            batch.spec_id = 4;
+            batch.protocol_version_minor = 34;
+            batch.batch_meta.l1_tx_filtering_enabled = filtering;
+            batch.batch_meta.large_contracts_enabled = large_contracts;
+
+            let (output, commitment, state_before, state_after, batch_output) =
+                executor::execute_and_commit_debug(&batch);
+            assert!(output.block_results[0].tx_results[0].success);
+            let chain_config =
+                chain_config_hash(ChainConfigLayout::AtlasV5, &ChainConfig::of_batch(&batch));
+            assert_eq!(
+                commitment,
+                batch_public_input_hash(&state_before, &state_after, Some(&chain_config), &batch_output),
+                "filtering={filtering} large_contracts={large_contracts}",
+            );
+            let wire = crate::wire::encode(&batch).unwrap();
+            assert_eq!(executor::execute_and_commit_streaming(&wire).unwrap().1, commitment);
+            commitments.push(commitment);
+        }
+        for (i, a) in commitments.iter().enumerate() {
+            for b in &commitments[i + 1..] {
+                assert_ne!(a, b);
+            }
         }
     }
 

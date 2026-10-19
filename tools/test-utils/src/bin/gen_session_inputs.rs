@@ -325,6 +325,8 @@ fn build_batch_input(value: U256) -> BatchInput {
             fri_proof_verification_enabled: false,
             max_tx_gas_limit: FIXTURE_MAX_TX_GAS_LIMIT,
             pubdata_content: PUBDATA_CONTENT_FULL,
+            l1_tx_filtering_enabled: false,
+            large_contracts_enabled: false,
             interop_proofs,
         },
         blocks: vec![BlockInput {
