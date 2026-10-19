@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.9](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.8...0.0.9) (2026-10-19)
+
+
+### Features
+
+* move the ZiSK integration to 1.3.2-alpha ([#53](https://github.com/matter-labs/zksync-os-zisk/issues/53)) ([53e7250](https://github.com/matter-labs/zksync-os-zisk/commit/53e7250f946fc7878c12b0c970bb1ff507f70219))
+* support ZKsync OS 0.6.0 (AtlasV5) in the guest ([#55](https://github.com/matter-labs/zksync-os-zisk/issues/55)) ([d0cee17](https://github.com/matter-labs/zksync-os-zisk/commit/d0cee1755634fa1780b583416b8bded5f722d1bd))
+
 ## [0.0.8](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.5...0.0.8) (2026-10-08)
 
 
