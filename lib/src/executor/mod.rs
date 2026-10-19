@@ -12,6 +12,8 @@ mod stream;
 pub mod tx;
 mod verify;
 
+pub use evm::configure_evm;
+
 use std::collections::{HashMap, HashSet};
 
 use revm::database::CacheDB;
@@ -19,17 +21,20 @@ use revm::primitives::B256;
 use zksync_os_revm::ZkSpecId;
 
 use crate::commitment;
-use crate::commitment::BatchOutputLayout;
+use crate::commitment::{BatchOutputLayout, ChainConfigLayout};
 use crate::types::*;
 
-/// The lowest L1 protocol minor an AtlasV4 batch may carry.
+/// The lowest L1 protocol minor an AtlasV4 batch may carry. AtlasV4 (ZKsync OS
+/// 0.5.x) covers v32 and v33, up to [`ATLAS_V5_MIN_PROTOCOL_MINOR`].
 ///
-/// The 0.4.0 tree names 32 and marks the value a draft, and the server still
-/// routes minor 32 to the AtlasV3 execution version, so AtlasV3 accepts 32 as
-/// well. Once the release fixes the protocol version, narrow the AtlasV3 arm of
-/// the cross-check to 31 and pin AtlasV4 to exactly this value, so the two
-/// ranges stop overlapping.
+/// The server also routes minor 32 to the AtlasV3 execution version, so AtlasV3
+/// accepts 32 as well. Once no server does, narrow the AtlasV3 arm of the
+/// cross-check to 31 so the two ranges stop overlapping.
 const ATLAS_V4_MIN_PROTOCOL_MINOR: u32 = 32;
+
+/// The L1 protocol minor of ZKsync OS 0.6.0, the first AtlasV5 release. AtlasV4
+/// (ZKsync OS 0.5.x) covers the minors below it.
+const ATLAS_V5_MIN_PROTOCOL_MINOR: u32 = 34;
 
 /// Ergs charged per unit of gas (zksync-os `evm_interpreter::ERGS_PER_GAS`).
 /// Gas is metered in ergs, so a gas limit above `u64::MAX / ERGS_PER_GAS`
@@ -71,6 +76,19 @@ fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B25
     run_execution_and_commit(input, spec_id, proven_db)
 }
 
+/// The spec a `BatchInput::spec_id` byte selects, or `None` for a byte no
+/// release emits.
+pub fn zk_spec_id(spec_id: u8) -> Option<ZkSpecId> {
+    match spec_id {
+        0 => Some(ZkSpecId::AtlasV1),
+        1 => Some(ZkSpecId::AtlasV2),
+        2 => Some(ZkSpecId::AtlasV3),
+        3 => Some(ZkSpecId::AtlasV4),
+        4 => Some(ZkSpecId::AtlasV5),
+        _ => None,
+    }
+}
+
 /// Assert the normalized wire-format version, resolve the spec id, and validate
 /// the block sequence. Shared by the collecting and streaming entry points.
 fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
@@ -84,18 +102,23 @@ fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
             .collect::<Vec<_>>()
             .join(", "),
     );
-    assert!(
-        input.version != crate::wire::v3::BATCH_INPUT_VERSION || input.spec_id <= 2,
-        "BatchInput wire v3 cannot carry spec_id {} (maximum is AtlasV3/spec_id 2)",
-        input.spec_id,
-    );
-    let spec_id = match input.spec_id {
-        0 => ZkSpecId::AtlasV1,
-        1 => ZkSpecId::AtlasV2,
-        2 => ZkSpecId::AtlasV3,
-        3 => ZkSpecId::AtlasV4,
-        _ => panic!("unknown spec_id: {}", input.spec_id),
+    // A released wire version cannot select a spec introduced after it.
+    let newest_spec = match input.version {
+        crate::wire::v3::BATCH_INPUT_VERSION => Some(ZkSpecId::AtlasV3),
+        crate::wire::v5::BATCH_INPUT_VERSION => Some(ZkSpecId::AtlasV4),
+        _ => None,
     };
+    if let Some(newest_spec) = newest_spec {
+        assert!(
+            input.spec_id <= newest_spec as u8,
+            "BatchInput wire v{} cannot carry spec_id {} (maximum is {newest_spec:?}/spec_id {})",
+            input.version,
+            input.spec_id,
+            newest_spec as u8,
+        );
+    }
+    let spec_id = zk_spec_id(input.spec_id)
+        .unwrap_or_else(|| panic!("unknown spec_id: {}", input.spec_id));
     // `spec_id` is the ZKsync OS state transition function tier and the single
     // source of truth for every formula the guest computes.
     // `protocol_version_minor` is the L1 protocol version, a separate axis.
@@ -105,12 +128,26 @@ fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
     let minor_ok = match spec_id {
         ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => input.protocol_version_minor <= 30,
         ZkSpecId::AtlasV3 => matches!(input.protocol_version_minor, 31 | 32),
-        ZkSpecId::AtlasV4 => input.protocol_version_minor >= ATLAS_V4_MIN_PROTOCOL_MINOR,
+        ZkSpecId::AtlasV4 => (ATLAS_V4_MIN_PROTOCOL_MINOR..ATLAS_V5_MIN_PROTOCOL_MINOR)
+            .contains(&input.protocol_version_minor),
+        ZkSpecId::AtlasV5 => input.protocol_version_minor >= ATLAS_V5_MIN_PROTOCOL_MINOR,
     };
     assert!(
         minor_ok,
         "inconsistent spec_id/protocol_version_minor: spec_id={} ({spec_id:?}), minor={}",
         input.spec_id, input.protocol_version_minor,
+    );
+    // Native has these chain-config flags from AtlasV5 on, and only the AtlasV5
+    // `chain_config_hash` commits them. A set flag on an older spec would
+    // change execution (large contracts) without reaching the commitment.
+    let meta = &input.batch_meta;
+    assert!(
+        ZkSpecId::AtlasV5.is_enabled_in(spec_id)
+            || !(meta.l1_tx_filtering_enabled || meta.large_contracts_enabled),
+        "{spec_id:?} has no l1_tx_filtering_enabled or large_contracts_enabled \
+         chain config: l1_tx_filtering_enabled={}, large_contracts_enabled={}",
+        meta.l1_tx_filtering_enabled,
+        meta.large_contracts_enabled,
     );
     validate_block_sequence(input, spec_id);
     spec_id
@@ -181,6 +218,7 @@ fn run_execution_and_commit(
 
         let (result, state_effects) = evm::execute_block_proven(
             input.chain_id, spec_id, block, &mut cache_db, max_tx_gas_limit,
+            meta.large_contracts_enabled,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
         // so a later block's BLOCKHASH read resolves to this authenticated value.
@@ -428,7 +466,7 @@ fn run_execution_and_commit(
     let batch_output_layout = match spec_id {
         ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 => BatchOutputLayout::V30,
         ZkSpecId::AtlasV3 => BatchOutputLayout::V31,
-        ZkSpecId::AtlasV4 => BatchOutputLayout::AtlasV4,
+        ZkSpecId::AtlasV4 | ZkSpecId::AtlasV5 => BatchOutputLayout::AtlasV4,
     };
     let batch_hash = commitment::batch_output_hash_native(
         batch_output_layout,
@@ -451,13 +489,13 @@ fn run_execution_and_commit(
     // native on those lines carries no `chain_config_hash` field, so a fourth
     // word would commit a value the first prover never computes, and L1 could
     // not gate the two lanes against each other.
-    let chain_config_hash = ZkSpecId::AtlasV4.is_enabled_in(spec_id).then(|| {
-        commitment::chain_config_hash(
-            input.chain_id,
-            meta.fri_proof_verification_enabled,
-            meta.max_tx_gas_limit,
-            meta.pubdata_content,
-        )
+    let chain_config_layout = match spec_id {
+        ZkSpecId::AtlasV1 | ZkSpecId::AtlasV2 | ZkSpecId::AtlasV3 => None,
+        ZkSpecId::AtlasV4 => Some(ChainConfigLayout::AtlasV4),
+        ZkSpecId::AtlasV5 => Some(ChainConfigLayout::AtlasV5),
+    };
+    let chain_config_hash = chain_config_layout.map(|layout| {
+        commitment::chain_config_hash(layout, &commitment::ChainConfig::of_batch(input))
     });
     let commitment = commitment::batch_public_input_hash(
         &state_before,
@@ -804,6 +842,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
         }
@@ -850,6 +890,8 @@ mod tests {
             (2, 32, ZkSpecId::AtlasV3),
             (3, 32, ZkSpecId::AtlasV4),
             (3, 33, ZkSpecId::AtlasV4),
+            (4, 34, ZkSpecId::AtlasV5),
+            (4, 35, ZkSpecId::AtlasV5),
         ] {
             assert_eq!(
                 resolve_spec_and_validate(&dispatch_batch(byte, minor)),
@@ -885,12 +927,76 @@ mod tests {
         resolve_spec_and_validate(&input);
     }
 
+    /// Released wire-v5 inputs keep AtlasV4 after schema normalization.
+    #[test]
+    fn released_wire_v5_resolves_atlas_v4() {
+        let mut input = dispatch_batch(3, 33);
+        input.version = crate::wire::v5::BATCH_INPUT_VERSION;
+        assert_eq!(resolve_spec_and_validate(&input), ZkSpecId::AtlasV4);
+    }
+
+    /// AtlasV5 was introduced after wire v5, whose `BatchMeta` cannot carry
+    /// the AtlasV5 chain-config flags.
+    #[test]
+    #[should_panic(expected = "BatchInput wire v5 cannot carry spec_id 4")]
+    fn wire_v5_cannot_select_atlas_v5() {
+        let mut input = dispatch_batch(4, 34);
+        input.version = crate::wire::v5::BATCH_INPUT_VERSION;
+        resolve_spec_and_validate(&input);
+    }
+
     /// A spec byte no release emits is rejected rather than mapped to a
     /// neighbour.
     #[test]
-    #[should_panic(expected = "unknown spec_id: 4")]
+    #[should_panic(expected = "unknown spec_id: 5")]
     fn rejects_an_unknown_spec_byte() {
-        resolve_spec_and_validate(&dispatch_batch(4, 32));
+        resolve_spec_and_validate(&dispatch_batch(5, 34));
+    }
+
+    /// Protocol v34 runs ZKsync OS 0.6.0, so an AtlasV4 batch claiming it is
+    /// rejected.
+    #[test]
+    #[should_panic(expected = "inconsistent spec_id/protocol_version_minor")]
+    fn rejects_atlas_v4_at_the_atlas_v5_protocol_minor() {
+        resolve_spec_and_validate(&dispatch_batch(3, 34));
+    }
+
+    /// An AtlasV5 batch claiming a protocol minor of the 0.5.x line is
+    /// rejected.
+    #[test]
+    #[should_panic(expected = "inconsistent spec_id/protocol_version_minor")]
+    fn rejects_atlas_v5_below_its_protocol_minor() {
+        resolve_spec_and_validate(&dispatch_batch(4, 33));
+    }
+
+    /// The 0.6.0 chain-config flags are AtlasV5 inputs. An AtlasV4 batch that
+    /// sets one would run under rules its four-word chain config does not
+    /// commit.
+    #[test]
+    #[should_panic(expected = "AtlasV4 has no l1_tx_filtering_enabled or large_contracts_enabled")]
+    fn rejects_l1_tx_filtering_before_atlas_v5() {
+        let mut input = dispatch_batch(3, 33);
+        input.batch_meta.l1_tx_filtering_enabled = true;
+        resolve_spec_and_validate(&input);
+    }
+
+    #[test]
+    #[should_panic(expected = "AtlasV4 has no l1_tx_filtering_enabled or large_contracts_enabled")]
+    fn rejects_large_contracts_before_atlas_v5() {
+        let mut input = dispatch_batch(3, 33);
+        input.batch_meta.large_contracts_enabled = true;
+        resolve_spec_and_validate(&input);
+    }
+
+    /// AtlasV5 accepts either flag.
+    #[test]
+    fn atlas_v5_accepts_the_chain_config_flags() {
+        for (filtering, large_contracts) in [(true, false), (false, true), (true, true)] {
+            let mut input = dispatch_batch(4, 34);
+            input.batch_meta.l1_tx_filtering_enabled = filtering;
+            input.batch_meta.large_contracts_enabled = large_contracts;
+            assert_eq!(resolve_spec_and_validate(&input), ZkSpecId::AtlasV5);
+        }
     }
 
     /// An AtlasV4 batch claiming a protocol minor below the AtlasV4 range is

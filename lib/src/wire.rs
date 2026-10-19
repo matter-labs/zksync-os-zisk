@@ -24,11 +24,17 @@ use crate::types::{BatchInput, BATCH_INPUT_VERSION};
 
 /// Frozen definitions for the released wire-v3 schema.
 pub mod v3;
+/// Frozen definitions for the released wire-v5 schema.
+pub mod v5;
 
 /// Wire versions this revision can execute. Wire v4 was never released from
 /// `main`, so accepting it would bless an internal development format without
 /// a compatibility obligation.
-pub const SUPPORTED_BATCH_INPUT_VERSIONS: &[u32] = &[v3::BATCH_INPUT_VERSION, BATCH_INPUT_VERSION];
+pub const SUPPORTED_BATCH_INPUT_VERSIONS: &[u32] = &[
+    v3::BATCH_INPUT_VERSION,
+    v5::BATCH_INPUT_VERSION,
+    BATCH_INPUT_VERSION,
+];
 
 /// The bincode 2.x configuration for the wire format: standard (little-endian,
 /// variable-length integers). Every encode and decode on the boundary uses it.
@@ -68,6 +74,9 @@ pub fn decode_batch_input(bytes: &[u8]) -> Result<BatchInput, String> {
         v3::BATCH_INPUT_VERSION => decode::<v3::BatchInput>(bytes)
             .map(Into::into)
             .map_err(|e| format!("deserialize BatchInput wire v3: {e}")),
+        v5::BATCH_INPUT_VERSION => decode::<v5::BatchInput>(bytes)
+            .map(Into::into)
+            .map_err(|e| format!("deserialize BatchInput wire v5: {e}")),
         BATCH_INPUT_VERSION => decode::<BatchInput>(bytes)
             .map_err(|e| format!("deserialize BatchInput wire v{BATCH_INPUT_VERSION}: {e}")),
         _ => Err(format!(
@@ -128,7 +137,7 @@ mod tests {
         };
         assert_eq!(
             error,
-            "unsupported BatchInput wire-format version 4 (supported: 3, 5)"
+            "unsupported BatchInput wire-format version 4 (supported: 3, 5, 6)"
         );
     }
 }

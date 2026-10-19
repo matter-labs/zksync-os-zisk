@@ -176,6 +176,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -267,10 +269,8 @@ mod tests {
             // The AtlasV4 four-word form of the same batch is a different value,
             // so the gate is doing work rather than agreeing by accident.
             let chain_config_hash = crate::commitment::chain_config_hash(
-                batch_input.chain_id,
-                batch_input.batch_meta.fri_proof_verification_enabled,
-                batch_input.batch_meta.max_tx_gas_limit,
-                batch_input.batch_meta.pubdata_content,
+                crate::commitment::ChainConfigLayout::AtlasV4,
+                &crate::commitment::ChainConfig::of_batch(&batch_input),
             );
             assert_ne!(
                 commitment,
@@ -354,6 +354,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -471,6 +473,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -780,6 +784,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs,
                 },
                 blocks: vec![BlockInput {
@@ -869,7 +875,7 @@ mod tests {
         }
     }
 
-    /// Sign a legacy tx (chain 1, gas_price 10) with a deterministic key.
+    /// Sign a legacy call (chain 1, gas_price 10) with a deterministic key.
     fn sign_legacy(
         sk_bytes: [u8; 32],
         nonce: u64,
@@ -877,34 +883,13 @@ mod tests {
         data: Vec<u8>,
         gas_limit: u64,
     ) -> (Address, Vec<u8>) {
-        use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
-        use alloy_eips::eip2718::Encodable2718;
-        use k256::ecdsa::SigningKey;
-        let sk = SigningKey::from_bytes((&sk_bytes).into()).unwrap();
-        let pubkey = sk.verifying_key().to_encoded_point(false);
-        let sender =
-            Address::from_slice(&alloy_primitives::keccak256(&pubkey.as_bytes()[1..])[12..]);
-        let tx = TxLegacy {
-            chain_id: Some(1),
+        crate::test_support::sign_legacy(
+            sk_bytes,
             nonce,
-            gas_price: 10,
+            alloy_primitives::TxKind::Call(to),
+            data,
             gas_limit,
-            to: alloy_primitives::TxKind::Call(to),
-            value: U256::ZERO,
-            input: data.into(),
-        };
-        let sighash = tx.signature_hash();
-        let (sig, recid) = sk.sign_prehash_recoverable(sighash.as_slice()).unwrap();
-        let sig_bytes = sig.to_bytes();
-        let signature = alloy_primitives::Signature::new(
-            U256::from_be_slice(&sig_bytes[..32]),
-            U256::from_be_slice(&sig_bytes[32..]),
-            recid.is_y_odd(),
-        );
-        let envelope = TxEnvelope::Legacy(tx.into_signed(signature));
-        let mut signed = Vec::new();
-        envelope.encode_2718(&mut signed);
-        (sender, signed)
+        )
     }
 
     /// `keccak256(rlp([deployer, nonce]))[12..]` for a single-byte nonce.
@@ -958,6 +943,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![block],
@@ -1303,6 +1290,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -1532,6 +1521,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_bh), mk_block(LAST, second_bh)],
@@ -1752,6 +1743,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![mk_block(FIRST, first_block_hashes.clone()), mk_block(LAST, second_bh)],
@@ -1906,6 +1899,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -2189,6 +2184,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![
@@ -2343,6 +2340,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
@@ -2497,6 +2496,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: Some(InteropSlotProofs {
                         // No writes => tree_root_after == tree_root_before, so all
                         // three proofs verify against `root`.
@@ -2732,6 +2733,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -2849,6 +2852,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: interop_proofs.clone(),
                 },
                 blocks: vec![BlockInput {
@@ -2998,6 +3003,51 @@ mod tests {
             .is_none());
     }
 
+    /// A wire-v5 AtlasV4 input that the guest at `d5b1571` (release 0.0.8)
+    /// encoded from `atlas_v4_transfer_batch(History::Contract)` and committed,
+    /// before wire v6 existed. The guest must decode the exact bytes through
+    /// both paths, take both 0.6.0 chain-config flags as off, and keep the
+    /// commitment, which the same batch still produces as wire v6.
+    #[test]
+    fn released_wire_v5_atlas_v4_fixture_keeps_its_commitment() {
+        let framed = decode_hex_fixture(include_str!("../testdata/wire-v5-atlas-v4.hex"));
+        let len = u64::from_le_bytes(framed[..8].try_into().unwrap()) as usize;
+        let wire_bytes = &framed[8..8 + len];
+
+        assert_eq!(crate::wire::batch_input_version(wire_bytes).unwrap(), 5);
+        let legacy: crate::wire::v5::BatchInput = crate::wire::decode(wire_bytes).unwrap();
+        assert_eq!(
+            crate::wire::encode(&legacy).unwrap(),
+            wire_bytes,
+            "the frozen v5 schema must reproduce the historical bytes"
+        );
+
+        let normalized = crate::wire::decode_batch_input(wire_bytes).unwrap();
+        assert_eq!(normalized.version, 5);
+        assert_eq!(normalized.spec_id, 3);
+        assert_eq!(normalized.protocol_version_minor, 32);
+        assert!(!normalized.batch_meta.l1_tx_filtering_enabled);
+        assert!(!normalized.batch_meta.large_contracts_enabled);
+
+        let expected: B256 = "0xbe97814867f143a0cb4610871ee81a14a0ab943f9d7374606e2142aea8c96810"
+            .parse()
+            .unwrap();
+        let (out_collecting, commitment_collecting) =
+            executor::execute_and_commit_from_bincode(wire_bytes).unwrap();
+        let (out_streaming, commitment_streaming) =
+            executor::execute_and_commit_streaming(wire_bytes).unwrap();
+        assert_eq!(commitment_collecting, expected);
+        assert_eq!(commitment_streaming, expected);
+        assert_eq!(
+            crate::wire::encode(&out_collecting).unwrap(),
+            crate::wire::encode(&out_streaming).unwrap()
+        );
+
+        let current = atlas_v4_transfer_batch(History::Contract);
+        assert_eq!(current.version, crate::types::BATCH_INPUT_VERSION);
+        assert_eq!(executor::execute_and_commit(&current).1, expected);
+    }
+
     /// Read-spam batch: N distinct cold storage slots (each with a valid
     /// depth-64 Existing proof) plus the sender account, driven by a single
     /// `force_fail` L1 tx so execution is trivial and the witness (all the
@@ -3075,6 +3125,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit: 1 << 24,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs: None,
             },
             blocks: vec![BlockInput {
@@ -3215,6 +3267,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3351,6 +3405,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![
@@ -3511,6 +3567,8 @@ mod tests {
                     fri_proof_verification_enabled: false,
                     max_tx_gas_limit: 1 << 24,
                     pubdata_content: 0,
+                    l1_tx_filtering_enabled: false,
+                    large_contracts_enabled: false,
                     interop_proofs: None,
                 },
                 blocks: vec![BlockInput {
@@ -3616,8 +3674,6 @@ mod tests {
         tx_gas_limit: u64,
         max_tx_gas_limit: u64,
     ) -> BatchInput {
-        use blake2::{Blake2s256, Digest};
-
         const GAS_PRICE: u64 = 10;
         const GAS_USED: u64 = 21_000;
         const BLOCK_NUMBER: u64 = 6;
@@ -3746,16 +3802,7 @@ mod tests {
             account_preimages.push((history_addr, props));
         }
 
-        // The pre-state ring holds the parent of block 6 at its owner-parent
-        // slot; every other slot is empty.
-        let mut ring = [B256::ZERO; 256];
-        ring[255] = parent_hash;
-        let mut ring_hasher = Blake2s256::new();
-        for hash in &ring[..255] {
-            ring_hasher.update(hash.as_slice());
-        }
-        ring_hasher.update(ring[255].as_slice());
-        let block_hashes_blake_before = B256::from_slice(&ring_hasher.finalize());
+        let block_hashes_blake_before = ring_blake_with_parent(parent_hash);
 
         // The sealed header hash, derived from the two AtlasV4 Merkle roots. A
         // guest that kept the keccak rolling hash produces a different value.
@@ -3800,6 +3847,8 @@ mod tests {
                 fri_proof_verification_enabled: false,
                 max_tx_gas_limit,
                 pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled: false,
                 interop_proofs,
             },
             blocks: vec![BlockInput {
@@ -3823,6 +3872,398 @@ mod tests {
                 expected_tree_root: B256::ZERO,
             }],
             bytecodes: vec![],
+        }
+    }
+
+    /// Blake2s of a pre-state block-hash ring that holds `parent_hash` at the
+    /// owner-parent slot and nothing else.
+    fn ring_blake_with_parent(parent_hash: B256) -> B256 {
+        use blake2::{Blake2s256, Digest};
+        let mut ring_hasher = Blake2s256::new();
+        for _ in 0..255 {
+            ring_hasher.update(B256::ZERO.as_slice());
+        }
+        ring_hasher.update(parent_hash.as_slice());
+        B256::from_slice(&ring_hasher.finalize())
+    }
+
+    // ================= AtlasV5 =================
+
+    /// One account of an AtlasV5 single-transaction batch: its pre-state
+    /// properties (`None`: absent) and its after-state properties (`None`:
+    /// unchanged).
+    struct AccountChange {
+        address: Address,
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+    }
+
+    /// The transaction of an AtlasV5 single-transaction batch and the outcome
+    /// its receipt commits.
+    struct SingleTx {
+        input: TxInput,
+        hash: B256,
+        tx_type: u8,
+        success: bool,
+        gas_used: u64,
+    }
+
+    /// A one-block AtlasV5 (protocol v34) batch that runs `tx` over
+    /// `accounts`. Block 6 has a non-zero parent hash and no EIP-2935 history
+    /// contract, so the block writes no history slot. The tree update holds at
+    /// most one insert.
+    fn atlas_v5_single_tx_batch(
+        accounts: &[AccountChange],
+        tx: SingleTx,
+        coinbase: Address,
+        block_gas_limit: u64,
+        large_contracts_enabled: bool,
+        bytecodes: Vec<(B256, Vec<u8>)>,
+    ) -> BatchInput {
+        const BLOCK_NUMBER: u64 = 6;
+        const TIMESTAMP: u64 = 1_700_000_000;
+        const BASE_FEE: u64 = 7;
+        let parent_hash = atlas_v4_parent_hash();
+
+        let props_key = |address: &Address| derive_account_properties_key(&address.into_array());
+        let existing: Vec<&AccountChange> =
+            accounts.iter().filter(|account| account.before.is_some()).collect();
+        let pre_data: Vec<(B256, B256)> = existing
+            .iter()
+            .map(|account| {
+                (
+                    props_key(&account.address),
+                    AccountProperties::hash(account.before.as_ref().unwrap()),
+                )
+            })
+            .collect();
+        let leaf_count_before = 2 + pre_data.len() as u64;
+        let (root, leaves, siblings) = build_dense_tree(&pre_data);
+        // `build_dense_tree` puts the data leaves from index 2, in input order.
+        let leaf_index = |address: &Address| {
+            2 + existing.iter().position(|account| account.address == *address).unwrap()
+        };
+
+        let mut storage_proofs = Vec::new();
+        let mut account_preimages = Vec::new();
+        let mut operations = Vec::new();
+        let mut entries = Vec::new();
+        let mut account_preimages_after = Vec::new();
+        for account in accounts {
+            let key = props_key(&account.address);
+            match &account.before {
+                Some(before) => {
+                    let index = leaf_index(&account.address);
+                    let (i, leaf) = &leaves[index];
+                    storage_proofs.push((
+                        key,
+                        StorageProof::Existing(SlotProofEntry {
+                            index: *i,
+                            value: leaf.value,
+                            next_index: leaf.next_index,
+                            siblings: siblings[index].clone(),
+                        }),
+                    ));
+                    account_preimages.push((account.address, before.clone()));
+                }
+                None => storage_proofs.push((key, non_existence_proof(&leaves, &siblings, &key))),
+            }
+            if let Some(after) = &account.after {
+                operations.push(match account.before {
+                    Some(_) => WriteOp::Update { index: leaf_index(&account.address) as u64 },
+                    None => WriteOp::Insert {
+                        prev_index: leaves
+                            .iter()
+                            .filter(|(_, leaf)| leaf.key < key)
+                            .max_by_key(|(_, leaf)| leaf.key)
+                            .unwrap()
+                            .0,
+                    },
+                });
+                entries.push((key, AccountProperties::hash(after)));
+                account_preimages_after.push((account.address, after.clone()));
+            }
+        }
+        assert!(
+            operations.iter().filter(|op| matches!(op, WriteOp::Insert { .. })).count() <= 1,
+            "the builder supports one insert"
+        );
+        // The EIP-2935 step reads the absent history contract.
+        let k_history = props_key(&history_address());
+        storage_proofs.push((k_history, non_existence_proof(&leaves, &siblings, &k_history)));
+
+        let tree_update = BatchTreeUpdate {
+            operations,
+            entries,
+            sorted_leaves: leaves.clone(),
+            intermediate_hashes: vec![],
+            leaf_count_before,
+        };
+        let interop_proofs = Some(interop_proofs_nonsettlement(&tree_update));
+        let receipt = crate::block_roots::receipt_leaf(tx.tx_type, tx.success, tx.gas_used, &[]);
+        let block_header_hash = crate::block_header::compute_block_header_hash(
+            &parent_hash,
+            &coinbase.into_array(),
+            &crate::block_roots::block_tx_tree_root(&[tx.hash]),
+            &crate::block_roots::block_tx_tree_root(&[receipt]),
+            BLOCK_NUMBER,
+            block_gas_limit,
+            tx.gas_used,
+            TIMESTAMP,
+            &B256::from([1u8; 32]),
+            BASE_FEE,
+        );
+
+        BatchInput {
+            version: crate::types::BATCH_INPUT_VERSION,
+            chain_id: 1,
+            spec_id: 4,
+            protocol_version_minor: 34,
+            batch_meta: BatchMeta {
+                tree_root_before: root,
+                leaf_count_before,
+                block_number_before: BLOCK_NUMBER - 1,
+                last_block_timestamp_before: 0,
+                block_hashes_blake_before: ring_blake_with_parent(parent_hash),
+                previous_block_hashes: vec![],
+                upgrade_tx_hash: B256::ZERO,
+                da_commitment_scheme: 2,
+                pubdata: vec![],
+                multichain_root: B256::ZERO,
+                sl_chain_id: 0,
+                blob_versioned_hashes: vec![],
+                tree_update: Some(tree_update),
+                account_preimages_after,
+                fri_proof_verification_enabled: false,
+                max_tx_gas_limit: 1 << 24,
+                pubdata_content: 0,
+                l1_tx_filtering_enabled: false,
+                large_contracts_enabled,
+                interop_proofs,
+            },
+            blocks: vec![BlockInput {
+                number: BLOCK_NUMBER,
+                timestamp: TIMESTAMP,
+                base_fee: BASE_FEE,
+                gas_limit: block_gas_limit,
+                coinbase,
+                prev_randao: B256::from([1u8; 32]),
+                block_header_hash,
+                storage_proofs,
+                account_preimages,
+                transactions: vec![tx.input],
+                block_hashes: vec![(BLOCK_NUMBER - 1, parent_hash)],
+                l2_to_l1_logs: vec![],
+                expected_tree_root: B256::ZERO,
+            }],
+            bytecodes,
+        }
+    }
+
+    /// A batch that deploys `code_len` zero bytes from a fresh sender. The
+    /// witness claims the deployment, so it verifies only where the EVM
+    /// accepts code of that size.
+    fn large_deployment_batch(code_len: usize, large_contracts_enabled: bool) -> BatchInput {
+        const TX_GAS_LIMIT: u64 = 6_000_000;
+        let len = (code_len as u32).to_be_bytes();
+        // PUSH3 code_len; PUSH1 0; RETURN
+        let initcode = vec![0x62, len[1], len[2], len[3], 0x60, 0x00, 0xf3];
+        let (sender, signed_bytes) = crate::test_support::sign_legacy(
+            [0x63; 32],
+            0,
+            alloy_primitives::TxKind::Create,
+            initcode,
+            TX_GAS_LIMIT,
+        );
+        let coinbase: Address = "0x00000000000000000000000000000000c01badde".parse().unwrap();
+        let sender_balance = U256::from(1_000_000_000_000_000_000u128);
+        let coinbase_balance = U256::from(5u64);
+        let fee = U256::from(TX_GAS_LIMIT) * U256::from(crate::test_support::TEST_GAS_PRICE);
+        let tx_hash = crate::hash::keccak256(&signed_bytes);
+        let code = vec![0u8; code_len];
+        atlas_v5_single_tx_batch(
+            &[
+                AccountChange {
+                    address: sender,
+                    before: Some(encode_account_props(0, sender_balance)),
+                    after: Some(encode_account_props(1, sender_balance - fee)),
+                },
+                AccountChange {
+                    address: coinbase,
+                    before: Some(encode_account_props(0, coinbase_balance)),
+                    after: Some(encode_account_props(0, coinbase_balance + fee)),
+                },
+                AccountChange {
+                    address: sender.create(0),
+                    before: None,
+                    after: Some(encode_account_props_code(1, U256::ZERO, &code)),
+                },
+            ],
+            SingleTx {
+                input: TxInput {
+                    chain_id: Some(1),
+                    gas_used_override: Some(TX_GAS_LIMIT),
+                    force_fail: false,
+                    auth: TxAuth::L2 { signed_bytes },
+                },
+                hash: tx_hash,
+                tx_type: 0,
+                success: true,
+                gas_used: TX_GAS_LIMIT,
+            },
+            coinbase,
+            10_000_000,
+            large_contracts_enabled,
+            vec![(alloy_primitives::keccak256(&code), code.clone())],
+        )
+    }
+
+    /// With large contracts on, a deployment one byte above EIP-170 runs
+    /// through execution, the derived account properties of the new code and
+    /// the tree update.
+    #[test]
+    fn atlas_v5_large_contracts_deploy_above_eip170() {
+        let batch = large_deployment_batch(0x6001, true);
+        let (output, commitment) = executor::execute_and_commit(&batch);
+        assert!(output.block_results[0].tx_results[0].success);
+        let wire = crate::wire::encode(&batch).unwrap();
+        assert_eq!(executor::execute_and_commit_streaming(&wire).unwrap().1, commitment);
+    }
+
+    /// Without large contracts the same deployment fails in the EVM, so a
+    /// witness that claims it does not verify: the failed receipt already moves
+    /// the sealed header hash.
+    #[test]
+    #[should_panic(expected = "computed block header hash")]
+    fn atlas_v5_rejects_a_deploy_above_eip170_without_large_contracts() {
+        executor::execute_and_commit(&large_deployment_batch(0x6001, false));
+    }
+
+    /// A priority transaction the operator filters (ZKsync OS 0.6.0 L1
+    /// transaction filtering) reaches the guest as `force_fail` with its full
+    /// gas limit as `gas_used_override`. Native's force-revert pays the
+    /// operator `gas_limit * max_fee_per_gas` from the treasury and refunds
+    /// the rest of the deposit to the refund recipient, and the guest must
+    /// commit the same balances.
+    #[test]
+    fn atlas_v5_filtered_priority_tx_is_charged_its_full_gas_limit() {
+        use zksync_os_revm::constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS};
+        const GAS_LIMIT: u64 = 200_000;
+        const MAX_FEE_PER_GAS: u64 = 1_000;
+        const EXTRA_DEPOSIT: u64 = 5_000;
+
+        let from: Address = "0x1000000000000000000000000000000000000001".parse().unwrap();
+        let to: Address = "0x2000000000000000000000000000000000000002".parse().unwrap();
+        let coinbase: Address = "0x00000000000000000000000000000000c01badde".parse().unwrap();
+        let fee = U256::from(GAS_LIMIT * MAX_FEE_PER_GAS);
+        let mint = fee + U256::from(EXTRA_DEPOSIT);
+
+        let mut abi = vec![0u8; 32 + 19 * 32 + 5 * 32];
+        abi[31] = 0x20;
+        abi[32 + 31] = 0x7f; // priority transaction
+        abi[32 + 32 + 12..32 + 64].copy_from_slice(from.as_slice());
+        abi[32 + 64 + 12..32 + 96].copy_from_slice(to.as_slice());
+        abi[32 + 96 + 24..32 + 128].copy_from_slice(&GAS_LIMIT.to_be_bytes());
+        abi[32 + 160 + 24..32 + 192].copy_from_slice(&MAX_FEE_PER_GAS.to_be_bytes());
+        abi[32 + 320..32 + 352].copy_from_slice(&mint.to_be_bytes::<32>()); // reserved[0]
+        abi[32 + 352 + 12..32 + 384].copy_from_slice(from.as_slice()); // refund recipient
+        for field in 0..5u32 {
+            let word = 32 + (14 + field as usize) * 32;
+            abi[word + 28..word + 32].copy_from_slice(&(19 * 32 + field * 32).to_be_bytes());
+        }
+        let tx_hash = alloy_primitives::keccak256(&abi);
+
+        let from_balance = U256::from(7u64);
+        let coinbase_balance = U256::from(5u64);
+        let treasury_balance = U256::from(1_000_000_000_000_000_000u128);
+        let mut batch = atlas_v5_single_tx_batch(
+            &[
+                AccountChange {
+                    address: from,
+                    before: Some(encode_account_props(0, from_balance)),
+                    after: Some(encode_account_props(0, from_balance + mint - fee)),
+                },
+                AccountChange {
+                    address: coinbase,
+                    before: Some(encode_account_props(0, coinbase_balance)),
+                    after: Some(encode_account_props(0, coinbase_balance + fee)),
+                },
+                AccountChange {
+                    address: BASE_TOKEN_HOLDER_ADDRESS,
+                    before: Some(encode_account_props(0, treasury_balance)),
+                    after: Some(encode_account_props(0, treasury_balance - mint)),
+                },
+                AccountChange { address: to, before: None, after: None },
+                // The L1 flow loads the asset tracker; this chain has none.
+                AccountChange { address: L2_ASSET_TRACKER_ADDRESS, before: None, after: None },
+            ],
+            SingleTx {
+                input: TxInput {
+                    chain_id: Some(1),
+                    gas_used_override: Some(GAS_LIMIT),
+                    force_fail: true,
+                    auth: TxAuth::L1 { tx_hash, abi_encoded: abi },
+                },
+                hash: tx_hash,
+                tx_type: 0x7f,
+                success: false,
+                gas_used: GAS_LIMIT,
+            },
+            coinbase,
+            10_000_000,
+            false,
+            vec![],
+        );
+        batch.batch_meta.l1_tx_filtering_enabled = true;
+
+        let (output, commitment) = executor::execute_and_commit(&batch);
+        let block = &output.block_results[0];
+        assert!(!block.tx_results[0].success);
+        assert_eq!(block.tx_results[0].gas_used, GAS_LIMIT);
+        assert_eq!(block.l2_to_l1_logs.len(), 1);
+        assert_eq!(block.l2_to_l1_logs[0].key, tx_hash);
+        assert_eq!(block.l2_to_l1_logs[0].value, B256::ZERO, "the priority log records a failure");
+        let wire = crate::wire::encode(&batch).unwrap();
+        assert_eq!(executor::execute_and_commit_streaming(&wire).unwrap().1, commitment);
+    }
+
+    /// AtlasV5 runs an AtlasV4 batch unchanged and commits the six-word chain
+    /// config of ZKsync OS 0.6.0. Each flag moves the commitment, and the
+    /// streaming path agrees.
+    #[test]
+    fn atlas_v5_commits_the_six_word_chain_config() {
+        use crate::commitment::{
+            batch_public_input_hash, chain_config_hash, ChainConfig, ChainConfigLayout,
+        };
+
+        let atlas_v4 = atlas_v4_transfer_batch(History::Contract);
+        let mut commitments = vec![executor::execute_and_commit(&atlas_v4).1];
+        for (filtering, large_contracts) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let mut batch = atlas_v4.clone();
+            batch.spec_id = 4;
+            batch.protocol_version_minor = 34;
+            batch.batch_meta.l1_tx_filtering_enabled = filtering;
+            batch.batch_meta.large_contracts_enabled = large_contracts;
+
+            let (output, commitment, state_before, state_after, batch_output) =
+                executor::execute_and_commit_debug(&batch);
+            assert!(output.block_results[0].tx_results[0].success);
+            let chain_config =
+                chain_config_hash(ChainConfigLayout::AtlasV5, &ChainConfig::of_batch(&batch));
+            assert_eq!(
+                commitment,
+                batch_public_input_hash(&state_before, &state_after, Some(&chain_config), &batch_output),
+                "filtering={filtering} large_contracts={large_contracts}",
+            );
+            let wire = crate::wire::encode(&batch).unwrap();
+            assert_eq!(executor::execute_and_commit_streaming(&wire).unwrap().1, commitment);
+            commitments.push(commitment);
+        }
+        for (i, a) in commitments.iter().enumerate() {
+            for b in &commitments[i + 1..] {
+                assert_ne!(a, b);
+            }
         }
     }
 

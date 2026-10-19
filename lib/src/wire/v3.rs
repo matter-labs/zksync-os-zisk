@@ -354,6 +354,8 @@ impl From<BatchMeta> for crate::types::BatchMeta {
             fri_proof_verification_enabled: value.fri_proof_verification_enabled,
             max_tx_gas_limit: value.max_tx_gas_limit,
             pubdata_content: crate::types::PUBDATA_CONTENT_FULL,
+            l1_tx_filtering_enabled: false,
+            large_contracts_enabled: false,
             interop_proofs: value.interop_proofs.map(Into::into),
         }
     }

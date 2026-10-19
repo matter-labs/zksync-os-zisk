@@ -204,13 +204,15 @@ key covers every range width.
 
 ## Wire formats
 
-The server writes the current `BatchInput` wire v5. The guest reads the
-leading version before the positional bincode payload and supports both the
-released v3 schema and current v5 simultaneously; each is normalized into one
+The server writes the current `BatchInput` wire v6. The guest reads the
+leading version before the positional bincode payload and supports the released
+v3 and v5 schemas and the current v6 simultaneously; each is normalized into one
 in-memory representation while preserving its `spec_id` and protocol minor.
-Wire v3 can select AtlasV1 through AtlasV3, while wire v5 also carries the
-AtlasV4-only chain-config mode and interop commitment-tree proofs. Wire v4 was
-never released from `main` and is rejected. Supporting old input bytes does not
+Wire v3 can select AtlasV1 through AtlasV3. Wire v5 adds AtlasV4 with its
+chain-config pubdata mode and interop commitment-tree proofs. Wire v6 adds
+AtlasV5 (ZKsync OS 0.6.0, protocol v34) and its two chain-config flags, L1
+transaction filtering and large contracts, which extend `chain_config_hash`
+from four words to six. Wire v4 was never released from `main` and is rejected. Supporting old input bytes does not
 preserve the old programVK: any guest code change still produces a new ELF and
 therefore rotates the key.
 

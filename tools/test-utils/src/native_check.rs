@@ -7,10 +7,12 @@
 //! names where the two implementations part.
 
 use revm::primitives::B256;
+use zksync_os_revm::ZkSpecId;
+use zksync_os_zisk_lib::commitment::{chain_config_hash, ChainConfig, ChainConfigLayout};
 use zksync_os_zisk_lib::executor;
 use zksync_os_zisk_lib::types::BatchInput;
 
-use crate::dump::{hb256, StateDumpBundle};
+use crate::dump::{hb256, zk_spec, StateDumpBundle};
 
 /// A value the native reference pins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -203,11 +205,21 @@ pub fn check_against_native(bundle: &StateDumpBundle, batch_input: &BatchInput) 
                     batch_output,
                     hb256(&bundle.native_batch_output_hash),
                 ));
-                let chain_config = zksync_os_zisk_lib::commitment::chain_config_hash(
-                    bundle.chain_id,
-                    bundle.chain_config_fri,
-                    bundle.chain_config_max_tx_gas_limit,
-                    bundle.chain_config_pubdata_content,
+                let layout = if ZkSpecId::AtlasV5.is_enabled_in(zk_spec(bundle.spec_id)) {
+                    ChainConfigLayout::AtlasV5
+                } else {
+                    ChainConfigLayout::AtlasV4
+                };
+                let chain_config = chain_config_hash(
+                    layout,
+                    &ChainConfig {
+                        chain_id: bundle.chain_id,
+                        fri_proof_verification_enabled: bundle.chain_config_fri,
+                        max_tx_gas_limit: bundle.chain_config_max_tx_gas_limit,
+                        pubdata_content: bundle.chain_config_pubdata_content,
+                        l1_tx_filtering_enabled: bundle.chain_config_l1_tx_filtering_enabled,
+                        large_contracts_enabled: bundle.chain_config_large_contracts_enabled,
+                    },
                 );
                 events.push(hashes(
                     Axis::ChainConfigHash,
