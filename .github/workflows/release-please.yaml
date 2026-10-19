@@ -18,9 +18,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Run release-please
+        id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           # RELEASE_TOKEN is a PAT, so the published release fires release-assets; the MATTERLABS_BOTS_* app secrets zksync-ci-common needs are not shared here.
           token: ${{ secrets.RELEASE_TOKEN }}
           config-file: .github/release-please/config.json
           manifest-file: .github/release-please/manifest.json
+
+      # `main` requires signed commits, and GitHub does not sign the commits the
+      # action creates with a PAT. `pr` is set when the action created or
+      # updated the release PR.
+      - name: Check out the release PR branch
+        if: steps.release.outputs.pr
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Re-create the release PR commit signed
+        if: steps.release.outputs.pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          verified="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head" --jq .commit.verification.verified)"
+          if [[ "$verified" == true ]]; then
+            echo "$BRANCH is already at a signed commit"
+            exit 0
+          fi
+          git log -1 --format=%B "$head" > "$RUNNER_TEMP/release-commit.txt"
+          # Both sides of a rename, so the script deletes the old path.
+          mapfile -t paths < <(git diff --name-only --no-renames HEAD^ HEAD)
+          .github/scripts/push-signed-commit.sh \
+            "$BRANCH" "$(git rev-parse HEAD^)" "$RUNNER_TEMP/release-commit.txt" "$head" \
+            "${paths[@]}"

@@ -123,6 +123,7 @@ jobs:
           cp prover/target/release/inspect_proof session/tools/
           cp tools/test-utils/target/release/check_binding_digest session/tools/
           cp .github/scripts/apply-fixture-session.py session/tools/
+          cp .github/scripts/push-signed-commit.sh session/tools/
           ls -la session session/tools
 
       - name: Upload the session bundle
@@ -233,6 +234,7 @@ jobs:
             session/aggregated-plonk.bin
             session/batch-*.bin
             session/tools/apply-fixture-session.py
+            session/tools/push-signed-commit.sh
           if-no-files-found: error
           retention-days: 14
 
@@ -322,27 +324,16 @@ jobs:
             echo "ERROR: RELEASE_TOKEN is required to publish the fixture PR" >&2
             exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$AUTOMATION_BRANCH"
-          git add \
+          # `main` requires signed commits, and a pushed `git commit` is
+          # unsigned. Artifacts drop the executable bit, hence `bash`.
+          expected="$(git ls-remote --heads origin "refs/heads/$AUTOMATION_BRANCH" | awk '{print $1}')"
+          echo "chore(fixtures): rotate ZiSK proof fixtures" > "$RUNNER_TEMP/fixture-commit.txt"
+          bash session/tools/push-signed-commit.sh \
+            "$AUTOMATION_BRANCH" "$(git rev-parse HEAD)" "$RUNNER_TEMP/fixture-commit.txt" "$expected" \
             guest-aggregator/BINDING_VECTOR.md \
             guest-aggregator/src/lib.rs \
             prover/tests/real_aggregation_vector.rs \
             prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin
-          git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
-
-          if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
-            git fetch origin "refs/heads/$AUTOMATION_BRANCH:refs/remotes/origin/$AUTOMATION_BRANCH"
-            expected="$(git rev-parse "refs/remotes/origin/$AUTOMATION_BRANCH")"
-            git push --force-with-lease="refs/heads/$AUTOMATION_BRANCH:$expected" \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$AUTOMATION_BRANCH"
-          else
-            git push \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$AUTOMATION_BRANCH"
-          fi
 
           source_sha="$(jq -r .metadata.selected_sha session/fixture-values.json)"
           inner_vk="$(jq -r .metadata.inner_program_vk session/fixture-values.json)"
