@@ -318,27 +318,23 @@ impl ChainConfig {
 /// era-contracts `ZKChainBase._getZKsyncOSChainConfigHash` holds the same
 /// encoding, so L1 can gate the two proving lanes against each other.
 pub fn chain_config_hash(layout: ChainConfigLayout, config: &ChainConfig) -> B256 {
-    let flag_word = |flag: bool| {
-        let mut word = [0u8; 32];
-        word[31] = u8::from(flag);
-        word
+    let mut data = [0u8; 192];
+    // chain_id as U256 BE
+    data[24..32].copy_from_slice(&config.chain_id.to_be_bytes());
+    // fri word: last byte 0/1
+    data[63] = u8::from(config.fri_proof_verification_enabled);
+    // max_tx_gas_limit right-aligned in the third 32-byte word
+    data[88..96].copy_from_slice(&config.max_tx_gas_limit.to_be_bytes());
+    // pubdata_content mode id in the last byte of the fourth 32-byte word
+    data[127] = config.pubdata_content;
+    // the two AtlasV5 flags in the last bytes of the fifth and sixth words
+    data[159] = u8::from(config.l1_tx_filtering_enabled);
+    data[191] = u8::from(config.large_contracts_enabled);
+    let len = match layout {
+        ChainConfigLayout::AtlasV4 => 128,
+        ChainConfigLayout::AtlasV5 => 192,
     };
-    let mut data = Vec::with_capacity(192);
-    let mut chain_id_word = [0u8; 32];
-    chain_id_word[24..].copy_from_slice(&config.chain_id.to_be_bytes());
-    data.extend_from_slice(&chain_id_word);
-    data.extend_from_slice(&flag_word(config.fri_proof_verification_enabled));
-    let mut max_tx_gas_limit_word = [0u8; 32];
-    max_tx_gas_limit_word[24..].copy_from_slice(&config.max_tx_gas_limit.to_be_bytes());
-    data.extend_from_slice(&max_tx_gas_limit_word);
-    let mut pubdata_content_word = [0u8; 32];
-    pubdata_content_word[31] = config.pubdata_content;
-    data.extend_from_slice(&pubdata_content_word);
-    if layout == ChainConfigLayout::AtlasV5 {
-        data.extend_from_slice(&flag_word(config.l1_tx_filtering_enabled));
-        data.extend_from_slice(&flag_word(config.large_contracts_enabled));
-    }
-    keccak256(&data)
+    keccak256(&data[..len])
 }
 
 /// Priority operations rolling hash.

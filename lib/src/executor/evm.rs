@@ -5,9 +5,11 @@
 
 use std::collections::HashSet;
 
+use revm::context::CfgEnv;
 use revm::database::CacheDB;
 use revm::primitives::{Address, B256, U256};
 use revm::{DatabaseRef, ExecuteCommitEvm, ExecuteEvm};
+use zksync_os_revm::constants::LARGE_CONTRACTS_MAX_CODE_SIZE;
 use zksync_os_revm::precompiles::ZKsyncPrecompiles;
 use zksync_os_revm::{zk_context, ZkBuilder, ZkSpecId};
 
@@ -56,7 +58,7 @@ pub(super) fn execute_block_proven(
     block: &BlockInput,
     cache_db: &mut CacheDB<ProvenDB>,
     max_tx_gas_limit: Option<u64>,
-    code_size_limit: Option<usize>,
+    large_contracts_enabled: bool,
 ) -> (BlockResult, BlockStateEffects) {
     // Parent hash = the previous block's hash, taken from the AUTHENTICATED
     // block-hash map, never from the unauthenticated witness `block.block_hashes`.
@@ -96,7 +98,7 @@ pub(super) fn execute_block_proven(
         block,
         cache_db,
         max_tx_gas_limit,
-        code_size_limit,
+        large_contracts_enabled,
     );
 
     let total_gas_used: u64 = exec.tx_results.iter().map(|t| t.gas_used).sum();
@@ -189,6 +191,32 @@ fn merge_pre_block_write(
     state_effects
 }
 
+/// Set the EVM config every block of a batch runs under. Host tools that replay
+/// the guest's execution, such as the dump reader's tracking pass, build their
+/// EVM with it too.
+pub fn configure_evm(
+    cfg: &mut CfgEnv<ZkSpecId>,
+    chain_id: u64,
+    spec_id: ZkSpecId,
+    large_contracts_enabled: bool,
+) {
+    cfg.chain_id = chain_id;
+    cfg.spec = spec_id;
+    // Native applies the EIP-7825 per-transaction gas cap in the L2 validation
+    // path alone, and its value is `min(block_gas_limit,
+    // chain_config.max_tx_gas_limit)`, which a chain admin may raise above
+    // Ethereum's 2^24. L1, upgrade and system transactions take paths that
+    // apply no cap at all. REVM's Osaka default would instead cap every
+    // transaction at 2^24, which rejects an upgrade transaction native accepts
+    // and rejects an L2 transaction on a chain that raised its configured cap.
+    // `build_proven_tx` applies native's rule.
+    cfg.tx_gas_limit_cap = Some(u64::MAX);
+    // `None` keeps REVM's EIP-170 default. REVM takes the initcode limit at
+    // twice the code limit, as native does.
+    cfg.limit_contract_code_size =
+        large_contracts_enabled.then_some(LARGE_CONTRACTS_MAX_CODE_SIZE);
+}
+
 /// Execute a block's transactions in the EVM and return tx results + L2→L1 logs.
 /// State changes are written into the shared `cache_db`.
 fn run_evm_block<DB: DatabaseRef>(
@@ -197,27 +225,14 @@ fn run_evm_block<DB: DatabaseRef>(
     block: &BlockInput,
     cache_db: &mut CacheDB<DB>,
     max_tx_gas_limit: Option<u64>,
-    code_size_limit: Option<usize>,
+    large_contracts_enabled: bool,
 ) -> BlockExecution
 where
     DB::Error: core::fmt::Debug,
 {
     let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
-            cfg.chain_id = chain_id;
-            cfg.spec = spec_id;
-            // Native applies the EIP-7825 per-transaction gas cap in the L2
-            // validation path alone, and its value is
-            // `min(block_gas_limit, chain_config.max_tx_gas_limit)`, which a
-            // chain admin may raise above Ethereum's 2^24. L1, upgrade and
-            // system transactions take paths that apply no cap at all. REVM's
-            // Osaka default would instead cap every transaction at 2^24, which
-            // rejects an upgrade transaction native accepts and rejects an L2
-            // transaction on a chain that raised its configured cap.
-            // `build_proven_tx` applies native's rule.
-            cfg.tx_gas_limit_cap = Some(u64::MAX);
-            // REVM takes the initcode limit at twice this, as native does.
-            cfg.limit_contract_code_size = code_size_limit;
+            configure_evm(cfg, chain_id, spec_id, large_contracts_enabled)
         })
         .modify_block_chained(|blk| {
             blk.number = U256::from(block.number);
@@ -359,46 +374,13 @@ mod tests {
     use super::*;
     use revm::database::EmptyDB;
     use revm::state::AccountInfo;
-    use zksync_os_revm::constants::LARGE_CONTRACTS_MAX_CODE_SIZE;
+    use crate::test_support::{sign_legacy, TEST_CHAIN_ID, TEST_GAS_PRICE};
 
-    const CHAIN_ID: u64 = 1;
-    const GAS_PRICE: u128 = 10;
     /// The EIP-7825 cap. Depositing 64 KiB of code costs 13.1M gas.
     const TX_GAS_LIMIT: u64 = 1 << 24;
     const SENDER_KEY: [u8; 32] = [0x61; 32];
     /// EIP-170, the deployed-code limit without large contracts.
     const DEFAULT_MAX_CODE_SIZE: usize = 0x6000;
-
-    /// A signed legacy deployment of `initcode` from the [`SENDER_KEY`]
-    /// account at nonce 0.
-    fn signed_deployment(initcode: Vec<u8>) -> (Address, Vec<u8>) {
-        use alloy_consensus::{SignableTransaction, TxEnvelope, TxLegacy};
-        use alloy_eips::eip2718::Encodable2718;
-        use k256::ecdsa::SigningKey;
-        let key = SigningKey::from_bytes((&SENDER_KEY).into()).unwrap();
-        let public_key = key.verifying_key().to_encoded_point(false);
-        let sender = Address::from_slice(&alloy_primitives::keccak256(&public_key.as_bytes()[1..])[12..]);
-        let tx = TxLegacy {
-            chain_id: Some(CHAIN_ID),
-            nonce: 0,
-            gas_price: GAS_PRICE,
-            gas_limit: TX_GAS_LIMIT,
-            to: alloy_primitives::TxKind::Create,
-            value: U256::ZERO,
-            input: initcode.into(),
-        };
-        let (signature, recovery_id) =
-            key.sign_prehash_recoverable(tx.signature_hash().as_slice()).unwrap();
-        let signature_bytes = signature.to_bytes();
-        let signature = alloy_primitives::Signature::new(
-            U256::from_be_slice(&signature_bytes[..32]),
-            U256::from_be_slice(&signature_bytes[32..]),
-            recovery_id.is_y_odd(),
-        );
-        let mut signed = Vec::new();
-        TxEnvelope::Legacy(tx.into_signed(signature)).encode_2718(&mut signed);
-        (sender, signed)
-    }
 
     /// Initcode of `initcode_len` bytes that deploys `code_len` zero bytes:
     /// `PUSH3 code_len PUSH1 0 RETURN`, padded with unreachable zeros.
@@ -410,16 +392,22 @@ mod tests {
         code
     }
 
-    /// Run one AtlasV5 block that deploys `initcode` under `code_size_limit`,
-    /// and return whether the deployment succeeded and the length of the code
-    /// it left at the new address.
-    fn deploy(initcode: Vec<u8>, code_size_limit: Option<usize>) -> (bool, usize) {
-        let (sender, signed_bytes) = signed_deployment(initcode);
+    /// Run one AtlasV5 block that deploys `initcode`, and return whether the
+    /// deployment succeeded and the length of the code it left at the new
+    /// address.
+    fn deploy(initcode: Vec<u8>, large_contracts_enabled: bool) -> (bool, usize) {
+        let (sender, signed_bytes) = sign_legacy(
+            SENDER_KEY,
+            0,
+            alloy_primitives::TxKind::Create,
+            initcode,
+            TX_GAS_LIMIT,
+        );
         let mut cache_db = CacheDB::new(EmptyDB::default());
         cache_db.insert_account_info(
             sender,
             AccountInfo {
-                balance: U256::from(TX_GAS_LIMIT) * U256::from(GAS_PRICE),
+                balance: U256::from(TX_GAS_LIMIT) * U256::from(TEST_GAS_PRICE),
                 ..Default::default()
             },
         );
@@ -431,7 +419,7 @@ mod tests {
             coinbase: Address::repeat_byte(0xc0),
             prev_randao: B256::ZERO,
             transactions: vec![TxInput {
-                chain_id: Some(CHAIN_ID),
+                chain_id: Some(TEST_CHAIN_ID),
                 gas_used_override: None,
                 force_fail: false,
                 auth: TxAuth::L2 { signed_bytes },
@@ -444,12 +432,12 @@ mod tests {
             expected_tree_root: B256::ZERO,
         };
         let execution = run_evm_block(
-            CHAIN_ID,
+            TEST_CHAIN_ID,
             ZkSpecId::AtlasV5,
             &block,
             &mut cache_db,
             Some(TX_GAS_LIMIT),
-            code_size_limit,
+            large_contracts_enabled,
         );
         let code_len = cache_db
             .basic_ref(sender.create(0))
@@ -462,24 +450,22 @@ mod tests {
     /// without them EIP-170 holds.
     #[test]
     fn large_contracts_raise_the_deployed_code_limit() {
-        let large = Some(LARGE_CONTRACTS_MAX_CODE_SIZE);
         let above_default = DEFAULT_MAX_CODE_SIZE + 1;
-        assert_eq!(deploy(initcode(DEFAULT_MAX_CODE_SIZE, 7), None), (true, DEFAULT_MAX_CODE_SIZE));
-        assert_eq!(deploy(initcode(above_default, 7), None), (false, 0));
-        assert_eq!(deploy(initcode(above_default, 7), large), (true, above_default));
+        assert_eq!(deploy(initcode(DEFAULT_MAX_CODE_SIZE, 7), false), (true, DEFAULT_MAX_CODE_SIZE));
+        assert_eq!(deploy(initcode(above_default, 7), false), (false, 0));
+        assert_eq!(deploy(initcode(above_default, 7), true), (true, above_default));
         assert_eq!(
-            deploy(initcode(LARGE_CONTRACTS_MAX_CODE_SIZE, 7), large),
+            deploy(initcode(LARGE_CONTRACTS_MAX_CODE_SIZE, 7), true),
             (true, LARGE_CONTRACTS_MAX_CODE_SIZE)
         );
-        assert_eq!(deploy(initcode(LARGE_CONTRACTS_MAX_CODE_SIZE + 1, 7), large), (false, 0));
+        assert_eq!(deploy(initcode(LARGE_CONTRACTS_MAX_CODE_SIZE + 1, 7), true), (false, 0));
     }
 
     /// Large contracts double the initcode limit to 128 KiB as well.
     #[test]
     fn large_contracts_raise_the_initcode_limit() {
-        let large = Some(LARGE_CONTRACTS_MAX_CODE_SIZE);
-        assert_eq!(deploy(initcode(1, 2 * DEFAULT_MAX_CODE_SIZE + 1), large), (true, 1));
-        assert_eq!(deploy(initcode(1, 2 * LARGE_CONTRACTS_MAX_CODE_SIZE), large), (true, 1));
+        assert_eq!(deploy(initcode(1, 2 * DEFAULT_MAX_CODE_SIZE + 1), true), (true, 1));
+        assert_eq!(deploy(initcode(1, 2 * LARGE_CONTRACTS_MAX_CODE_SIZE), true), (true, 1));
     }
 
     /// Without large contracts an initcode above EIP-3860's 48 KiB makes the
@@ -487,7 +473,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "transaction execution failed")]
     fn initcode_above_the_default_limit_is_invalid() {
-        deploy(initcode(1, 2 * DEFAULT_MAX_CODE_SIZE + 1), None);
+        deploy(initcode(1, 2 * DEFAULT_MAX_CODE_SIZE + 1), false);
     }
 
     /// The doubled initcode limit still binds.
@@ -496,7 +482,7 @@ mod tests {
     fn initcode_above_the_large_limit_is_invalid() {
         deploy(
             initcode(1, 2 * LARGE_CONTRACTS_MAX_CODE_SIZE + 1),
-            Some(LARGE_CONTRACTS_MAX_CODE_SIZE),
+            true,
         );
     }
 }

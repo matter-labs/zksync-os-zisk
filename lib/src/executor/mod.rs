@@ -12,6 +12,8 @@ mod stream;
 pub mod tx;
 mod verify;
 
+pub use evm::configure_evm;
+
 use std::collections::{HashMap, HashSet};
 
 use revm::database::CacheDB;
@@ -22,13 +24,12 @@ use crate::commitment;
 use crate::commitment::{BatchOutputLayout, ChainConfigLayout};
 use crate::types::*;
 
-/// The lowest L1 protocol minor an AtlasV4 batch may carry.
+/// The lowest L1 protocol minor an AtlasV4 batch may carry. AtlasV4 (ZKsync OS
+/// 0.5.x) covers v32 and v33, up to [`ATLAS_V5_MIN_PROTOCOL_MINOR`].
 ///
-/// The 0.4.0 tree names 32 and marks the value a draft, and the server still
-/// routes minor 32 to the AtlasV3 execution version, so AtlasV3 accepts 32 as
-/// well. Once the release fixes the protocol version, narrow the AtlasV3 arm of
-/// the cross-check to 31 and pin AtlasV4 to exactly this value, so the two
-/// ranges stop overlapping.
+/// The server also routes minor 32 to the AtlasV3 execution version, so AtlasV3
+/// accepts 32 as well. Once no server does, narrow the AtlasV3 arm of the
+/// cross-check to 31 so the two ranges stop overlapping.
 const ATLAS_V4_MIN_PROTOCOL_MINOR: u32 = 32;
 
 /// The L1 protocol minor of ZKsync OS 0.6.0, the first AtlasV5 release. AtlasV4
@@ -75,6 +76,19 @@ fn execute_and_commit_inner(input: &BatchInput) -> (BatchOutput, B256, B256, B25
     run_execution_and_commit(input, spec_id, proven_db)
 }
 
+/// The spec a `BatchInput::spec_id` byte selects, or `None` for a byte no
+/// release emits.
+pub fn zk_spec_id(spec_id: u8) -> Option<ZkSpecId> {
+    match spec_id {
+        0 => Some(ZkSpecId::AtlasV1),
+        1 => Some(ZkSpecId::AtlasV2),
+        2 => Some(ZkSpecId::AtlasV3),
+        3 => Some(ZkSpecId::AtlasV4),
+        4 => Some(ZkSpecId::AtlasV5),
+        _ => None,
+    }
+}
+
 /// Assert the normalized wire-format version, resolve the spec id, and validate
 /// the block sequence. Shared by the collecting and streaming entry points.
 fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
@@ -90,26 +104,21 @@ fn resolve_spec_and_validate(input: &BatchInput) -> ZkSpecId {
     );
     // A released wire version cannot select a spec introduced after it.
     let newest_spec = match input.version {
-        crate::wire::v3::BATCH_INPUT_VERSION => Some((2, "AtlasV3")),
-        crate::wire::v5::BATCH_INPUT_VERSION => Some((3, "AtlasV4")),
+        crate::wire::v3::BATCH_INPUT_VERSION => Some(ZkSpecId::AtlasV3),
+        crate::wire::v5::BATCH_INPUT_VERSION => Some(ZkSpecId::AtlasV4),
         _ => None,
     };
-    if let Some((max_spec_id, name)) = newest_spec {
+    if let Some(newest_spec) = newest_spec {
         assert!(
-            input.spec_id <= max_spec_id,
-            "BatchInput wire v{} cannot carry spec_id {} (maximum is {name}/spec_id {max_spec_id})",
+            input.spec_id <= newest_spec as u8,
+            "BatchInput wire v{} cannot carry spec_id {} (maximum is {newest_spec:?}/spec_id {})",
             input.version,
             input.spec_id,
+            newest_spec as u8,
         );
     }
-    let spec_id = match input.spec_id {
-        0 => ZkSpecId::AtlasV1,
-        1 => ZkSpecId::AtlasV2,
-        2 => ZkSpecId::AtlasV3,
-        3 => ZkSpecId::AtlasV4,
-        4 => ZkSpecId::AtlasV5,
-        _ => panic!("unknown spec_id: {}", input.spec_id),
-    };
+    let spec_id = zk_spec_id(input.spec_id)
+        .unwrap_or_else(|| panic!("unknown spec_id: {}", input.spec_id));
     // `spec_id` is the ZKsync OS state transition function tier and the single
     // source of truth for every formula the guest computes.
     // `protocol_version_minor` is the L1 protocol version, a separate axis.
@@ -204,15 +213,12 @@ fn run_execution_and_commit(
     let max_tx_gas_limit = ZkSpecId::AtlasV4
         .is_enabled_in(spec_id)
         .then_some(meta.max_tx_gas_limit);
-    // `None` keeps REVM's EIP-170 default.
-    let code_size_limit = meta
-        .large_contracts_enabled
-        .then_some(zksync_os_revm::constants::LARGE_CONTRACTS_MAX_CODE_SIZE);
     for block in &input.blocks {
         verify_intra_batch_hashes(block, &computed_block_hashes);
 
         let (result, state_effects) = evm::execute_block_proven(
-            input.chain_id, spec_id, block, &mut cache_db, max_tx_gas_limit, code_size_limit,
+            input.chain_id, spec_id, block, &mut cache_db, max_tx_gas_limit,
+            meta.large_contracts_enabled,
         );
         // Feed the block's own computed header hash back into the BLOCKHASH map
         // so a later block's BLOCKHASH read resolves to this authenticated value.

@@ -199,14 +199,7 @@ fn haddr(s: &str) -> Address {
 }
 
 pub(crate) fn zk_spec(spec_id: u8) -> ZkSpecId {
-    match spec_id {
-        0 => ZkSpecId::AtlasV1,
-        1 => ZkSpecId::AtlasV2,
-        2 => ZkSpecId::AtlasV3,
-        3 => ZkSpecId::AtlasV4,
-        4 => ZkSpecId::AtlasV5,
-        x => panic!("unknown spec_id {x}"),
-    }
+    executor::zk_spec_id(spec_id).unwrap_or_else(|| panic!("unknown spec_id {spec_id}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -427,14 +420,16 @@ fn tracking_pre_block_write(
 
 /// Mirror of executor::evm::run_evm_block for the tracking pass (records
 /// reads). Transactions are built by the guest's own
-/// `executor::tx::build_proven_tx`, so tracking and guest execution can
-/// never diverge on tx construction.
+/// `executor::tx::build_proven_tx` and the EVM config by its
+/// `executor::configure_evm`, so tracking and guest execution can never
+/// diverge on either.
 fn tracking_run(
     chain_id: u64,
     spec_id: ZkSpecId,
     block: &BlockInput,
     cache_db: &mut revm::database::CacheDB<RecordingDb>,
     max_tx_gas_limit: Option<u64>,
+    large_contracts_enabled: bool,
 ) {
     use revm::ExecuteCommitEvm;
     use zksync_os_revm::{zk_context, ZkBuilder};
@@ -445,8 +440,7 @@ fn tracking_run(
 
     let mut evm = zk_context(cache_db, spec_id)
         .modify_cfg_chained(|cfg| {
-            cfg.chain_id = chain_id;
-            cfg.spec = spec_id;
+            executor::configure_evm(cfg, chain_id, spec_id, large_contracts_enabled)
         })
         .modify_block_chained(|blk| {
             blk.number = U256::from(block.number);
@@ -858,7 +852,14 @@ pub fn build_batch_input(d: &StateDumpBundle, header_hash_check: HeaderHashCheck
         .is_enabled_in(spec)
         .then(|| resolve_max_tx_gas_limit(d.chain_config_max_tx_gas_limit));
     let tracked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tracking_run(d.chain_id, spec, &block_env, &mut cache, max_tx_gas_limit);
+        tracking_run(
+            d.chain_id,
+            spec,
+            &block_env,
+            &mut cache,
+            max_tx_gas_limit,
+            d.chain_config_large_contracts_enabled,
+        );
     }));
     if tracked.is_err() {
         eprintln!(
@@ -1368,6 +1369,125 @@ pub(crate) mod tests {
         let (recovered, value) = proof.verify(&missing).expect("verify");
         assert_eq!(recovered, root);
         assert!(value.is_none());
+    }
+
+    /// The tracking pass runs under the chain's code-size limit. A priority
+    /// transaction calls a factory that deploys a contract one byte above
+    /// EIP-170 and then calls it, and the contract reads the balance of a
+    /// probe account. The read happens, and so enters the witness, only when
+    /// large contracts are on. (A storage read of the new contract would not
+    /// do: REVM serves a contract created in the same transaction without a
+    /// database read.)
+    #[test]
+    fn tracking_follows_the_large_contracts_code_size_limit() {
+        // CALLDATACOPY(0, 0, cds); CREATE(0, 0, cds); CALL(gas, created, 0, 0,
+        // 0, 0, 0); STOP.
+        const FACTORY_CODE: [u8; 26] = [
+            0x36, 0x60, 0x00, 0x60, 0x00, 0x37, 0x36, 0x60, 0x00, 0x60, 0x00, 0xf0, 0x60, 0x00,
+            0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x60, 0x00, 0x85, 0x5a, 0xf1, 0x00,
+        ];
+        const CODE_LEN: u16 = 0x6001;
+        let factory = Address::repeat_byte(0xfa);
+        let sender = Address::repeat_byte(0x11);
+        let probe = Address::repeat_byte(0x77);
+
+        // Runtime `PUSH20 probe BALANCE POP STOP`, zero-padded to CODE_LEN:
+        // PUSH32 runtime-prefix; MSTORE(0); RETURN(0, CODE_LEN).
+        let mut initcode = vec![0x7f, 0x73];
+        initcode.extend_from_slice(probe.as_slice());
+        initcode.extend_from_slice(&[0x31, 0x50, 0x00]);
+        initcode.resize(33, 0);
+        initcode.extend_from_slice(&[0x60, 0x00, 0x52, 0x61]);
+        initcode.extend_from_slice(&CODE_LEN.to_be_bytes());
+        initcode.extend_from_slice(&[0x60, 0x00, 0xf3]);
+
+        // L2CanonicalTransaction with `initcode` as its data: 19 head words,
+        // then the five dynamic fields, `data` first.
+        let padded = initcode.len().div_ceil(32) * 32;
+        let mut abi = vec![0u8; 32 + 19 * 32 + 32 + padded + 4 * 32];
+        abi[31] = 0x20;
+        abi[32 + 31] = 0x7f; // priority transaction
+        abi[32 + 32 + 12..32 + 64].copy_from_slice(sender.as_slice());
+        abi[32 + 64 + 12..32 + 96].copy_from_slice(factory.as_slice());
+        abi[32 + 96 + 24..32 + 128].copy_from_slice(&10_000_000u64.to_be_bytes());
+        abi[32 + 352 + 12..32 + 384].copy_from_slice(sender.as_slice()); // refund
+        let data_offset = 19 * 32;
+        for (field, offset) in [
+            data_offset,
+            data_offset + 32 + padded,
+            data_offset + 64 + padded,
+            data_offset + 96 + padded,
+            data_offset + 128 + padded,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let word = 32 + (14 + field) * 32;
+            abi[word + 28..word + 32].copy_from_slice(&(offset as u32).to_be_bytes());
+        }
+        let data_start = 32 + data_offset;
+        abi[data_start + 28..data_start + 32]
+            .copy_from_slice(&(initcode.len() as u32).to_be_bytes());
+        abi[data_start + 32..data_start + 32 + initcode.len()].copy_from_slice(&initcode);
+
+        // The factory holds its code at nonce 1, the nonce of a deployed contract.
+        let mut factory_props = vec![0u8; AccountProperties::ENCODED_SIZE];
+        factory_props[8..16].copy_from_slice(&1u64.to_be_bytes());
+        let factory_code_hash = alloy_primitives::keccak256(FACTORY_CODE);
+        factory_props[88..120].copy_from_slice(factory_code_hash.as_slice());
+        let factory_props_hash = AccountProperties::hash(&factory_props);
+
+        let block = BlockInput {
+            number: 1,
+            timestamp: 1_700_000_000,
+            base_fee: 0,
+            gas_limit: 30_000_000,
+            coinbase: Address::repeat_byte(0xc0),
+            prev_randao: B256::ZERO,
+            transactions: vec![TxInput {
+                chain_id: Some(1),
+                gas_used_override: None,
+                force_fail: false,
+                auth: TxAuth::L1 {
+                    tx_hash: alloy_primitives::keccak256(&abi),
+                    abi_encoded: abi,
+                },
+            }],
+            account_preimages: vec![],
+            block_hashes: vec![],
+            storage_proofs: vec![],
+            block_header_hash: B256::ZERO,
+            l2_to_l1_logs: vec![],
+            expected_tree_root: B256::ZERO,
+        };
+
+        for large_contracts_enabled in [false, true] {
+            let rec = RecordingDb {
+                storage: HashMap::from([(
+                    derive_account_properties_key(&factory.into_array()),
+                    factory_props_hash,
+                )]),
+                preimages: HashMap::from([(factory_props_hash, factory_props.clone())]),
+                code: HashMap::from([(factory_code_hash, FACTORY_CODE.to_vec())]),
+                block_hashes: HashMap::new(),
+                read_slots: RefCell::new(BTreeSet::new()),
+                read_accounts: RefCell::new(BTreeSet::new()),
+            };
+            let mut cache = revm::database::CacheDB::new(rec);
+            tracking_run(
+                1,
+                ZkSpecId::AtlasV5,
+                &block,
+                &mut cache,
+                Some(1 << 24),
+                large_contracts_enabled,
+            );
+            assert_eq!(
+                cache.db.read_accounts.borrow().contains(&probe),
+                large_contracts_enabled,
+                "large_contracts_enabled={large_contracts_enabled}",
+            );
+        }
     }
 
     /// Every AtlasV4 block authenticates the EIP-2935 history contract before
