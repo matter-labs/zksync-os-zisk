@@ -135,7 +135,7 @@ jobs:
 
   prove:
     name: prove, compare native/guest commitments, and aggregate
-    runs-on: [matterlabs-ci-gpu-runner]
+    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
     needs: prepare
     timeout-minutes: 240
     permissions:
