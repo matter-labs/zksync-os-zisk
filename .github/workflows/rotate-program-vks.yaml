@@ -56,6 +56,7 @@ jobs:
           path: .rotation-tooling
           sparse-checkout: |
             .github/scripts/rotate-program-vk.py
+            .github/scripts/push-signed-commit.sh
           sparse-checkout-cone-mode: false
 
       - name: validate the base branch
@@ -225,23 +226,12 @@ jobs:
           inner_elf="$(jq -r .elf_sha256 /tmp/vk-inner/metadata.json)"
           aggregator_elf="$(jq -r .elf_sha256 /tmp/vk-aggregator/metadata.json)"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add guest/GUEST_PROGRAM_VK guest-aggregator/GUEST_PROGRAM_VK
-          git commit -m "chore(guest): rotate ZiSK program VK pins"
-
-          if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
-            expected="$(git rev-parse "refs/remotes/origin/$branch")"
-            git push --force-with-lease="refs/heads/$branch:$expected" \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          else
-            git push \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          fi
+          # `main` requires signed commits, and a pushed `git commit` is unsigned.
+          expected="$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')"
+          echo "chore(guest): rotate ZiSK program VK pins" > "$RUNNER_TEMP/program-vk-commit.txt"
+          .rotation-tooling/.github/scripts/push-signed-commit.sh \
+            "$branch" "$source_commit" "$RUNNER_TEMP/program-vk-commit.txt" "$expected" \
+            guest/GUEST_PROGRAM_VK guest-aggregator/GUEST_PROGRAM_VK
 
           body="$RUNNER_TEMP/program-vk-rotation.md"
           {
