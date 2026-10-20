@@ -44,9 +44,9 @@ no continuation input.
 
 ## Inputs (real 4-batch aggregation session, ZiSK v1.3.2-alpha, 2026-10-19)
 
-This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/39233983801) from
-`feat/zisk-1.3.2-alpha` at `52cfa36c05cf09d6433d8912b3f8c523f7b50630`. The inputs are
-deterministic wire-v5 protocol-v32 AtlasV4 fixtures (wire version 5, spec ID 3,
+This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/39274149227) from
+`ci/fixture-session-rtx6000` at `df9a0ddf6d19e317d0f7b111a098afc99636fa5b`. The inputs are
+deterministic wire-v6 protocol-v32 AtlasV4 fixtures (wire version 6, spec ID 3,
 protocol minor 32), encoded by `tools/test-utils` and executed natively through
 the version-dispatching bincode entry point. They carry the four-word public
 input shape, including `chainConfigHash`, used by the current settlement
@@ -57,18 +57,18 @@ in batch order, with the commitments extracted from all four guest proofs
 before PLONK wrapping or recursive proving. All four pairs were equal.
 
 Session data: inner ELF SHA-256
-`81deb9c3dde386dd9c4baa0022708d7f8f9b12d39d59adbec2184ec3518bc6aa`, aggregator ELF SHA-256
+`64a9b91c204fee1d8f8b7a6b258d31977902847a2e66a50c3451026a577a29d4`, aggregator ELF SHA-256
 `2c32095410aa67c1bb08119212ab12ef23dece381d576a087e44078795c7b126`.
 
 Framed inputs:
 
-- `batch-1.bin`: framed SHA-256 `35a0a72bd13155c8fcdd397d3c16f0bd43ae9141fed3be0187dd9ad653f4a97e`
-- `batch-2.bin`: framed SHA-256 `b3f3492e4a4f890699221dc2518ff30ebafea8b7b7a7e56bd782e91d1e5194c6`
-- `batch-3.bin`: framed SHA-256 `449aa9085987334f0f43228a3b9c51b17287284b01962fa0958745cb1780d7b8`
-- `batch-4.bin`: framed SHA-256 `72b7f175f112ea7f3f3645cafbc4614f82d4378efd1b35b8523a7c77e2839781`
+- `batch-1.bin`: framed SHA-256 `ea6d4b2b850978515ce8f211de84d320e7ef11bedc9d8f6f21ca627c2f4c5ff4`
+- `batch-2.bin`: framed SHA-256 `d45789841e4aa3ca3b0ff9c5a8115eb8f81381ae9518662139972dd239c0742a`
+- `batch-3.bin`: framed SHA-256 `bca6e66286ee742f21e772029034c3b16f3bbe124f5cb6c7a514514b1e583704`
+- `batch-4.bin`: framed SHA-256 `7fecab39d8986e976d53ec78333d687546bd0a8485617877bef8caa979d71ea5`
 
 ```text
-innerProgramVK   = 0xc883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f
+innerProgramVK   = 0x09ebc4f2e17b20d69b6f2850ddfe187ba5b0514abffbcf789823cc6e4e44ef02
 rootCVadcopFinal = 0x6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265
 ```
 
@@ -100,7 +100,7 @@ formula.
 
 ```text
 rangePublicInput = 0x00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5
-digest           = 0x975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf
+digest           = 0xec1bf9cd08fde7ce771e6ceb96064b0fa73b3a475e7f6da8675989c3c40b13a2
 ```
 
 The real aggregated proof of this range commits the same digest: the
