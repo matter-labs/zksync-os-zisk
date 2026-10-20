@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.10](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.9...0.0.10) (2026-10-20)
+
+
+### Bug Fixes
+
+* **fixtures:** accept the wire-v6 session inputs ([#62](https://github.com/matter-labs/zksync-os-zisk/issues/62)) ([c6c0e60](https://github.com/matter-labs/zksync-os-zisk/commit/c6c0e60b8855f85338516f3f362b4d88dcad82bd))
+
 ## [0.0.9](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.8...0.0.9) (2026-10-19)
 
 
