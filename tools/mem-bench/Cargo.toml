@@ -16,7 +16,6 @@ publish = false
 [dependencies]
 zksync-os-zisk-lib = { path = "../../lib", features = ["bench-internals"] }
 alloy-primitives = { version = "1", default-features = false }
-bincode = "1.3"
 
 [[bin]]
 name = "mem-bench"
