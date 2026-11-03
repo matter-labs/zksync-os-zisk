@@ -21,7 +21,7 @@ permissions:
 env:
   TAG: ${{ inputs.tag || github.event.release.tag_name }}
   TARGET: x86_64-unknown-linux-gnu
-  ZISK_VERSION: "1.3.2-alpha"
+  ZISK_VERSION: "1.4.0-alpha"
 
 defaults:
   run:
@@ -141,13 +141,15 @@ jobs:
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # CPU program setup derives ROM verification data from the STARK proving key.
+      # CPU program setup derives ROM verification data from the STARK proving
+      # key: the Poseidon1 one, this lane's family, which ziskup installs only
+      # when asked.
       - name: Install ZiSK and the STARK proving key
         run: |
           curl -sSfL \
             "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/install.sh" \
             -o /tmp/ziskup-install.sh
-          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --cpu -y
+          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --poseidon1 --cpu -y
           echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
 
       - name: Derive both program VKs

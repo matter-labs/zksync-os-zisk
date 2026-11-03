@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ZISK_VERSION: "1.3.2-alpha"
+  ZISK_VERSION: "1.4.0-alpha"
 
 jobs:
   prepare:
@@ -178,21 +178,28 @@ jobs:
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
+      # The Poseidon1 keys: this lane's family, and the one L1 verifies. ziskup
+      # installs the blake3 key unless told otherwise; setup_snark follows the
+      # family of the installed key.
       - name: Install ZiSK toolchain and both proving keys
         run: |
           curl -sSfL \
             "https://raw.githubusercontent.com/0xPolygonHermez/zisk/v${ZISK_VERSION}/ziskup/install.sh" \
             -o /tmp/ziskup-install.sh
-          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --gpu -y
+          bash /tmp/ziskup-install.sh -v "$ZISK_VERSION" --provingkey --poseidon1 --gpu -y
           echo "$HOME/.zisk/bin" >> "$GITHUB_PATH"
           "$HOME/.zisk/bin/ziskup" setup_snark
 
-      # ZiSK 1.2 verifies wrapped SNARKs through the snarkjs executable.
+      # `cargo-zisk prove -y` verifies a pilfflonk SNARK with pilfflonk's
+      # JavaScript verifier, which the toolchain bundle ships without its npm
+      # dependencies and finds through PILFFLONK_JS.
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Install SNARK verification tool
-        run: npm install --global snarkjs@0.7.6
+      - name: Install the pilfflonk verifier's dependencies
+        run: |
+          echo "PILFFLONK_JS=$HOME/.zisk/zisk/pilfflonk-js" >> "$GITHUB_ENV"
+          npm install --prefix "$HOME/.zisk/zisk/pilfflonk-js" --no-audit --no-fund
 
       - name: Prove and validate the complete session
         env:
@@ -229,8 +236,8 @@ jobs:
             session/aggregator-input.txt
             session/binding-digest.txt
             session/vadcop-batch-*.bin
-            session/batch1-plonk.bin
-            session/aggregated-plonk.bin
+            session/batch1-snark.bin
+            session/aggregated-snark.bin
             session/batch-*.bin
             session/tools/apply-fixture-session.py
           if-no-files-found: error
@@ -268,15 +275,18 @@ jobs:
           python3 session/tools/apply-fixture-session.py \
             --values session/fixture-values.json \
             --vadcop session/vadcop-batch-1.bin \
+            --snark session/aggregated-snark.bin \
             --repo-root .
           expected=(
             guest-aggregator/BINDING_VECTOR.md
             guest-aggregator/src/lib.rs
-            prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin
+            prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin
+            prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin
             prover/tests/real_aggregation_vector.rs
+            prover/tests/real_proof_parse.rs
           )
-          # The fixture file is untracked until the first session of a new
-          # ZiSK version publishes it; intent-to-add makes it show in the
+          # The fixture files are untracked until the first session of a new
+          # ZiSK version publishes them; intent-to-add makes them show in the
           # diff like the replaced files do.
           git add --intent-to-add "${expected[@]}"
           mapfile -t changed < <(git diff --name-only)
@@ -288,29 +298,24 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # The prover's zisk-verifier dev-dependency compiles the pil2-stark C++
-      # library on x86_64 (see ci.yaml); without these inputs `cargo test` fails
-      # to build and the fixture never publishes.
-      - run: >
-          sudo apt-get update && sudo apt-get install -y --no-install-recommends
-          build-essential cmake nasm libgmp-dev nlohmann-json3-dev libsodium-dev
-          libomp-dev libopenmpi-dev openmpi-bin openmpi-common libssl-dev
-          uuid-dev libsecp256k1-dev libpqxx-dev libprotobuf-dev
-          protobuf-compiler libgrpc++-dev
 
       - name: Test the updated aggregator vector
         working-directory: guest-aggregator
         run: cargo test
 
-      - name: Test the updated prover vector
+      # `--include-ignored`: the real-fixture tests are ignored until a
+      # toolchain bump's first session publishes their fixtures.
+      - name: Test the updated prover vectors
         working-directory: prover
-        run: cargo test --test real_aggregation_vector
+        run: >
+          cargo test --test real_aggregation_vector --test real_proof_parse
+          -- --include-ignored
         env:
           ZISK_AGG_SESSION_DIR: ${{ github.workspace }}/session
 
       - name: Verify the updated real vadcop_final fixture
         working-directory: zisk-verifier
-        run: cargo test --all-features verifies_the_real_vadcop_final_proof_file
+        run: cargo test --all-features verifies_the_real_vadcop_final_proof_file -- --include-ignored
 
       - name: Open or update the in-repository fixture PR
         env:
@@ -329,7 +334,9 @@ jobs:
             guest-aggregator/BINDING_VECTOR.md \
             guest-aggregator/src/lib.rs \
             prover/tests/real_aggregation_vector.rs \
-            prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin
+            prover/tests/real_proof_parse.rs \
+            prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin \
+            prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin
           git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
 
           if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
@@ -350,16 +357,18 @@ jobs:
           cat > "$body" <<EOF
           Generated by the validated [fixture-session workflow]($RUN_URL) from source commit \`$source_sha\`.
 
-          The inputs are deterministic wire-v6 protocol-v32 AtlasV4 fixtures (spec ID 3, protocol minor 32) with the four-word public-input shape used by the current settlement contracts. The proofs use the current guest and inner programVK \`$inner_vk\`. The workflow compared all four native commitments with the guest-proof commitments before PLONK wrapping and aggregation.
+          The inputs are deterministic wire-v6 protocol-v32 AtlasV4 fixtures (spec ID 3, protocol minor 32) with the four-word public-input shape used by the current settlement contracts. The proofs use the current guest and inner programVK \`$inner_vk\`. The workflow compared all four native commitments with the guest-proof commitments before the SNARK wrap and aggregation.
 
           This PR updates only:
 
           - \`guest-aggregator/BINDING_VECTOR.md\`
           - \`guest-aggregator/src/lib.rs\`
           - \`prover/tests/real_aggregation_vector.rs\`
-          - \`prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin\`
+          - \`prover/tests/real_proof_parse.rs\`
+          - \`prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin\`
+          - \`prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin\`
 
-          The publication job ran the affected aggregator, prover-vector, and native vadcop verifier tests.
+          The publication job ran the affected aggregator, prover-vector, real-SNARK, and native vadcop verifier tests. Un-ignore the real-fixture tests when merging the first session of a toolchain bump.
           EOF
 
           existing="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \

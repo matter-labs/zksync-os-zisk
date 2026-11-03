@@ -94,10 +94,10 @@ for n in 1 2 3 4; do
         -k "${ZISK_PK}" -y -o "${SESSION_DIR}/vadcop-batch-${n}.bin" -g
 done
 
-echo "==> extracting and comparing proved commitments before PLONK/aggregation"
+echo "==> extracting and comparing proved commitments before the SNARK wrap/aggregation"
 # aggregator_input validates each raw stream and reports its commitment in the
 # exact batch order supplied. Assembly is local preparation only; no recursive
-# proof or PLONK wrap is started until the comparisons below all pass.
+# proof or SNARK wrap is started until the comparisons below all pass.
 "${TOOLS_DIR}/aggregator_input" -o "${SESSION_DIR}/agg-input.bin" \
     "${SESSION_DIR}"/vadcop-batch-{1,2,3,4}.bin 2> "${SESSION_DIR}/aggregator-input.txt"
 cat "${SESSION_DIR}/aggregator-input.txt"
@@ -146,20 +146,20 @@ check "aggregator input rootCVadcopFinal" \
     "$(grep -m1 'vadcopVK' "${SESSION_DIR}/aggregator-input.txt" | awk '{print $NF}')" \
     "${root_c_vadcop_final}"
 
-echo "==> PLONK-wrapping batch 1"
+echo "==> pilfflonk-wrapping batch 1"
 "${CARGO_ZISK}" prove -e "${GUEST_ELF}" -i "${SESSION_DIR}/batch-1.bin" \
-    -k "${ZISK_PK}" -w "${ZISK_SK}" --plonk -y \
-    -o "${SESSION_DIR}/batch1-plonk.bin" -g
+    -k "${ZISK_PK}" -w "${ZISK_SK}" --pilfflonk -y \
+    -o "${SESSION_DIR}/batch1-snark.bin" -g
 
-echo "==> proving and PLONK-wrapping the aggregation"
+echo "==> proving and pilfflonk-wrapping the aggregation"
 "${CARGO_ZISK}" prove -e "${AGG_ELF}" -i "${SESSION_DIR}/agg-input.bin" \
-    -k "${ZISK_PK}" -w "${ZISK_SK}" --plonk -y \
-    -o "${SESSION_DIR}/aggregated-plonk.bin" -g
+    -k "${ZISK_PK}" -w "${ZISK_SK}" --pilfflonk -y \
+    -o "${SESSION_DIR}/aggregated-snark.bin" -g
 
 echo "==> extracting the wire fixtures"
-"${TOOLS_DIR}/inspect_proof" "${SESSION_DIR}/batch1-plonk.bin" \
+"${TOOLS_DIR}/inspect_proof" "${SESSION_DIR}/batch1-snark.bin" \
     | tee "${SESSION_DIR}/batch1-inspect.txt"
-"${TOOLS_DIR}/inspect_proof" "${SESSION_DIR}/aggregated-plonk.bin" \
+"${TOOLS_DIR}/inspect_proof" "${SESSION_DIR}/aggregated-snark.bin" \
     | tee "${SESSION_DIR}/aggregated-inspect.txt"
 
 echo "==> checking proof pins and commitments"
@@ -205,7 +205,9 @@ jq -n \
             "guest-aggregator/BINDING_VECTOR.md",
             "guest-aggregator/src/lib.rs",
             "prover/tests/real_aggregation_vector.rs",
-            "prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin"
+            "prover/tests/real_proof_parse.rs",
+            "prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin",
+            "prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin"
         ]
     }' > "${SESSION_DIR}/fixture-values.json"
 

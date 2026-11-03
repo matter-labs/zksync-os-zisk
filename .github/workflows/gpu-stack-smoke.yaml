@@ -2,14 +2,14 @@ name: GPU stack smoke test
 
 # Boots the ZiSK stack image (coordinator, worker, daemon) on the GPU runner
 # and proves one deterministic fixture batch through the coordinator, once as
-# a vadcop_final proof and once PLONK-wrapped, then checks both outputs with
-# the repository's host tools: the vadcop stream parses for the aggregator,
-# its commitment equals the native commitment, and the PLONK proof carries
-# the pinned inner programVK.
+# a vadcop_final proof and once pilfflonk-wrapped, then checks both outputs
+# with the repository's host tools: the vadcop stream parses for the
+# aggregator, its commitment equals the native commitment, and the SNARK
+# carries the pinned inner programVK.
 #
 # Dispatch only. It runs on matterlabs-ci-gpu-runner, an ephemeral GKE pod
 # (Docker-in-Docker with the NVIDIA driver, one H100, A100 or L4). Every run
-# downloads the 27 GB of proving keys from Polygon's GCS bucket and rebuilds
+# downloads the 7 GB of proving keys from Polygon's GCS bucket and rebuilds
 # the constant trees, because nothing persists between pods. The run fails
 # fast with a clear message when the runner lacks Docker, GPU containers, or
 # the 70 GB of free disk the keys need.
@@ -77,10 +77,10 @@ jobs:
 
   smoke:
     name: boot the stack and prove one batch through the coordinator
-    # The PLONK wrap needs more than 24 GB of device memory: an L4 cannot run
-    # it. matterlabs-ci-hetzner-rtx6000-gpu is the RTX 6000 Ada (49 GB); the
-    # matterlabs-ci-gpu-runner pool hands out L4s and is used only when the
-    # RTX 6000 is reserved for other work.
+    # The pool hands out L4s (24 GB). ZiSK 1.3.x's PLONK wrap needed more
+    # device memory than that; the pilfflonk wrap of 1.4.0 is meant to fit, so
+    # a run on an L4 is also that check. matterlabs-ci-hetzner-rtx6000-gpu,
+    # the RTX 6000 Ada (49 GB), is the fallback.
     runs-on: [matterlabs-ci-gpu-runner]
     needs: prepare
     timeout-minutes: 240
@@ -178,7 +178,7 @@ jobs:
             sleep 30
           done
 
-      - name: Prove the fixture batch, vadcop_final and PLONK-wrapped
+      - name: Prove the fixture batch, vadcop_final and pilfflonk-wrapped
         working-directory: docker/zisk-stack
         run: |
           set -euo pipefail
@@ -188,7 +188,7 @@ jobs:
               -e /app/elf/zksync-os-zisk-guest -i /session/batch-1.bin --timeout 0 "$@"
           }
           run -o /session/proof-vadcop.bin
-          run -o /session/proof-plonk.bin --plonk
+          run -o /session/proof-snark.bin --pilfflonk
           ls -la "${GITHUB_WORKSPACE}/bundle/session"
 
       - name: Check the proofs with the host tools
@@ -208,10 +208,10 @@ jobs:
           test "$proved" = "$native"
           echo "vadcop commitment matches native: $proved"
 
-          # The PLONK proof must carry the pinned inner programVK.
-          "$tools/inspect_proof" "$session/proof-plonk.bin" | tee "$session/plonk-inspect.txt"
-          test "$(grep -m1 '^program_vk' "$session/plonk-inspect.txt" | sed 's/.*= //')" = "$inner_vk"
-          echo "PLONK programVK matches guest/GUEST_PROGRAM_VK"
+          # The SNARK must carry the pinned inner programVK.
+          "$tools/inspect_proof" "$session/proof-snark.bin" | tee "$session/snark-inspect.txt"
+          test "$(grep -m1 '^program_vk' "$session/snark-inspect.txt" | sed 's/.*= //')" = "$inner_vk"
+          echo "SNARK programVK matches guest/GUEST_PROGRAM_VK"
 
       - name: Collect stack logs
         if: always()
@@ -227,6 +227,6 @@ jobs:
           path: |
             stack.log
             bundle/session/aggregator-input.txt
-            bundle/session/plonk-inspect.txt
+            bundle/session/snark-inspect.txt
           if-no-files-found: ignore
           retention-days: 14
