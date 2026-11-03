@@ -14,9 +14,9 @@
 # below the 2^36-step ceiling with the recursion stages on top).
 #
 # REAL NUMBERS NEED REAL PROOFS. Pass per-batch proofs produced by
-# `cargo-zisk prove` WITHOUT `--plonk` (a Vadcop-body proof file; the
-# --plonk output has discarded the vadcop_final proof), or raw
-# get_proof_bytes() streams. Minting them needs the ~50 GB proving keys —
+# `cargo-zisk prove` WITHOUT `--pilfflonk` (a vadcop_final proof file; the
+# --pilfflonk output has discarded the vadcop_final proof), or raw
+# get_proof_bytes() streams. Minting them needs the proving keys —
 # see gpu-box-archive/scripts/aggregator-session.md for the box runbook.
 #
 # Without arguments the script runs the SYNTHETIC plumbing check:
@@ -42,7 +42,7 @@
 #   tools/aggregator-stepcost.sh proof1.bin proof2.bin # real measurement
 #
 # Environment (defaults for this workstation):
-#   ZISK_BIN_DIR        cargo-zisk-cpu + ziskemu location (~/.zisk-1.3.2-alpha/bin)
+#   ZISK_BIN_DIR        cargo-zisk-cpu + ziskemu location (~/.zisk-1.4.0-alpha/bin)
 #   STEPCOST_OUT        work/output directory
 #   SYNTHETIC_N         N for the synthetic mode (default 2)
 #   STEPCOST_MAX_STEPS  ziskemu step cap (default 4e9: ~64x the estimated
@@ -56,7 +56,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(dirname "$SCRIPT_DIR")"
-ZISK_BIN_DIR="${ZISK_BIN_DIR:-$HOME/.zisk-1.3.2-alpha/bin}"
+ZISK_BIN_DIR="${ZISK_BIN_DIR:-$HOME/.zisk-1.4.0-alpha/bin}"
 ZISKEMU="$ZISK_BIN_DIR/ziskemu"
 CARGO_ZISK="$ZISK_BIN_DIR/cargo-zisk-cpu"
 STEPCOST_OUT="${STEPCOST_OUT:-$HOME/multiprover/aggregator-stepcost-out}"

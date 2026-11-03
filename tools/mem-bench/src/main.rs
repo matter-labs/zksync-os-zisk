@@ -11,7 +11,7 @@
 //!
 //! Metric: peak heap high-water via a tracking global allocator (sum of live
 //! allocations) — an allocator-independent proxy for the guest dlmalloc wall
-//! (507.75 MiB). Also reports wall time so the memory fix's throughput impact is
+//! (507.5625 MiB). Also reports wall time so the memory fix's throughput impact is
 //! visible. Runs the REAL library code paths (no mocks, no GPU, no guest ELF).
 //!
 //! Metric semantics per fix (annotated in the tables):
@@ -74,7 +74,8 @@ unsafe impl GlobalAlloc for Tracking {
 static A: Tracking = Tracking;
 
 const MIB: f64 = 1_048_576.0;
-const BUDGET_MIB: f64 = 507.75;
+// The ZiSK 1.4.0 linker script's heap: 192 KiB below 1.3.x's, for zisklib scratch.
+const BUDGET_MIB: f64 = 507.5625;
 
 fn mib(b: usize) -> f64 {
     b as f64 / MIB
