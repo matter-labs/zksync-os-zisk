@@ -86,13 +86,11 @@ class FixturePublicationTests(unittest.TestCase):
         guest = self.copy("guest-aggregator/src/lib.rs")
         prover = self.copy("prover/tests/real_aggregation_vector.rs")
         snark_vector = self.copy("prover/tests/real_proof_parse.rs")
-        # The destinations may not exist in the repository yet (a new ZiSK
-        # version's first session publishes them), so seed the temporary
-        # copies instead of copying the repository files.
+        # A new ZiSK version's first session publishes the fixtures into a
+        # directory the bump emptied, so neither it nor the files exist yet.
         vadcop = self.root / fixture_session.VADCOP_FIXTURE
         snark = self.root / fixture_session.SNARK_FIXTURE
-        vadcop.parent.mkdir(parents=True, exist_ok=True)
-        vadcop.write_bytes(b"previous proof")
+        self.assertFalse(vadcop.parent.exists())
         source_vadcop = self.root / "new-vadcop.bin"
         source_vadcop.write_bytes(b"new validated proof")
         source_snark = self.root / "new-snark.bin"

@@ -192,6 +192,9 @@ The fixture publisher automatically updates this document,
 def copy_fixture(source: Path, destination: Path) -> None:
     if not source.is_file() or source.stat().st_size == 0:
         raise ValueError(f"{source}: missing proof fixture")
+    # A toolchain bump removes the previous release's fixtures, and with them
+    # the directory, before its first session publishes the new ones.
+    destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, destination)
 
 
