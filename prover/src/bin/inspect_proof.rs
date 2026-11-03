@@ -1,4 +1,4 @@
-//! Inspect a real `cargo-zisk prove --plonk` proof file: parse it with the
+//! Inspect a real `cargo-zisk prove --pilfflonk` proof file: parse it with the
 //! daemon's mirrored structs, dump the assembled wire sections, and print
 //! the full PROOF / PUBLIC_VALUES hex — the constants the era-contracts
 //! real-proof fixture test pins, so VK bumps re-derive them from a fresh

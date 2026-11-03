@@ -11,13 +11,13 @@
 //! every invocation.
 //!
 //! Two modes, matching the server's `zisk_aggregation` setting:
-//! - Per-batch (default): each batch is proven with the PLONK wrap and the
-//!   768-byte SNARK is submitted — one ZiSK proof per batch on L1.
+//! - Per-batch (default): each batch is proven with the pilfflonk wrap and
+//!   the 2,208-byte SNARK is submitted — one ZiSK proof per batch on L1.
 //! - Aggregated (`--aggregation`, with `--aggregator-elf`): each batch is
 //!   proven WITHOUT the wrap and the raw `vadcop_final` stream is
 //!   submitted; the daemon also polls `/ZiSK-AGG` for range jobs, verifies
 //!   the range's streams inside the aggregator guest, and submits one
-//!   PLONK-wrapped range proof — one ZiSK proof per Airbender SNARK range.
+//!   pilfflonk-wrapped range proof — one ZiSK proof per Airbender SNARK range.
 
 use zksync_os_zisk_prover_service::{metrics, prover, sequencer_client};
 
@@ -61,15 +61,15 @@ struct Args {
     #[arg(long, required_unless_present = "coordinator_url")]
     proving_key: Option<PathBuf>,
 
-    /// Path to the ZiSK PLONK proving key directory (cargo-zisk `-w`).
-    /// Required unless `--coordinator-url` moves the keys to a resident
-    /// worker.
+    /// Path to the ZiSK SNARK (pilfflonk) proving key directory (cargo-zisk
+    /// `-w`). Required unless `--coordinator-url` moves the keys to a
+    /// resident worker.
     #[arg(
         long,
-        alias = "proving-key-snark",
+        alias = "proving-key-plonk",
         required_unless_present = "coordinator_url"
     )]
-    proving_key_plonk: Option<PathBuf>,
+    proving_key_snark: Option<PathBuf>,
 
     /// gRPC URL of a resident `zisk-coordinator` (its client API port, 7000
     /// by default). The daemon uploads and sets up the ELFs through
@@ -80,11 +80,11 @@ struct Args {
     #[arg(
         long,
         env = "ZISK_COORDINATOR_URL",
-        conflicts_with_all = ["proving_key", "proving_key_plonk", "no_gpu", "asm_emulator"]
+        conflicts_with_all = ["proving_key", "proving_key_snark", "no_gpu", "asm_emulator"]
     )]
     coordinator_url: Option<String>,
 
-    /// Aggregated mode: prove batches WITHOUT the PLONK wrap and submit
+    /// Aggregated mode: prove batches WITHOUT the SNARK wrap and submit
     /// their vadcop_final streams; poll /ZiSK-AGG for range jobs and prove
     /// them with the aggregator guest. The server must run with
     /// zisk_aggregation.enabled.
@@ -298,10 +298,10 @@ async fn main() -> anyhow::Result<()> {
                 .proving_key
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("--proving-key is required"))?,
-            proving_key_plonk: args
-                .proving_key_plonk
+            proving_key_snark: args
+                .proving_key_snark
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("--proving-key-plonk is required"))?,
+                .ok_or_else(|| anyhow::anyhow!("--proving-key-snark is required"))?,
             gpu: !args.no_gpu,
             asm_emulator: args.asm_emulator,
         }),
@@ -317,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
     }
     if let prover::ProvingBackend::Spawn(ref spawn) = backend {
         required_paths.push(("proving_key", &spawn.proving_key));
-        required_paths.push(("proving_key_plonk", &spawn.proving_key_plonk));
+        required_paths.push(("proving_key_snark", &spawn.proving_key_snark));
     }
     for (name, path) in required_paths {
         anyhow::ensure!(path.exists(), "{name} does not exist: {}", path.display());
@@ -575,7 +575,7 @@ async fn poll_sequencer(
 
     // Prove. Uses tokio::process internally, so cancellation is instant.
     if aggregation {
-        // Aggregated mode: keep the vadcop_final proof (no PLONK wrap) and
+        // Aggregated mode: keep the vadcop_final proof (no SNARK wrap) and
         // submit the stream; its publics travel inside it.
         let stream = match prover
             .generate_vadcop_proof(&batch.zisk_data, batch.batch_number, cancel)
