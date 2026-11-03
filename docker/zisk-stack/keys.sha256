@@ -6,8 +6,8 @@
 # accepted only with ZISK_KEYS_ALLOW_UNPINNED=1, in which case the step
 # prints the digest it observed so it can be recorded here and reviewed.
 #
-# The 1.4.0-alpha pins are PENDING until a gpu-stack-smoke run with
-# allow_unpinned_keys=true records the digests of full downloads that match
+# The 1.4.0-alpha pins were recorded on 2026-11-03 from the gpu-stack-smoke
+# run 41672673479 with allow_unpinned_keys=true, whose full downloads matched
 # the bucket md5 sidecars (c4ff018ee2923838c931dac6a0bee115 and
 # bda892cdef7b33b01c38fd69e68017f6; tarballs last modified 2026-10-27). Note
 # that the bucket also serves a zisk-provingkey-<version>.hash file; its value
@@ -17,8 +17,8 @@
 #
 # Format: <sha256 or PENDING>  <tarball file name>
 
-PENDING  zisk-provingkey-1.4.0-alpha-poseidon1.tar.gz
-PENDING  zisk-provingkey-pilfflonk-1.4.0-alpha-poseidon1.tar.gz
+e839a4453d3571ae01843809e7e313b04b612695159e566cf73904a3abbdab33  zisk-provingkey-1.4.0-alpha-poseidon1.tar.gz
+05ef5ff514e8a420e8527888f05ef9feb89f80ad0a6a3164db0cac056d3f0406  zisk-provingkey-pilfflonk-1.4.0-alpha-poseidon1.tar.gz
 
 # History (ZiSK v1.3.2-alpha, retired 2026-11-03; recorded 2026-10-19 from the
 # gpu-stack-smoke run 39228135434 with allow_unpinned_keys=true, whose full
