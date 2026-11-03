@@ -8,24 +8,24 @@ all four programs; the container command picks one.
 | Command | Role | Needs |
 |---|---|---|
 | `zisk-coordinator --config /etc/zisk/coordinator.toml` | Job queue and client API | CPU only |
-| `zisk-worker-entrypoint --config /etc/zisk/worker.toml ...` | Installs the proving keys on the first start, then runs `zisk-worker`, which holds the STARK and PLONK keys resident and proves | an NVIDIA GPU, the key volume |
+| `zisk-worker-entrypoint --config /etc/zisk/worker.toml ...` | Installs the proving keys on the first start, then runs `zisk-worker`, which holds the STARK and pilfflonk keys resident and proves | an NVIDIA GPU, the key volume |
 | `zksync-os-zisk-prover-service ...` | Polls the sequencer, drives the coordinator through `cargo-zisk remote` | the sequencer and the coordinator |
 | `zisk-prepare-keys` | The key installation on its own: downloads, verifies and installs the proving keys | the GPU (constant-tree generation), the key volume |
 
 One tag pins coordinator, worker and daemon together. Every ZiSK binary comes
 out of the same release tarball, verified against the sha256 pinned in the
 Dockerfile before extraction. Nothing from ZiSK is compiled in the image, and
-it carries no `snarkjs` or Node.js: the coordinator path never verifies a
-wrapped proof locally, and the daemon's `cargo-zisk remote` calls have no
-verify flag. The GPU binaries link only the driver's `libcuda.so.1`, which the
+it carries no Node.js for pilfflonk's JavaScript verifier: the coordinator
+path never verifies a wrapped proof locally, and the daemon's `cargo-zisk
+remote` calls have no verify flag. The GPU binaries link only the driver's `libcuda.so.1`, which the
 NVIDIA container toolkit mounts at run time, so the image sits on plain
 Ubuntu rather than a CUDA runtime image. The tarball is x86_64 only, so the
 image is `linux/amd64`.
 
 ## Proving keys
 
-The STARK key (3.8 GB compressed) and the PLONK key (21.9 GB compressed)
-are not in the image. The worker's entrypoint runs `zisk-prepare-keys`
+The Poseidon1 STARK key (4.9 GB compressed) and its pilfflonk SNARK key
+(2.1 GB compressed) are not in the image. The worker's entrypoint runs `zisk-prepare-keys`
 before the worker: it downloads both from Polygon's `zisk-setup` bucket for
 the image's ZiSK version, checks the bucket's md5 sidecars and the sha256
 pins in [`keys.sha256`](keys.sha256), extracts them into the key volume, and
@@ -37,7 +37,7 @@ ownership, a Kubernetes local-path volume is world-writable, and other
 provisioners take the pod's `fsGroup`. `zisk-prepare-keys` also runs on its
 own, as root if need be, to fill a volume ahead of time.
 
-Both pins were recorded from full downloads whose md5 matched the sidecars.
+Pins are recorded from full downloads whose md5 matched the sidecars.
 When a new ZiSK version rotates the keys, a pin that reads `PENDING` stops
 the run unless `ZISK_KEYS_ALLOW_UNPINNED=1` is set, in which case the run
 trusts the md5 alone and prints the observed sha256 so it can be recorded
@@ -65,13 +65,16 @@ Ports on loopback: 7000 (coordinator client API), 9090 (coordinator metrics
 and `/health`), 3313 (daemon metrics).
 
 Host requirements: the NVIDIA container toolkit, a GPU with 16 GB or more of
-VRAM, 64 GB or more of RAM (the PLONK key stays resident), and disk for the
-key volume.
+VRAM, 64 GB or more of RAM, and disk for the key volume.
+
+On a move to a new ZiSK version, remove the `worker-cache` volume: it holds
+program setups and ASM emulators the new release regenerates.
 
 ### Worker flags worth knowing
 
-The compose file starts the worker with `--plonk --preload-plonk --gpu
---emulator`. Dropping `--emulator` selects the ASM emulator, which is faster
+The compose file starts the worker with `--snark --preload-snark --gpu
+--emulator`, and sets `PROOFMAN_GPU_HEADROOM_MB=1536` so the pilfflonk wrap
+has the GPU memory it allocates after the prover's buffers. Dropping `--emulator` selects the ASM emulator, which is faster
 at witness generation; the image carries the build toolchain it assembles
 with, and the compose file already lifts the memlock limit it needs. One
 worker serves one GPU; copy the service with another `CUDA_VISIBLE_DEVICES`

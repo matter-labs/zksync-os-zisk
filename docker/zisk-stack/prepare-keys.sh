@@ -40,8 +40,10 @@ CARGO_ZISK_DEV="${CARGO_ZISK_DEV:-/opt/zisk/bin/cargo-zisk-dev}"
 
 MARKER="${KEYS_DIR}/.zisk-keys-ready"
 DOWNLOAD_DIR="${KEYS_DIR}/.download"
-STARK_TARBALL="zisk-provingkey-${ZISK_VERSION}.tar.gz"
-PLONK_TARBALL="zisk-provingkey-plonk-${ZISK_VERSION}.tar.gz"
+# This lane proves under the Poseidon1 setup (L1 holds its pilfflonk key).
+# Since 1.4.0 the unsuffixed tarballs are the blake3 family.
+STARK_TARBALL="zisk-provingkey-${ZISK_VERSION}-poseidon1.tar.gz"
+SNARK_TARBALL="zisk-provingkey-pilfflonk-${ZISK_VERSION}-poseidon1.tar.gz"
 
 log() { printf '[zisk-prepare-keys] %s\n' "$*"; }
 die() { printf '[zisk-prepare-keys] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -54,7 +56,7 @@ pinned_sha256() {
 }
 
 fetch() {
-    # Resumable, so an interrupted 22 GB download continues instead of
+    # Resumable, so an interrupted multi-GB download continues instead of
     # restarting; --retry-all-errors covers transient HTTP failures.
     curl -fL --retry 5 --retry-all-errors -C - -o "$2" "$1"
 }
@@ -108,16 +110,16 @@ main() {
     local free_gb
     free_gb="$(df -Pk "$KEYS_DIR" | awk 'NR==2 { printf "%d", $4 / 1024 / 1024 }')"
     if (( free_gb < MIN_FREE_GB )); then
-        die "${KEYS_DIR} has ${free_gb} GB free; the keys need about ${MIN_FREE_GB} GB during installation (27 GB of tarballs plus the unpacked keys). Set ZISK_KEYS_MIN_FREE_GB to override."
+        die "${KEYS_DIR} has ${free_gb} GB free; the keys need about ${MIN_FREE_GB} GB during installation (the tarballs plus the unpacked keys). Set ZISK_KEYS_MIN_FREE_GB to override."
     fi
 
     log "installing ZiSK ${ZISK_VERSION} proving keys into ${KEYS_DIR} (${free_gb} GB free)"
     rm -f "$MARKER"
     mkdir -p "$DOWNLOAD_DIR"
 
-    local stark_sha plonk_sha
+    local stark_sha snark_sha
     stark_sha="$(install_tarball "$STARK_TARBALL" provingKey)"
-    plonk_sha="$(install_tarball "$PLONK_TARBALL" provingKeySnark)"
+    snark_sha="$(install_tarball "$SNARK_TARBALL" provingKeySnark)"
     rmdir "$DOWNLOAD_DIR" 2>/dev/null || true
 
     # Constant-tree generation, as ziskup runs it after installing the STARK
@@ -142,8 +144,8 @@ main() {
         echo "version=${ZISK_VERSION}"
         echo "stark_tarball=${STARK_TARBALL}"
         echo "stark_sha256=${stark_sha}"
-        echo "plonk_tarball=${PLONK_TARBALL}"
-        echo "plonk_sha256=${plonk_sha}"
+        echo "snark_tarball=${SNARK_TARBALL}"
+        echo "snark_sha256=${snark_sha}"
         echo "completed=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } > "$MARKER"
     log "done"
