@@ -5,8 +5,8 @@
 //!
 //! This is the one cryptographic verification the pinned ZiSK toolchain exposes
 //! natively and dependency-light. It verifies the STARK layer, NOT the final
-//! BN254 PLONK wrap (which the toolchain checks only through the external
-//! `snarkjs` CLI — see the crate docs).
+//! BN254 pilfflonk wrap (which the toolchain checks only through pilfflonk's
+//! JavaScript verifier — see the crate docs).
 //!
 //! The unit of input is the serialized non-minimal `vadcop_final` stream, the
 //! exact byte layout `cargo-zisk` clients obtain from `Proof::get_proof_bytes()`
@@ -20,228 +20,86 @@
 //! The prover holds these streams for the aggregated lane before it aggregates
 //! them (see `prover/src/prover.rs::generate_vadcop_proof`), so this checks a
 //! per-batch STARK proof off-chain before the aggregator wraps the range.
+//!
+//! The proof is verified under this release's vadcop-final key, never under the
+//! key the stream carries: a proof checked against the key it ships with proves
+//! nothing, so the carried key is only compared with the trusted one.
 
 use zksync_os_zisk_guest_aggregator as agg;
 
 use crate::VerifyError;
 
-/// The hash family of this lane's proving key; the parser pins its wire tag
-/// (`agg::EXPECTED_HASH_TAG`), and the proof-file decoder below checks the
-/// family string the file carries.
-const HASH_FAMILY: &str = "Poseidon1";
+/// The vadcop-final key of ZiSK's released Poseidon1 setup, the key every
+/// per-batch proof of this lane verifies under. The aggregator's
+/// `ROOT_C_VADCOP_FINAL` pin is the same key (asserted in the tests below).
+const TRUSTED_VADCOP_VK: [u64; agg::VADCOP_VK_WORDS] =
+    zisk_verifier_upstream::VADCOP_FINAL_VK_POSEIDON1;
 
 /// Verify a serialized non-minimal `vadcop_final` STARK proof stream.
 ///
 /// The stream is parsed with the aggregator guest's own parser (shape, the
 /// non-minimal flag, the publics count, the hash tag, the leaf flag), then
-/// verified cryptographically with ZiSK's `zisk-verifier` at the pinned
-/// recursive setup, the way `ziskos::zisklib::verify_zisk_proof` does in the
-/// aggregator guest. Returns `Ok(())` only when the STARK proof verifies
-/// against the vadcop-final VK the stream carries.
+/// verified cryptographically with ZiSK's `zisk-verifier` under
+/// [`TRUSTED_VADCOP_VK`]. Returns `Ok(())` only when the STARK proof verifies
+/// under that key.
 pub fn verify_vadcop_final_stream(stream: &[u8]) -> Result<(), VerifyError> {
     let words =
         agg::words_from_bytes(stream).map_err(|e| VerifyError::StreamMalformed(e.to_string()))?;
     let frame =
         agg::ProofFrame::parse(words).map_err(|e| VerifyError::StreamMalformed(e.to_string()))?;
 
-    // `verify_vadcop_final_proof` consumes `[minimal][n_publics][publics][body]`
-    // and the vadcop-final VK separately: the stream minus its
-    // `[vadcop_vk(4)][hash_tag(1)]` tail, exactly the split
-    // `ziskos::zisklib::verify_zisk_proof` makes.
-    let all = frame.words();
-    let proof = &all[..all.len() - agg::VADCOP_VK_WORDS - agg::HASH_TAG_WORDS];
-    let vk = frame.vadcop_vk();
+    // A stream from another setup would fail the STARK check below anyway;
+    // naming the key here tells the operator why.
+    if frame.vadcop_vk() != TRUSTED_VADCOP_VK {
+        return Err(VerifyError::StreamMalformed(format!(
+            "vadcop-final key {:?} is not the release key {:?}",
+            frame.vadcop_vk(),
+            TRUSTED_VADCOP_VK
+        )));
+    }
 
-    if zisk_verifier_upstream::verify_vadcop_final_proof(proof, vk, HASH_FAMILY) {
-        Ok(())
-    } else {
-        Err(VerifyError::StarkInvalid)
+    match zisk_verifier_upstream::verify_saved_words(frame.words(), &TRUSTED_VADCOP_VK, None) {
+        Ok(_) => Ok(()),
+        Err(zisk_verifier_upstream::VerifyError::InvalidProof) => Err(VerifyError::StarkInvalid),
+        Err(e) => Err(VerifyError::StreamMalformed(e.to_string())),
     }
 }
 
 /// Verify a `cargo-zisk prove` output file that carries a `vadcop_final` proof
-/// (a run WITHOUT `--plonk`). This decodes the on-disk proof file into a stream
-/// and verifies it with [`verify_vadcop_final_stream`].
-///
-/// The prover writes these files; this reads them back and checks them without
-/// the daemon. The decode mirrors `zisk_common::Proof` (bincode 2, standard
-/// config) for the Vadcop body only.
+/// (a run WITHOUT a final SNARK). This takes the stream out of the file and
+/// verifies it with [`verify_vadcop_final_stream`].
 pub fn verify_vadcop_final_proof_file(bytes: &[u8]) -> Result<(), VerifyError> {
-    let stream = proof_file::stream_from_proof_file(bytes)?;
-    verify_vadcop_final_stream(&stream)
+    verify_vadcop_final_stream(stream_from_proof_file(bytes)?)
 }
 
-/// Decode a `cargo-zisk` Vadcop-body proof file into a serialized stream.
-mod proof_file {
-    use super::{agg, HASH_FAMILY};
-    use crate::VerifyError;
+/// The stream inside a `cargo-zisk prove` `vadcop_final` file. Since ZiSK
+/// 1.4.0 the file is the stream itself, followed by a seed trailer
+/// `[seed(4)][b"ZISKSEED"]` when the proof carries the execution's random
+/// seed. The guest verifier refuses the trailer, so it is cut off here.
+fn stream_from_proof_file(bytes: &[u8]) -> Result<&[u8], VerifyError> {
+    const TRAILER_BYTES: usize = (zisk_verifier_upstream::SEED_LEN_WORDS + 1) * 8;
 
-    // Do not depend on bincode/serde in the crate's own dependency set; decode
-    // the proof file lazily only when this entry point runs, using the crate's
-    // dev-visible bincode in tests and the caller's otherwise. To keep the base
-    // crate lean, this decoder is implemented against a minimal hand-rolled
-    // bincode-2 standard reader for the exact Vadcop shape.
-    //
-    // Layout (bincode 2 standard, little-endian, varint lengths):
-    //   enum ProofBody discriminant (varint u32): 0 = Vadcop
-    //     Vadcop { proof: Vec<u64>, zisk_vk: Vec<u64>, kind: VadcopKind,
-    //              hash: String, publics_full: Vec<u64> }
-    //   program_vk: { vk: Vec<u64>, hash_mode: HashMode }
-    //
-    // `VadcopKind` and `HashMode` are fieldless enums, so each is one varint
-    // discriminant. `publics_full` is the flag-free `[program VK | inputs]`
-    // view; the leaf flag lives in `kind`.
-
-    const PROGRAM_VK_WORDS: usize = 4;
-    /// `VadcopKind::Final` — a recursion-tree leaf.
-    const VADCOP_KIND_FINAL: u64 = 0;
-
-    struct Reader<'a> {
-        bytes: &'a [u8],
-        pos: usize,
+    if !bytes.len().is_multiple_of(8) {
+        return Err(VerifyError::StreamMalformed(format!(
+            "proof file is {} bytes, not a whole number of u64 words",
+            bytes.len()
+        )));
     }
-
-    impl<'a> Reader<'a> {
-        fn new(bytes: &'a [u8]) -> Self {
-            Self { bytes, pos: 0 }
-        }
-
-        fn byte(&mut self) -> Result<u8, VerifyError> {
-            let b = *self
-                .bytes
-                .get(self.pos)
-                .ok_or_else(|| VerifyError::StreamMalformed("proof file truncated".into()))?;
-            self.pos += 1;
-            Ok(b)
-        }
-
-        /// bincode 2 standard varint for lengths and unsigned integers: a lead
-        /// byte < 251 is the value; 251/252/253 prefix a u16/u32/u64 (LE).
-        fn varint(&mut self) -> Result<u64, VerifyError> {
-            let lead = self.byte()?;
-            match lead {
-                0..=250 => Ok(lead as u64),
-                251 => {
-                    let mut b = [0u8; 2];
-                    b.copy_from_slice(self.take(2)?);
-                    Ok(u16::from_le_bytes(b) as u64)
-                }
-                252 => {
-                    let mut b = [0u8; 4];
-                    b.copy_from_slice(self.take(4)?);
-                    Ok(u32::from_le_bytes(b) as u64)
-                }
-                253 => {
-                    let mut b = [0u8; 8];
-                    b.copy_from_slice(self.take(8)?);
-                    Ok(u64::from_le_bytes(b))
-                }
-                _ => Err(VerifyError::StreamMalformed(
-                    "unsupported varint width (u128)".into(),
-                )),
-            }
-        }
-
-        fn take(&mut self, n: usize) -> Result<&'a [u8], VerifyError> {
-            let end = self
-                .pos
-                .checked_add(n)
-                .filter(|e| *e <= self.bytes.len())
-                .ok_or_else(|| VerifyError::StreamMalformed("proof file truncated".into()))?;
-            let slice = &self.bytes[self.pos..end];
-            self.pos = end;
-            Ok(slice)
-        }
-
-        fn u64_vec(&mut self) -> Result<Vec<u64>, VerifyError> {
-            let len = self.varint()? as usize;
-            let mut out = Vec::with_capacity(len.min(1 << 20));
-            for _ in 0..len {
-                out.push(self.varint()?);
-            }
-            Ok(out)
-        }
-    }
-
-    pub(super) fn stream_from_proof_file(bytes: &[u8]) -> Result<Vec<u8>, VerifyError> {
-        let mut r = Reader::new(bytes);
-
-        let discriminant = r.varint()?;
-        if discriminant != 0 {
-            return Err(VerifyError::StreamMalformed(
-                "proof file is not a Vadcop body (run cargo-zisk prove WITHOUT --plonk)".into(),
-            ));
-        }
-        let body = r.u64_vec()?;
-        let zisk_vk = r.u64_vec()?;
-        let kind = r.varint()?;
-        if kind != VADCOP_KIND_FINAL {
-            return Err(VerifyError::StreamMalformed(
-                "only a non-minimal leaf vadcop_final proof is accepted".into(),
-            ));
-        }
-        // hash: String — length-prefixed UTF-8. The stream's tag is derived
-        // from this lane's family, so a file from another family is refused.
-        let hash_len = r.varint()? as usize;
-        if r.take(hash_len)? != HASH_FAMILY.as_bytes() {
-            return Err(VerifyError::StreamMalformed(format!(
-                "proof file hash family is not {HASH_FAMILY}"
-            )));
-        }
-        let publics_full = r.u64_vec()?;
-
-        // program_vk: Vec<u64> (4 words), then the HashMode discriminant.
-        let program_vk = r.u64_vec()?;
-        let _hash_mode = r.varint()?;
-
-        if program_vk.len() != PROGRAM_VK_WORDS || zisk_vk.len() != PROGRAM_VK_WORDS {
-            return Err(VerifyError::StreamMalformed(format!(
-                "VK word count: program {} vadcop {}",
-                program_vk.len(),
-                zisk_vk.len()
-            )));
-        }
-        if publics_full.len() != PROGRAM_VK_WORDS + agg::PUBLICS_WORDS {
-            return Err(VerifyError::StreamMalformed(format!(
-                "publics_full {} words, expected {}",
-                publics_full.len(),
-                PROGRAM_VK_WORDS + agg::PUBLICS_WORDS
-            )));
-        }
-        if publics_full[..PROGRAM_VK_WORDS] != program_vk[..] {
-            return Err(VerifyError::StreamMalformed(
-                "publics_full program VK differs from the proof file's program VK".into(),
-            ));
-        }
-        if body.len() != agg::VADCOP_FINAL_BODY_WORDS {
-            return Err(VerifyError::StreamMalformed(format!(
-                "vadcop_final body {} words, expected {}",
-                body.len(),
-                agg::VADCOP_FINAL_BODY_WORDS
-            )));
-        }
-
-        // Reassemble the get_proof_bytes() stream.
-        let mut words: Vec<u64> = Vec::with_capacity(agg::PROOF_STREAM_WORDS);
-        words.push(0); // non-minimal
-        words.push(agg::EXPECTED_N_PUBLICS);
-        words.push(agg::IS_VADCOP_FINAL_PROOF);
-        words.extend_from_slice(&publics_full);
-        words.extend_from_slice(&body);
-        words.extend_from_slice(&zisk_vk);
-        words.push(agg::EXPECTED_HASH_TAG);
-
-        let mut out = Vec::with_capacity(words.len() * 8);
-        for w in &words {
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-        Ok(out)
+    let tag = zisk_verifier_upstream::SEED_TRAILER_TAG.to_le_bytes();
+    if bytes.len() >= TRAILER_BYTES && bytes.ends_with(&tag) {
+        Ok(&bytes[..bytes.len() - TRAILER_BYTES])
+    } else {
+        Ok(bytes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash family of this lane's proving key; the parser pins its wire
+    /// tag (`agg::EXPECTED_HASH_TAG`).
+    const HASH_FAMILY: &str = "Poseidon1";
 
     #[test]
     fn rejects_a_short_stream() {
@@ -262,14 +120,59 @@ mod tests {
         );
     }
 
+    /// The parser's pinned body size is the size ZiSK's verifier expects for a
+    /// non-minimal proof of this family.
+    #[test]
+    fn pinned_body_size_is_the_upstream_size() {
+        let stream_bytes = agg::PROOF_STREAM_BYTES;
+        let tail_bytes = (agg::VADCOP_VK_WORDS + agg::HASH_TAG_WORDS) * 8;
+        let header_bytes = (agg::HEADER_WORDS + agg::EXPECTED_N_PUBLICS as usize) * 8;
+        assert_eq!(
+            zisk_verifier_upstream::proof_size(HASH_FAMILY, false),
+            Some(zisk_verifier_upstream::ProofSize::Exact(
+                stream_bytes - header_bytes - tail_bytes
+            ))
+        );
+    }
+
+    /// The release key this crate verifies under is the vadcop-final root the
+    /// aggregator lane pins (`guest-aggregator/ROOT_C_VADCOP_FINAL`, the four
+    /// limbs big-endian).
+    #[test]
+    fn trusted_key_is_the_root_c_pin() {
+        let record = include_str!("../../guest-aggregator/ROOT_C_VADCOP_FINAL");
+        let pin = record
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("0x"))
+            .expect("ROOT_C_VADCOP_FINAL has a 0x value line");
+        let mut limbs = [0u64; agg::VADCOP_VK_WORDS];
+        for (i, limb) in limbs.iter_mut().enumerate() {
+            *limb = u64::from_str_radix(&pin[2 + 16 * i..2 + 16 * (i + 1)], 16).unwrap();
+        }
+        assert_eq!(limbs, TRUSTED_VADCOP_VK);
+    }
+
+    #[test]
+    fn strips_the_seed_trailer() {
+        let mut file = vec![1u8; 24];
+        file.extend_from_slice(&[2u8; 32]);
+        file.extend_from_slice(&zisk_verifier_upstream::SEED_TRAILER_TAG.to_le_bytes());
+        assert_eq!(stream_from_proof_file(&file).unwrap(), &[1u8; 24][..]);
+        assert_eq!(stream_from_proof_file(&[1u8; 24]).unwrap(), &[1u8; 24][..]);
+        assert!(stream_from_proof_file(&[1u8; 23]).is_err());
+    }
+
     /// The committed real `vadcop_final` proof file (batch 1 of the
     /// binding-vector range) must verify natively. This is a full STARK
     /// verification, no external tooling.
+    // PENDING: the 1.4.0-alpha fixture comes from the fixture-session run.
+    #[ignore]
     #[test]
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin"
+            "/../prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin"
         );
         let bytes = std::fs::read(path).expect("read committed vadcop_final fixture");
         assert_eq!(verify_vadcop_final_proof_file(&bytes), Ok(()));
