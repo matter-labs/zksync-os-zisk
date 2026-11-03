@@ -1,6 +1,6 @@
 //! Peak-heap benchmark harness for the two ZiSK guest-memory fixes.
 //!
-//! Read path (read-spam): `bincode::deserialize::<BatchInput>` + `build_proven_db`
+//! Read path (read-spam): `wire::decode_batch_input` + `build_proven_db`
 //! (via `execute_and_commit_from_bincode`, the collecting path) vs the streaming
 //! `execute_and_commit_streaming`, over N distinct cold storage slots at tree
 //! depth D.
@@ -33,7 +33,7 @@ use zksync_os_zisk_lib::merkle::{
     self, BatchTreeUpdate, SlotProofEntry, StorageProof, TreeLeaf, WriteOp,
 };
 use zksync_os_zisk_lib::types::*;
-use zksync_os_zisk_lib::{commitment, executor};
+use zksync_os_zisk_lib::{commitment, executor, wire};
 
 // --------------------------------------------------------------------------
 // Tracking global allocator (peak live bytes).
@@ -445,7 +445,7 @@ fn run_fix_a(ns: &[usize], ds: &[usize]) -> Vec<RowA> {
     for &n in ns {
         for &d in ds {
             let input = build_read_spam(n, d);
-            let bytes = bincode::serialize(&input).unwrap();
+            let bytes = wire::encode(&input).unwrap();
             let ser = bytes.len();
             drop(input); // only the serialized witness (RO region) stays resident
 
