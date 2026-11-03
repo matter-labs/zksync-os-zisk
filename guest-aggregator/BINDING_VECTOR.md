@@ -20,7 +20,7 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
 - `innerProgramVK` — 32 bytes: the STF guest's 4 ROM-root u64 limbs,
   big-endian each, in order (wire public-values bytes `[0..32]`).
 - `rootCVadcopFinal` — 32 bytes: the 4 vadcop-final VK u64 limbs,
-  big-endian each, in order (wire public-values bytes `[288..320]`).
+  big-endian each, in order (wire public-values bytes `[544..576]`).
 - `rangePublicInput` — 32-byte big-endian uint256: the settlement layer's
   `ZKsyncOSVerifier.computeZKsyncOSHash(0, publicInputs)` over the
   per-batch public inputs in batch order:
@@ -34,8 +34,9 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
   settlement layer, and single-batch ranges are the common case.
 
 - `PI[i]` — the per-batch public input the settlement layer supplies:
-  batch i's full 32-byte commitment (wire public-values bytes `[32..64]`
-  of its ZiSK proof) read as a big-endian uint256. The fold consumes it
+  batch i's full 32-byte commitment (the guest publics of its ZiSK proof,
+  wire public-values bytes `[32..96]` at one u32 per eight-byte slot) read
+  as a big-endian uint256. The fold consumes it
   untruncated. `PUBLIC_INPUT_SHIFT` applies once, to the folded result,
   so `rangePublicInput` is 224-bit and its top 4 bytes are zero.
 
