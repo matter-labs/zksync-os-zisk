@@ -16,7 +16,8 @@
 //!
 //! The unit of input is the byte stream `cargo-zisk` clients obtain from
 //! `zisk_common::Proof::get_proof_bytes()` for a **non-minimal
-//! `vadcop_final`** proof (ZiSK v1.3.2-alpha):
+//! `vadcop_final`** proof (ZiSK v1.4.0-alpha), which is also the file
+//! `cargo-zisk prove` saves, less its seed trailer:
 //!
 //! ```text
 //! [minimal=0(1)][n_publics=69(1)][is_vadcop_final_proof=1(1)][program_vk(4)]
@@ -106,12 +107,12 @@ pub const IS_VADCOP_FINAL_PROOF: u64 = 1;
 pub const EXPECTED_N_PUBLICS: u64 = (LEAF_FLAG_WORDS + PROGRAM_VK_WORDS + PUBLICS_WORDS) as u64;
 
 /// u64 words in a non-minimal Poseidon1 `vadcop_final` proof body under the
-/// pinned ZiSK v1.3.2-alpha recursive setup
-/// (`zisk_verifier::expected_proof_bytes("Poseidon1", false) / 8`).
+/// pinned ZiSK v1.4.0-alpha recursive setup
+/// (`zisk_verifier::proof_size("Poseidon1", false)`, in bytes).
 ///
 /// Part of the proof-format pin: it changes only with a ZiSK / pil2-proofman
 /// upgrade, which rotates every VK anyway. A host test in `prover/`
-/// (`vadcop_body_words_matches_pinned_verifier`) asserts this constant and
+/// (`stream_constants_match_the_pinned_verifier`) asserts this constant and
 /// [`EXPECTED_HASH_TAG`] against the real `zisk-verifier` crate at the same
 /// version.
 pub const VADCOP_FINAL_BODY_WORDS: usize = 46_141;

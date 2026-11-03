@@ -30,26 +30,26 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
 ENV PATH=/root/.cargo/bin:/root/.zisk/bin:$PATH
 
 # cargo-zisk from the pinned release. The `toolchain install` command fetches
-# the ZiSK Rust toolchain, which supplies the riscv64ima-zisk-zkvm-elf target
-# and its ziskos link script. That script defines _global_pointer,
-# _init_stack_top, _kernel_heap_bottom and _kernel_heap_top, so the guest
-# needs it to link.
+# the ZiSK Rust toolchain, which supplies the riscv64ima-zisk-zkvm-elf target.
+# `cargo-zisk build` links the guest with the release's own linker script
+# (ziskbuild's zisk_linker_script.ld), which defines _global_pointer,
+# _init_stack_top, _heap_bottom and _heap_top.
 #
 # By default `toolchain install` picks the highest `zisk-4.x.y` tag, and that
-# reference floats. A newer toolchain release can drop the link script from
-# the target, so the guest fails to link and the recorded ELF stops
-# reproducing. Pin the toolchain to the release that matches cargo-zisk
-# 1.3.2-alpha (zisk-4.0.0: rustc 1.94.0-dev, LLVM 21.1.8). Download the exact
-# artifact, verify its sha256, and hand it to `toolchain install` through
+# reference floats. A newer toolchain changes codegen, so the recorded ELF
+# stops reproducing. Pin the toolchain to the release that matches cargo-zisk
+# 1.4.0-alpha (zisk-4.1.0, the highest 4.x tag when 1.4.0-alpha shipped:
+# rustc 1.99.0-dev, LLVM 23.1.1). Download the exact artifact, verify its
+# sha256, and hand it to `toolchain install` through
 # ZISK_TOOLCHAIN_SOURCE_DIR. cargo-zisk then installs from the local file and
 # makes no network fetch, so the toolchain no longer floats.
 #
 # The cargo-zisk tarball below is the v${ZISK_VERSION} GitHub release asset;
 # `cargo-zisk build` only orchestrates `cargo +zisk build`, so the CPU build
 # of the tarball is all this image needs from it.
-ARG ZISK_VERSION=1.3.2-alpha
-ARG ZISK_TOOLCHAIN_TAG=zisk-4.0.0
-ARG ZISK_TOOLCHAIN_SHA256=c4c44b5612dd025f630c2f984ae5f8a862b885c4b14bfc57c980eb8073b8cf62
+ARG ZISK_VERSION=1.4.0-alpha
+ARG ZISK_TOOLCHAIN_TAG=zisk-4.1.0
+ARG ZISK_TOOLCHAIN_SHA256=9a9921a558ca652dfc46e5043a92aa70a8ef8ec1be1bbb0f3c392dd7c0b5cfe1
 RUN curl -fsSL -o /tmp/cargo_zisk.tar.gz \
         https://github.com/0xPolygonHermez/zisk/releases/download/v${ZISK_VERSION}/cargo_zisk_linux_amd64.tar.gz \
     && mkdir -p /root/.zisk \
