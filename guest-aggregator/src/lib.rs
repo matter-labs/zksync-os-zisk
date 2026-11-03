@@ -763,9 +763,9 @@ mod tests {
     #[test]
     fn cross_stack_binding_vector() {
         const INNER_PROGRAM_VK: &str =
-            "c883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f";
+            "747be84de38d60d9b5816ddad433d41c9771825b630bddbc90cb1585dda69a6c";
         const ROOT_C_VADCOP_FINAL: &str =
-            "6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265";
+            "e9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66";
         const COMMITMENTS: [&str; 4] = [
             "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
             "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
@@ -775,7 +775,7 @@ mod tests {
         const RANGE_PUBLIC_INPUT: &str =
             "00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5";
         const DIGEST: &str =
-            "975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf";
+            "5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0";
 
         let program_vk = vk_words(unhex32(INNER_PROGRAM_VK));
         let vadcop_vk = vk_words(unhex32(ROOT_C_VADCOP_FINAL));

@@ -43,11 +43,11 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
 The settlement layer rejects a non-zero carried hash, so a range carries
 no continuation input.
 
-## Inputs (real 4-batch aggregation session, ZiSK v1.3.2-alpha, 2026-10-19)
+## Inputs (real 4-batch aggregation session, ZiSK v1.4.0-alpha, 2026-11-03)
 
-This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/39233983801) from
-`feat/zisk-1.3.2-alpha` at `52cfa36c05cf09d6433d8912b3f8c523f7b50630`. The inputs are
-deterministic wire-v5 protocol-v32 AtlasV4 fixtures (wire version 5, spec ID 3,
+This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/41671348755) from
+`alo/zisk-1.4.0-alpha` at `ade1ce58ab3164821267bc7e2bf15cc382b83d04`. The inputs are
+deterministic wire-v6 protocol-v32 AtlasV4 fixtures (wire version 6, spec ID 3,
 protocol minor 32), encoded by `tools/test-utils` and executed natively through
 the version-dispatching bincode entry point. They carry the four-word public
 input shape, including `chainConfigHash`, used by the current settlement
@@ -55,22 +55,22 @@ contracts. The proofs use the current guest ELF and current inner programVK.
 
 Native commitments from `input-manifest.json` were automatically compared,
 in batch order, with the commitments extracted from all four guest proofs
-before PLONK wrapping or recursive proving. All four pairs were equal.
+before the SNARK wrap or recursive proving. All four pairs were equal.
 
 Session data: inner ELF SHA-256
-`81deb9c3dde386dd9c4baa0022708d7f8f9b12d39d59adbec2184ec3518bc6aa`, aggregator ELF SHA-256
-`2c32095410aa67c1bb08119212ab12ef23dece381d576a087e44078795c7b126`.
+`ed7a53e344a183f9b6660896a477eede76c907c3bd62fe9a466521b538372c59`, aggregator ELF SHA-256
+`a438ea097e2ef18f9328a7d7e087c261cf6261813ae8f71cb0e586420c4f4065`.
 
 Framed inputs:
 
-- `batch-1.bin`: framed SHA-256 `35a0a72bd13155c8fcdd397d3c16f0bd43ae9141fed3be0187dd9ad653f4a97e`
-- `batch-2.bin`: framed SHA-256 `b3f3492e4a4f890699221dc2518ff30ebafea8b7b7a7e56bd782e91d1e5194c6`
-- `batch-3.bin`: framed SHA-256 `449aa9085987334f0f43228a3b9c51b17287284b01962fa0958745cb1780d7b8`
-- `batch-4.bin`: framed SHA-256 `72b7f175f112ea7f3f3645cafbc4614f82d4378efd1b35b8523a7c77e2839781`
+- `batch-1.bin`: framed SHA-256 `ea6d4b2b850978515ce8f211de84d320e7ef11bedc9d8f6f21ca627c2f4c5ff4`
+- `batch-2.bin`: framed SHA-256 `d45789841e4aa3ca3b0ff9c5a8115eb8f81381ae9518662139972dd239c0742a`
+- `batch-3.bin`: framed SHA-256 `bca6e66286ee742f21e772029034c3b16f3bbe124f5cb6c7a514514b1e583704`
+- `batch-4.bin`: framed SHA-256 `7fecab39d8986e976d53ec78333d687546bd0a8485617877bef8caa979d71ea5`
 
 ```text
-innerProgramVK   = 0xc883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f
-rootCVadcopFinal = 0x6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265
+innerProgramVK   = 0x747be84de38d60d9b5816ddad433d41c9771825b630bddbc90cb1585dda69a6c
+rootCVadcopFinal = 0xe9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66
 ```
 
 Batch commitments, in order:
@@ -101,15 +101,16 @@ formula.
 
 ```text
 rangePublicInput = 0x00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5
-digest           = 0x975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf
+digest           = 0x5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0
 ```
 
 The real aggregated proof of this range commits the same digest: the
-PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
-`digest`, bytes `[0..32]` equal to the aggregator programVK
-`0x9e2ea93a5e08c2ddb5b93323a593ada955dc74d00fac433d45c97da5b90e5e08`, and bytes `[544..576]` equal to
-`rootCVadcopFinal`.
+pilfflonk-wrapped aggregate carries `digest` in its guest publics (wire
+public-values bytes `[32..96]`, one u32 per eight-byte slot), the aggregator
+programVK `0xe7f72bf4c1825a6f852e65fc872c810320218c63ed41cf9bb4345737a4ac31ec` in bytes `[0..32]`, and
+`rootCVadcopFinal` in bytes `[544..576]`.
 
 The fixture publisher automatically updates this document,
-`guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin` in a separate PR.
+`guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`,
+`prover/tests/real_proof_parse.rs`, `prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin`, and
+`prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin` in a separate PR.

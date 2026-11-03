@@ -166,8 +166,6 @@ mod tests {
     /// The committed real `vadcop_final` proof file (batch 1 of the
     /// binding-vector range) must verify natively. This is a full STARK
     /// verification, no external tooling.
-    // PENDING: the 1.4.0-alpha fixture comes from the fixture-session run.
-    #[ignore]
     #[test]
     fn verifies_the_real_vadcop_final_proof_file() {
         let path = concat!(

@@ -21,16 +21,16 @@
 use zksync_os_zisk_guest_aggregator as agg;
 use zksync_os_zisk_prover_service::aggregator_input::load_proof_stream;
 
-const INNER_PROGRAM_VK: &str = "c883941cb5a09ec164c357a6cc467104f8b37a0b273e76c8e3ee555f2ecf1a9f";
+const INNER_PROGRAM_VK: &str = "747be84de38d60d9b5816ddad433d41c9771825b630bddbc90cb1585dda69a6c";
 const ROOT_C_VADCOP_FINAL: &str =
-    "6b2490fba336fb00f0c8719a961de309a8db6f43a9bfb7575ca5f014d609b265";
+    "e9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66";
 const COMMITMENTS: [&str; 4] = [
     "63c7606faee0ee9eff230fec391e64c0c82a0277947973ce7f6f1c9088c821dd",
     "7d6a5ed6ffda210164c11dd6f6fccbd35c4ff70632e845a5bf256e3ec48940b9",
     "d5a7b4485d1aece18348655132e73c86b23fa0f251adb173f80123d05a914f15",
     "c5ed165443011bac65df4d0f4240de3429c033996e9fce630a631e117537cd61",
 ];
-const DIGEST: &str = "975f73ac02bd42034e55e5118906cfbd03e68f05d586578b899e186d3d0b45bf";
+const DIGEST: &str = "5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
@@ -50,8 +50,6 @@ fn vk_hex(words: &[u64]) -> String {
 /// guest's own parser. This is the aggregation-path analogue of
 /// `real_proof_parse.rs` and guarantees a green CI run has actually checked
 /// the shared wire constants the L1 range verifier depends on.
-// PENDING: the 1.4.0-alpha fixture and values come from the fixture-session run.
-#[ignore]
 #[test]
 fn binding_vector_batch1_matches_committed_fixture() {
     let path = concat!(

@@ -204,8 +204,6 @@ mod tests {
     /// A real cargo-zisk vadcop_final specimen (batch 1 of the
     /// binding-vector range) must load as one stream — the regression anchor
     /// for the file format and the framing accepted by the in-guest verifier.
-    // PENDING: the 1.4.0-alpha fixture comes from the fixture-session run.
-    #[ignore]
     #[test]
     fn load_accepts_the_real_vadcop_fixture() {
         let path = concat!(
@@ -219,8 +217,6 @@ mod tests {
     /// The committed real aggregate is a pilfflonk SNARK — NOT a
     /// vadcop_final stream. The assembler must refuse it with an error
     /// that says so (real specimens need a run without `--pilfflonk`).
-    // PENDING: the 1.4.0-alpha fixture comes from the fixture-session run.
-    #[ignore]
     #[test]
     fn load_rejects_the_real_snark_fixture() {
         let path = concat!(
