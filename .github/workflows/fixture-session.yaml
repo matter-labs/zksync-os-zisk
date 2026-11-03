@@ -135,7 +135,9 @@ jobs:
 
   prove:
     name: prove, compare native/guest commitments, and aggregate
-    runs-on: [matterlabs-ci-gpu-runner]
+    # The RTX 6000 Ada (49 GB): the matterlabs-ci-gpu-runner pool can hand out
+    # an L4, and the session must not depend on what fits on one.
+    runs-on: [matterlabs-ci-hetzner-rtx6000-gpu]
     needs: prepare
     timeout-minutes: 240
     permissions:
