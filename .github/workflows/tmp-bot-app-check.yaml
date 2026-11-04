@@ -1,0 +1,37 @@
+name: Temporary bot App check
+
+# Removed before merging #61: checks that the matterlabs-bots App is installed on
+# this repository with the permissions the automations request. Minting fails
+# if it is not installed here or lacks one of them; nothing is written.
+
+on:
+  push:
+    branches:
+      - ci/signed-bot-commits
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint the bot App token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Read the repository with it
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          APP_SLUG: ${{ steps.app_token.outputs.app-slug }}
+        run: |
+          echo "app: $APP_SLUG"
+          gh api installation/repositories --jq '.repositories[].full_name'
+          gh api "repos/$GITHUB_REPOSITORY" --jq '.full_name'
