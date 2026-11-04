@@ -18,6 +18,8 @@
 //!   submitted; the daemon also polls `/ZiSK-AGG` for range jobs, verifies
 //!   the range's streams inside the aggregator guest, and submits one
 //!   pilfflonk-wrapped range proof — one ZiSK proof per Airbender SNARK range.
+//!   `--jobs batches` or `--jobs ranges` takes only one kind, so the range
+//!   proofs can run on their own GPU behind their own coordinator.
 
 use zksync_os_zisk_prover_service::{metrics, prover, sequencer_client};
 
@@ -95,6 +97,18 @@ struct Args {
     #[arg(long, requires = "aggregation")]
     aggregator_elf: Option<PathBuf>,
 
+    /// Aggregated mode: which jobs to take. `batches` and `ranges` split the
+    /// lane across two stacks, so the range proofs can run on another GPU
+    /// than the batch proofs.
+    #[arg(
+        long,
+        value_enum,
+        env = "ZISK_JOBS",
+        default_value_t = Jobs::All,
+        requires = "aggregation"
+    )]
+    jobs: Jobs,
+
     /// Disable GPU proving (cargo-zisk runs CPU-only).
     #[arg(long)]
     no_gpu: bool,
@@ -145,6 +159,29 @@ struct Args {
     /// hostname so concurrent daemons are distinguishable in server logs.
     #[arg(long)]
     prover_id: Option<String>,
+}
+
+/// The jobs an aggregated-mode daemon takes. A coordinator cannot route them
+/// itself: its workers must share one SNARK key setup, since any of them may
+/// wrap, and a job may be split across several of them. Keeping the wrap off
+/// a GPU therefore takes its own coordinator, fed by its own daemon.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum Jobs {
+    All,
+    /// Per-batch `vadcop_final` proofs only; the worker needs no SNARK key.
+    Batches,
+    /// Range proofs only: the aggregator guest and the pilfflonk wrap.
+    Ranges,
+}
+
+impl Jobs {
+    fn batches(self) -> bool {
+        matches!(self, Jobs::All | Jobs::Batches)
+    }
+
+    fn ranges(self) -> bool {
+        matches!(self, Jobs::All | Jobs::Ranges)
+    }
 }
 
 /// What one poll of one sequencer amounted to.
@@ -284,6 +321,7 @@ async fn main() -> anyhow::Result<()> {
         coordinator_url = ?args.coordinator_url,
         aggregation = args.aggregation,
         aggregator_elf = ?args.aggregator_elf,
+        jobs = ?args.jobs,
         supported_vk_hashes = ?supported_vks,
         vk_filter = if supported_vks.is_empty() { "disabled (accepts all)" } else { "enabled" },
         "Starting ZiSK prover service"
@@ -370,18 +408,23 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // One-time ROM setup for the guest ELF(s) (idempotent, cheap when cached).
-    // Against a coordinator the setup needs a registered worker, and a worker
-    // registers only after it has loaded its keys, which takes minutes on a
-    // cold start. Retry until then instead of exiting into a restart loop. The
-    // spawn backend fails fast: its setup depends on nothing remote.
+    // Only the programs this daemon's jobs prove, so a ranges-only worker
+    // never sets up the batch guest. Against a coordinator the setup needs a
+    // registered worker, and a worker registers only after it has loaded its
+    // keys, which takes minutes on a cold start. Retry until then instead of
+    // exiting into a restart loop. The spawn backend fails fast: its setup
+    // depends on nothing remote.
     let wait_for_coordinator = args.coordinator_url.is_some();
     let setup_retry = poll_interval.max(Duration::from_secs(15));
     loop {
         let result = async {
-            if !prover.ensure_program_setup(&cancel).await? {
+            if args.jobs.batches() && !prover.ensure_program_setup(&cancel).await? {
                 return Ok(false);
             }
-            if args.aggregation && !prover.ensure_aggregator_program_setup(&cancel).await? {
+            if args.aggregation
+                && args.jobs.ranges()
+                && !prover.ensure_aggregator_program_setup(&cancel).await?
+            {
                 return Ok(false);
             }
             anyhow::Ok(true)
@@ -419,8 +462,15 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
 
-        let outcome =
-            poll_sequencer(client, &prover, args.aggregation, &supported_vks, &cancel).await;
+        let outcome = poll_sequencer(
+            client,
+            &prover,
+            args.aggregation,
+            args.jobs,
+            &supported_vks,
+            &cancel,
+        )
+        .await;
         match outcome {
             Poll::Cancelled => break,
             Poll::Proved => {
@@ -444,19 +494,21 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// One pass over one sequencer: in aggregated mode a range job first, since
-/// a formed range is the last missing piece of its MultiProof, then a batch.
+/// a formed range is the last missing piece of its MultiProof, then a batch,
+/// each only if `jobs` takes it.
 /// A transient proof or submit failure is logged and reported as `Retry`
 /// instead of killing the daemon, so one bad run never takes down the lane.
 async fn poll_sequencer(
     client: &sequencer_client::SequencerClient,
     prover: &prover::ZiskProver,
     aggregation: bool,
+    jobs: Jobs,
     supported_vks: &[String],
     cancel: &CancellationToken,
 ) -> Poll {
     let sequencer = client.url();
 
-    if aggregation {
+    if aggregation && jobs.ranges() {
         match client.pick_next_aggregation_job().await {
             Ok(Some(job)) => {
                 if !supported_vks.is_empty() {
@@ -538,6 +590,10 @@ async fn poll_sequencer(
                 tracing::warn!(sequencer, "aggregation poll failed: {e:#}");
             }
         }
+    }
+
+    if !jobs.batches() {
+        return Poll::Idle;
     }
 
     // Per-batch work.
@@ -724,6 +780,36 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(args.request_timeout_secs, 60);
+    }
+
+    #[test]
+    fn jobs_default_to_all() {
+        let args = parse(&["--sequencer-urls", "http://a:3124"]).unwrap();
+        assert_eq!(args.jobs, Jobs::All);
+    }
+
+    #[test]
+    fn jobs_split_the_aggregated_lane() {
+        for (value, jobs) in [("batches", Jobs::Batches), ("ranges", Jobs::Ranges)] {
+            let args = parse(&[
+                "--sequencer-urls",
+                "http://a:3124",
+                "--aggregation",
+                "--aggregator-elf",
+                "/app/elf/aggregator",
+                "--jobs",
+                value,
+            ])
+            .unwrap();
+            assert_eq!(args.jobs, jobs);
+            assert_ne!(jobs.batches(), jobs.ranges());
+        }
+    }
+
+    #[test]
+    fn jobs_need_aggregated_mode() {
+        let err = parse(&["--sequencer-urls", "http://a:3124", "--jobs", "ranges"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
     }
 
     #[test]

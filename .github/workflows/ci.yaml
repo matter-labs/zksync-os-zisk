@@ -31,6 +31,9 @@ jobs:
       - run: >
           docker compose -f docker/zisk-stack/compose.yaml
           --env-file docker/zisk-stack/.env.example config --quiet
+      - run: >
+          docker compose -f docker/zisk-stack/compose.yaml -f docker/zisk-stack/compose.batches.yaml
+          --env-file docker/zisk-stack/.env.example config --quiet
 
   prover:
     name: prover (fmt, clippy, tests, deny)

@@ -129,6 +129,7 @@ cargo run --release -- \
 | `--proving-key-snark` | required | ZiSK SNARK (pilfflonk) proving key directory. Omit it under `--coordinator-url`; the worker supplies it. `--proving-key-plonk` still works as an alias. |
 | `--aggregation` | off | Aggregated mode, which the server requires. Submits per-batch `vadcop_final` streams and proves `/ZiSK-AGG` range jobs. Requires `--aggregator-elf`. |
 | `--aggregator-elf` | (none) | Path to the ZiSK aggregator guest ELF. Requires `--aggregation`. |
+| `--jobs` | `all` | `all`, `batches` or `ranges` (env `ZISK_JOBS`). Takes only one kind of job, so batch and range proofs can run on different GPUs, each behind its own coordinator. Requires `--aggregation`. |
 | `--no-gpu` | off | Prove CPU-only. Conflicts with `--coordinator-url`. |
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. Conflicts with `--coordinator-url`. |
 | `--coordinator-url` | (none) | ZiSK coordinator client API URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. |

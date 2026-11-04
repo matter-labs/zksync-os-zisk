@@ -80,6 +80,28 @@ with, and the compose file already lifts the memlock limit it needs. One
 worker serves one GPU; copy the service with another `CUDA_VISIBLE_DEVICES`
 for more, all joining the same coordinator.
 
+### Batch and range proofs on separate GPUs
+
+One stack proves both the per-batch `vadcop_final` proofs and the range
+proofs (the aggregator guest plus the pilfflonk wrap). To run the range
+proofs on another machine, for instance one GPU that wraps for both proof
+systems, run two stacks against the same sequencer:
+
+```bash
+# Batch machine: no pilfflonk key on the GPU, batch jobs only.
+docker compose -f compose.yaml -f compose.batches.yaml up -d
+
+# Wrapping machine: ZISK_JOBS=ranges in its .env, range jobs only.
+docker compose up -d
+```
+
+Workers cannot share one coordinator for this. A coordinator requires all
+its workers to have the same SNARK key setup, since any of them may be asked
+to wrap, and it may split one job across several workers, so it has no way
+to keep the wrap off a batch worker. Each stack therefore has its own
+coordinator, and its daemon picks only its kind of job (`--jobs`, env
+`ZISK_JOBS`). Set a distinct `ZISK_PROVER_ID` on each.
+
 ## Building
 
 ```bash
@@ -111,4 +133,5 @@ released assets and publishes it to GHCR and GAR with the release tag.
 | `prepare-keys.sh` | Installed as `zisk-prepare-keys` |
 | `keys.sha256` | sha256 pins of the key tarballs |
 | `compose.yaml`, `.env.example` | Single-machine deployment |
+| `compose.batches.yaml` | Override for a batches-only stack, when range proofs run elsewhere |
 | `build-images.sh` | Builds the image from a checkout or a release |

@@ -128,6 +128,8 @@ services:
       - ${ZISK_PROVER_ID:-zisk-stack}
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      # all, batches or ranges; see compose.batches.yaml for the split.
+      ZISK_JOBS: ${ZISK_JOBS:-all}
     ports:
       - "127.0.0.1:3313:3313"
     volumes:
