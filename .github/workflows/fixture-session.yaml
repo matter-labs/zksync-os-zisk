@@ -264,8 +264,8 @@ jobs:
         with:
           ref: ${{ inputs.base_ref || github.ref_name }}
           fetch-depth: 0
-          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
-          # checkout's GITHUB_TOKEN override that URL credential.
+          # The publisher writes through the API with the bot App token;
+          # nothing pushes with git.
           persist-credentials: false
 
       - name: Download the validated session
@@ -321,16 +321,23 @@ jobs:
         working-directory: zisk-verifier
         run: cargo test --all-features verifies_the_real_vadcop_final_proof_file -- --include-ignored
 
+      # GitHub signs the commits an App token creates through the API, and the
+      # App token's PR is a normal event, so its pull-request checks run.
+      - name: Generate the bot App token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Open or update the in-repository fixture PR
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: RELEASE_TOKEN is required to publish the fixture PR" >&2
-            exit 1
-          fi
           # `main` requires signed commits, and a pushed `git commit` is
           # unsigned. Artifacts drop the executable bit, hence `bash`.
           expected="$(git ls-remote --heads origin "refs/heads/$AUTOMATION_BRANCH" | awk '{print $1}')"

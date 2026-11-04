@@ -3,9 +3,7 @@ name: Release-please
 # Maintains the release PR from conventional commits on main and publishes the GitHub release when it merges.
 
 permissions:
-  contents: write
-  pull-requests: write
-  issues: write
+  contents: read
 
 on:
   push:
@@ -17,65 +15,23 @@ jobs:
   release-please:
     runs-on: ubuntu-latest
     steps:
+      # As in zksync-ci-common's release-please workflow: GitHub signs the
+      # commits an App installation token creates through the API, which is how
+      # release-please commits, and `main` requires signed commits. Events from
+      # an App token, unlike github.token's, trigger workflows, so the published
+      # release fires release-assets.
+      - name: Generate the bot App token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - name: Run release-please
-        id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          # RELEASE_TOKEN is a PAT, so the published release fires release-assets; the MATTERLABS_BOTS_* app secrets zksync-ci-common needs are not shared here.
-          token: ${{ secrets.RELEASE_TOKEN }}
+          token: ${{ steps.app_token.outputs.token }}
           config-file: .github/release-please/config.json
           manifest-file: .github/release-please/manifest.json
-
-      # `main` requires signed commits, and GitHub does not sign the commits the
-      # action creates with a PAT. The open release PR is looked up rather than
-      # taken from the action's `pr` output: that is unset when a run leaves
-      # the PR unchanged, as a push of hidden commit types (ci, chore) does,
-      # which would leave an unsigned PR from an earlier run unsigned.
-      - name: Find the open release PR
-        id: release-pr
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          set -euo pipefail
-          branch="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100" \
-            --jq '[.[] | select(.head.ref | startswith("release-please--branches--main"))][0].head.ref // ""')"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-
-      - name: Check out the release PR branch
-        if: steps.release-pr.outputs.branch
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.release-pr.outputs.branch }}
-          fetch-depth: 2
-          persist-credentials: false
-
-      # From this run's commit: the release PR branch can predate the script.
-      - name: Check out the signing script
-        if: steps.release-pr.outputs.branch
-        uses: actions/checkout@v4
-        with:
-          path: .signing-tooling
-          sparse-checkout: |
-            .github/scripts/push-signed-commit.sh
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Re-create the release PR commit signed
-        if: steps.release-pr.outputs.branch
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          BRANCH: ${{ steps.release-pr.outputs.branch }}
-        run: |
-          set -euo pipefail
-          head="$(git rev-parse HEAD)"
-          verified="$(gh api "repos/$GITHUB_REPOSITORY/commits/$head" --jq .commit.verification.verified)"
-          if [[ "$verified" == true ]]; then
-            echo "$BRANCH is already at a signed commit"
-            exit 0
-          fi
-          git log -1 --format=%B "$head" > "$RUNNER_TEMP/release-commit.txt"
-          # Both sides of a rename, so the script deletes the old path.
-          mapfile -t paths < <(git diff --name-only --no-renames HEAD^ HEAD)
-          .signing-tooling/.github/scripts/push-signed-commit.sh \
-            "$BRANCH" "$(git rev-parse HEAD^)" "$RUNNER_TEMP/release-commit.txt" "$head" \
-            "${paths[@]}"
