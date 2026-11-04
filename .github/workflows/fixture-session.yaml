@@ -262,8 +262,8 @@ jobs:
         with:
           ref: ${{ inputs.base_ref || github.ref_name }}
           fetch-depth: 0
-          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
-          # checkout's GITHUB_TOKEN override that URL credential.
+          # The publisher writes through the API with the bot App token;
+          # nothing pushes with git.
           persist-credentials: false
 
       - name: Download the validated session
@@ -319,40 +319,64 @@ jobs:
         working-directory: zisk-verifier
         run: cargo test --all-features verifies_the_real_vadcop_final_proof_file -- --include-ignored
 
+      # As in era-contracts' bot workflows: `main` requires signed commits, and
+      # GitHub signs the commits an App token creates through the API. The App
+      # token's PR is also a normal event, so its pull-request checks run.
+      - name: Generate the bot App token
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # ghcommit-action adds a commit on top of an existing branch, so a new
+      # branch starts at the publication base. With a PR open, a re-run adds a
+      # commit to it, which the squash merge folds away. Without one, the branch
+      # is left over from a merged or closed PR and starts again: resetting an
+      # open PR's branch to a commit on its base could get the PR marked merged.
+      - name: Prepare the fixture branch
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          base="$(git rev-parse HEAD)"
+          current="$(git ls-remote --heads origin "refs/heads/$AUTOMATION_BRANCH" | awk '{print $1}')"
+          open_pr="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f head="$GITHUB_REPOSITORY_OWNER:$AUTOMATION_BRANCH" -f state=open --jq '.[0].number // empty')"
+          if [[ -z "$current" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$AUTOMATION_BRANCH" -f sha="$base" >/dev/null
+          elif [[ -z "$open_pr" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$AUTOMATION_BRANCH" \
+              -f sha="$base" -F force=true >/dev/null
+          fi
+
+      - name: Commit the fixtures (signed by GitHub)
+        uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465 # v0.2.22
+        with:
+          commit_message: "chore(fixtures): rotate ZiSK proof fixtures"
+          repo: ${{ github.repository }}
+          branch: ${{ env.AUTOMATION_BRANCH }}
+          file_pattern: >-
+            guest-aggregator/BINDING_VECTOR.md
+            guest-aggregator/src/lib.rs
+            prover/tests/real_aggregation_vector.rs
+            prover/tests/real_proof_parse.rs
+            prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin
+            prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin
+        env:
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+
       - name: Open or update the in-repository fixture PR
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: RELEASE_TOKEN is required to publish the fixture PR" >&2
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$AUTOMATION_BRANCH"
-          git add \
-            guest-aggregator/BINDING_VECTOR.md \
-            guest-aggregator/src/lib.rs \
-            prover/tests/real_aggregation_vector.rs \
-            prover/tests/real_proof_parse.rs \
-            prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin \
-            prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin
-          git commit -m "chore(fixtures): rotate ZiSK proof fixtures"
-
-          if git ls-remote --exit-code --heads origin "refs/heads/$AUTOMATION_BRANCH" >/dev/null; then
-            git fetch origin "refs/heads/$AUTOMATION_BRANCH:refs/remotes/origin/$AUTOMATION_BRANCH"
-            expected="$(git rev-parse "refs/remotes/origin/$AUTOMATION_BRANCH")"
-            git push --force-with-lease="refs/heads/$AUTOMATION_BRANCH:$expected" \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$AUTOMATION_BRANCH"
-          else
-            git push \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$AUTOMATION_BRANCH"
-          fi
-
           source_sha="$(jq -r .metadata.selected_sha session/fixture-values.json)"
           inner_vk="$(jq -r .metadata.inner_program_vk session/fixture-values.json)"
           body="$RUNNER_TEMP/fixture-pr.md"

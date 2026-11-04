@@ -41,8 +41,8 @@ jobs:
         with:
           ref: ${{ inputs.base_ref }}
           fetch-depth: 0
-          # The publisher pushes with RELEASE_TOKEN explicitly. Do not let
-          # checkout's read-only GITHUB_TOKEN override that URL credential.
+          # The publisher writes through the API with the bot App token;
+          # nothing pushes with git.
           persist-credentials: false
 
       # Keep the derivation implementation coupled to the workflow revision
@@ -208,41 +208,69 @@ jobs:
           echo "ERROR: a derived program VK changed outside rotation_scope=${{ inputs.rotation_scope }}" >&2
           exit 1
 
-      - name: open or update the draft rotation PR
+      # As in era-contracts' bot workflows: `main` requires signed commits, and
+      # GitHub signs the commits an App token creates through the API. The App
+      # token's PR is also a normal event, so its pull-request checks run;
+      # events created by github.token are suppressed.
+      - name: generate the bot App token
         if: steps.update.outputs.changed == 'true'
-        # The bot credential makes the PR a normal external event, so its
-        # pull-request checks run. Events created by github.token are suppressed.
+        id: app_token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      # ghcommit-action adds a commit on top of an existing branch, so a new
+      # branch starts at the source commit. With a PR open, a re-run adds a
+      # commit to it, which the squash merge folds away. Without one, the branch
+      # is left over from a merged or closed PR and starts again: resetting an
+      # open PR's branch to a commit on its base could get the PR marked merged.
+      - name: prepare the rotation branch
+        if: steps.update.outputs.changed == 'true'
+        id: branch
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
         run: |
-          if [[ -z "$GH_TOKEN" ]]; then
-            echo "ERROR: RELEASE_TOKEN is required to publish the rotation PR" >&2
-            exit 1
-          fi
           source_commit="$(git rev-parse HEAD)"
           branch="automation/program-vks-${source_commit:0:12}"
+          current="$(git ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')"
+          open_pr="$(gh api --method GET "repos/$GITHUB_REPOSITORY/pulls" \
+            -f head="$GITHUB_REPOSITORY_OWNER:$branch" -f state=open --jq '.[0].number // empty')"
+          if [[ -z "$current" ]]; then
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/heads/$branch" -f sha="$source_commit" >/dev/null
+          elif [[ -z "$open_pr" ]]; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch" \
+              -f sha="$source_commit" -F force=true >/dev/null
+          fi
+          echo "name=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: commit the rotated pins (signed by GitHub)
+        if: steps.update.outputs.changed == 'true'
+        uses: planetscale/ghcommit-action@a6b150b81dca5dd027baa898604418eec9e11465 # v0.2.22
+        with:
+          commit_message: "chore(guest): rotate ZiSK program VK pins"
+          repo: ${{ github.repository }}
+          branch: ${{ steps.branch.outputs.name }}
+          file_pattern: guest/GUEST_PROGRAM_VK guest-aggregator/GUEST_PROGRAM_VK
+        env:
+          GITHUB_TOKEN: ${{ steps.app_token.outputs.token }}
+
+      - name: open or update the draft rotation PR
+        if: steps.update.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: |
+          branch="$BRANCH"
           inner_vk="$(jq -r .derived_program_vk /tmp/vk-inner/metadata.json)"
           aggregator_vk="$(jq -r .derived_program_vk /tmp/vk-aggregator/metadata.json)"
           inner_elf="$(jq -r .elf_sha256 /tmp/vk-inner/metadata.json)"
           aggregator_elf="$(jq -r .elf_sha256 /tmp/vk-aggregator/metadata.json)"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch -c "$branch"
-          git add guest/GUEST_PROGRAM_VK guest-aggregator/GUEST_PROGRAM_VK
-          git commit -m "chore(guest): rotate ZiSK program VK pins"
-
-          if git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null; then
-            git fetch origin "refs/heads/$branch:refs/remotes/origin/$branch"
-            expected="$(git rev-parse "refs/remotes/origin/$branch")"
-            git push --force-with-lease="refs/heads/$branch:$expected" \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          else
-            git push \
-              "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-              "HEAD:refs/heads/$branch"
-          fi
 
           body="$RUNNER_TEMP/program-vk-rotation.md"
           {
