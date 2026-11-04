@@ -3,7 +3,7 @@
 #
 # worker_id is left unset so every container gets a fresh UUID; the
 # coordinator identifies workers by it, and a stale id from a previous
-# container would collide. Key paths, --gpu, --plonk and the emulator choice
+# container would collide. Key paths, --gpu, --snark and the emulator choice
 # are CLI flags (see compose.yaml) so they stay visible where the container
 # is defined.
 

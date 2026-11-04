@@ -8,8 +8,8 @@ The ZiSK prover generates STARK + SNARK proofs for ZKsync OS batches using the Z
 
 The daemon has two proving backends:
 
-- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.3.2-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
-- **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the PLONK wrap is verified through the external `snarkjs` executable, which must then be on `PATH`.
+- **Resident prover service** (`--coordinator-url`, the deployed mode). The daemon shells `cargo-zisk remote` subcommands against a long-lived `zisk-coordinator`; its `zisk-worker` holds the proving keys and the GPU, so they load once for the service lifetime. All three binaries ship in the ZiSK v1.4.0-alpha toolchain tarball; nothing is built from source. [`docker/zisk-stack/`](../docker/zisk-stack/README.md) packages all three in one container image with a compose file.
+- **Per-proof process**. Without `--coordinator-url`, each proof runs one `cargo-zisk prove` process, which loads the proving keys and initializes the GPU on every invocation. This mode also passes `-y`, so the toolchain verifies the pilfflonk wrap with pilfflonk's JavaScript verifier: Node.js must be on `PATH` and `PILFFLONK_JS` must name the bundle's `pilfflonk-js` directory (`ziskup` exports it in the shell profile).
 
 ### Architecture
 
@@ -17,10 +17,10 @@ The daemon has two proving backends:
 Sequencer (zksync-os-server)
     │
     ├── /ZiSK/pick      → ZiSK batch data (BatchInput, bincode)
-    ├── /ZiSK/submit    ← per-batch vadcop_final stream (336168 bytes)
+    ├── /ZiSK/submit    ← per-batch vadcop_final stream (369736 bytes)
     │
     ├── /ZiSK-AGG/pick  → one batch range's buffered streams
-    └── /ZiSK-AGG/submit ← range SNARK (768 bytes) + public values (320 bytes)
+    └── /ZiSK-AGG/submit ← range SNARK (2208 bytes) + public values (576 bytes)
                          │
                          ▼
               MultiProofSnarkProof (Airbender + ZiSK combined)
@@ -37,19 +37,19 @@ At startup the daemon runs a one-time setup per guest ELF: `cargo-zisk remote se
 
 The server always aggregates, so run the daemon with `--aggregation` and `--aggregator-elf`. The daemon then drives two proving flows:
 
-1. **Per batch.** One `cargo-zisk prove` invocation executes the ZiSK guest ELF and aggregates the per-AIR proofs into a verified `vadcop_final` proof. The daemon extracts the 336168-byte proof stream and submits it with empty public values; the stream carries its own publics.
-2. **Per batch range.** One `cargo-zisk prove --plonk` invocation runs the aggregator guest over the range's streams, verifies each inner proof inside the zkVM, and wraps the result in a BN254 Plonk SNARK for on-chain verification. The daemon parses that output into the 768-byte SNARK proof and the 320-byte public values (`program VK ‖ publics ‖ vadcop-final VK`).
+1. **Per batch.** One `cargo-zisk prove` invocation executes the ZiSK guest ELF and aggregates the per-AIR proofs into a verified `vadcop_final` proof. The output file is the 369736-byte proof stream plus a seed trailer, which the daemon drops before submitting the stream with empty public values; the stream carries its own publics.
+2. **Per batch range.** One `cargo-zisk prove --pilfflonk` invocation runs the aggregator guest over the range's streams, verifies each inner proof inside the zkVM, and wraps the result in a BN254 pilfflonk SNARK for on-chain verification. The daemon parses that output into the 2208-byte SNARK proof (the on-chain verifier's `bytes32[69]`) and the 576-byte public values (`program VK ‖ publics ‖ vadcop-final VK`).
 
-Without `--aggregation` the daemon proves each batch with the PLONK wrap directly. That mode drives the toolchain standalone; the sequencer's `/ZiSK/submit` route accepts the stream shape only.
+Without `--aggregation` the daemon proves each batch with the pilfflonk wrap directly. That mode drives the toolchain standalone; the sequencer's `/ZiSK/submit` route accepts the stream shape only.
 
-On an RTX 5090, per-batch proving runs from ~12 s (small batch) to ~80 s (1000-transfer batch), dominated by the STARK phase; the Plonk wrap is ~5–7 s and batch-size independent. In the default backend each proof also pays the proving-key load and the GPU initialization, which take about 4.5 minutes; the resident-service backend pays them once and then proves in 19–21 s.
+On an RTX 5090 with ZiSK v0.18.0, per-batch proving ran from ~12 s (small batch) to ~80 s (1000-transfer batch), dominated by the STARK phase; the PLONK wrap of that release was ~5–7 s and batch-size independent. In the default backend each proof also pays the proving-key load and the GPU initialization, which take about 4.5 minutes; the resident-service backend pays them once and then proves in 19–21 s.
 
 ## Prerequisites
 
-- **ZiSK toolchain v1.3.2-alpha** (`ziskup -v 1.3.2-alpha`): `cargo-zisk`, passed as `--zisk-binary`. The coordinator backend uses only its `remote` subcommands, so the CPU build suffices there; the per-proof mode needs the GPU build.
+- **ZiSK toolchain v1.4.0-alpha** (`ziskup -v 1.4.0-alpha --provingkey --poseidon1`): `cargo-zisk`, passed as `--zisk-binary`. The coordinator backend uses only its `remote` subcommands, so the CPU build suffices there; the per-proof mode needs the GPU build.
 - **ZiSK guest ELFs**: built from `zksync-os-zisk/guest/` and `zksync-os-zisk/guest-aggregator/` via the reproducible builds (`./build-guest.sh`, `./build-aggregator.sh`); their paths are passed as `--elf-path` and `--aggregator-elf`.
-- **STARK proving key**: `~/.zisk/provingKey/` (via `ziskup`), passed as `--proving-key`.
-- **PLONK proving key**: `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`), passed as `--proving-key-plonk`.
+- **STARK proving key**: the Poseidon1 one, `~/.zisk/provingKey/` (via `ziskup --poseidon1`; the default is the blake3 key), passed as `--proving-key`.
+- **SNARK proving key**: the Poseidon1 pilfflonk key, `~/.zisk/provingKeySnark/` (via `ziskup setup_snark`, which follows the installed key's family), passed as `--proving-key-snark`.
 - **libgmp-dev**: required by the assembly generation in `program-setup` (`-lgmp`/`-lgmpxx`)
 - **GPU**: NVIDIA with 16 GB or more of VRAM (CUDA)
 
@@ -73,7 +73,7 @@ cargo run --release -- \
   --elf-path /path/to/zksync-os-zisk-guest \
   --aggregation --aggregator-elf /path/to/zksync-os-zisk-guest-aggregator \
   --proving-key ~/.zisk/provingKey \
-  --proving-key-plonk ~/.zisk/provingKeySnark
+  --proving-key-snark ~/.zisk/provingKeySnark
 ```
 
 ### With authentication
@@ -126,9 +126,10 @@ cargo run --release -- \
 | `--zisk-binary` | required | The pinned `cargo-zisk` binary. Under `--coordinator-url` only its `remote` subcommands run. |
 | `--elf-path` | required | Path to the ZiSK state-transition guest ELF. |
 | `--proving-key` | required | ZiSK STARK proving key directory. Omit it under `--coordinator-url`; the worker supplies it. |
-| `--proving-key-plonk` | required | ZiSK PLONK proving key directory. Omit it under `--coordinator-url`; the worker supplies it. |
+| `--proving-key-snark` | required | ZiSK SNARK (pilfflonk) proving key directory. Omit it under `--coordinator-url`; the worker supplies it. `--proving-key-plonk` still works as an alias. |
 | `--aggregation` | off | Aggregated mode, which the server requires. Submits per-batch `vadcop_final` streams and proves `/ZiSK-AGG` range jobs. Requires `--aggregator-elf`. |
 | `--aggregator-elf` | (none) | Path to the ZiSK aggregator guest ELF. Requires `--aggregation`. |
+| `--jobs` | `all` | `all`, `batches` or `ranges` (env `ZISK_JOBS`). Takes only one kind of job, so batch and range proofs can run on different GPUs, each behind its own coordinator. Requires `--aggregation`. |
 | `--no-gpu` | off | Prove CPU-only. Conflicts with `--coordinator-url`. |
 | `--asm-emulator` | off | Use the ASM emulator for witness generation. It is faster, and it needs a high memlock ulimit; the default standard emulator (`--emulator`) runs anywhere. Conflicts with `--coordinator-url`. |
 | `--coordinator-url` | (none) | ZiSK coordinator client API URL (env `ZISK_COORDINATOR_URL`), typically `http://localhost:7000`. Selects the resident-service backend, whose worker holds the proving keys and GPU. |
@@ -150,7 +151,7 @@ Prometheus metrics are served at `--metrics-address` (default `:3313`):
 | `zisk_prover_http_latency_seconds` | Histogram | Sequencer request latency, labelled by `method` (`pick`, `submit`, `pick_aggregation`, `submit_aggregation`); failed requests included |
 | `zisk_prover_http_errors` | Counter | Sequencer requests that failed, by `method`: transport errors and any status other than success or 503 |
 | `zisk_prover_proof_generation_time_seconds` | Histogram | Total proof time (input write + prove + parse), labelled by `job` (`batch`, `range`) |
-| `zisk_prover_prove_time_seconds` | Histogram | Toolchain prove time (STARK, plus the PLONK wrap where the flow uses it), by `job` |
+| `zisk_prover_prove_time_seconds` | Histogram | Toolchain prove time (STARK, plus the pilfflonk wrap where the flow uses it), by `job` |
 | `zisk_prover_program_setup_time_seconds` | Histogram | One-time per-ELF program setup |
 | `zisk_prover_proofs` | Counter | Proof attempts by `job` and `outcome` (`success`, `failure`, `cancelled`) |
 | `zisk_prover_latest_proven_batch` | Gauge | Highest batch whose proof this daemon submitted since start; the ZiSK counterpart of `fri_prover_latest_proven_batch` |
@@ -168,7 +169,7 @@ zksync-os-zisk-prover-service \
   --elf-path /path/to/zksync-os-zisk-guest \
   --aggregation --aggregator-elf /path/to/zksync-os-zisk-guest-aggregator \
   --proving-key ~/.zisk/provingKey \
-  --proving-key-plonk ~/.zisk/provingKeySnark
+  --proving-key-snark ~/.zisk/provingKeySnark
 ```
 
 The sequencer's ZiSK job API is a job market, so several daemons can share it:
@@ -192,8 +193,8 @@ zisk-coordinator
 
 # 2. Worker: proving keys + GPU, joined to the coordinator's CLUSTER port
 #    through its TOML config ([coordinator] url = "http://127.0.0.1:50051").
-#    --plonk wires the PLONK key (without it the wrap jobs fail) and
-#    --preload-plonk keeps it resident; --emulator selects the standard
+#    --snark wires the pilfflonk key (without it the wrap jobs fail) and
+#    --preload-snark keeps it resident; --emulator selects the standard
 #    emulator (the ASM path needs a high memlock ulimit); --gpu proves on the
 #    GPU. The worker registers only after the full key load (several
 #    minutes); the daemon below retries its setup until then.
@@ -201,7 +202,7 @@ CUDA_VISIBLE_DEVICES=0 zisk-worker \
   --config worker.toml \
   --proving-key ~/.zisk/provingKey \
   --proving-key-snark ~/.zisk/provingKeySnark \
-  --emulator --gpu --plonk --preload-plonk
+  --emulator --gpu --snark --preload-snark
 
 # 3. Daemon: drives `cargo-zisk remote` against the coordinator's API port.
 zksync-os-zisk-prover-service \
@@ -214,7 +215,10 @@ zksync-os-zisk-prover-service \
 
 `ziskup` installs all three ZiSK binaries. No proof is verified on this path
 before submission: the server's pre-submit checks and L1 gate the result, and
-that is what keeps `snarkjs` out of the deployment.
+that is what keeps Node.js and pilfflonk's JavaScript verifier out of the
+deployment. A cancelled proof gets SIGINT, on which `cargo-zisk remote`
+cancels its coordinator job, so a daemon shutdown does not leave the worker
+proving.
 
 Proving throughput then scales on the worker side: join more workers to the
 same coordinator (each with its own TOML config at the cluster port and its

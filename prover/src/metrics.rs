@@ -61,8 +61,8 @@ pub struct ZiskProverMetrics {
     #[metrics(unit = Unit::Seconds, buckets = PROOF_TIME_BUCKETS)]
     pub proof_generation_time: Family<Job, Histogram<Duration>>,
 
-    /// `cargo-zisk` prove time by job (integrated STARK, plus the PLONK wrap
-    /// in per-batch and aggregation-range modes).
+    /// `cargo-zisk` prove time by job (integrated STARK, plus the pilfflonk
+    /// wrap in per-batch and aggregation-range modes).
     #[metrics(unit = Unit::Seconds, buckets = PROOF_TIME_BUCKETS)]
     pub prove_time: Family<Job, Histogram<Duration>>,
 

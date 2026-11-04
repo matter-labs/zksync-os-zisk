@@ -15,7 +15,7 @@ format = "json"
 
 [coordinator]
 # Per-phase timeouts. A batch STARK takes tens of seconds on one GPU and the
-# aggregation range plus PLONK wrap a few minutes, so these leave headroom
+# aggregation range plus pilfflonk wrap a few minutes, so these leave headroom
 # for a cold worker without letting a wedged job block the queue for long.
 phase1_timeout_seconds = 900
 phase2_timeout_seconds = 1800

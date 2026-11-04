@@ -659,15 +659,6 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "bincode"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
@@ -3154,7 +3145,7 @@ dependencies = [
  "alloy-consensus",
  "alloy-eips 1.8.3",
  "alloy-primitives",
- "bincode 2.0.1",
+ "bincode",
  "blake2",
  "k256",
  "revm",
@@ -3168,7 +3159,6 @@ name = "zksync-os-zisk-mem-bench"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "bincode 1.3.3",
  "zksync-os-zisk-lib",
 ]
 

@@ -14,13 +14,13 @@
 //! proof for that ELF.
 //!
 //! Three proving flows share the pipeline:
-//! - [`ZiskProver::generate_proof`] — per-batch STF proof with the PLONK
-//!   wrap (`--plonk`), for the server's per-batch mode.
+//! - [`ZiskProver::generate_proof`] — per-batch STF proof with the pilfflonk
+//!   wrap (`--pilfflonk`), for the server's per-batch mode.
 //! - [`ZiskProver::generate_vadcop_proof`] — per-batch STF proof WITHOUT
-//!   `--plonk`: the `vadcop_final` proof stream is kept and submitted so
+//!   the wrap: the `vadcop_final` proof stream is kept and submitted so
 //!   the aggregator guest can verify it in-zkVM (aggregated mode).
 //! - [`ZiskProver::generate_aggregated_proof`] — the aggregator guest over
-//!   N per-batch streams, with the PLONK wrap: one range proof for L1.
+//!   N per-batch streams, with the pilfflonk wrap: one range proof for L1.
 //!
 //! Each `cargo-zisk` call runs as a subprocess via `tokio::process`. A
 //! `CancellationToken` cancels the wait instantly, so shutdown does not
@@ -28,12 +28,13 @@
 //! not kill the daemon.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::metrics::{Job, ZISK_PROVER_METRICS};
 
-const ZISK_SNARK_PROOF_BYTES: usize = 768;
+/// A pilfflonk proof is the on-chain verifier's `bytes32[69]` calldata.
+const ZISK_SNARK_PROOF_BYTES: usize = 69 * 32;
 // programVK(32, u64 big-endian) + guest publics(512: ziskos's full 64-word
 // output region at full u64 width, 8 little-endian bytes per word, the
 // guest's 8 commitment words first and zeros after) + vadcopVK(32, u64
@@ -43,13 +44,23 @@ const ZISK_PUBLIC_VALUES_BYTES: usize = 576;
 /// u64 words in ziskos's guest output region.
 const ZISK_PUBLICS_WORDS: usize = 64;
 /// Hash family of this lane's proving key. The aggregator guest accepts only
-/// streams tagged with this family (`agg::EXPECTED_HASH_TAG`): its pinned body
-/// size is this family's, and ZiSK's in-guest verifier selects the verifier
-/// from that tag.
-const ZISK_PROOF_HASH_FAMILY: &str = "Poseidon1";
+/// streams tagged with this family (`agg::EXPECTED_HASH_TAG`), and L1 verifies
+/// only this family's pilfflonk SNARK.
+const ZISK_PROOF_HASH_MODE: ZiskHashMode = ZiskHashMode::Poseidon1;
 /// Number of u64 words in the guest-ELF ROM root (program VK) and in the
 /// vadcop-final verification key.
 const PROGRAM_VK_LEN: usize = 4;
+/// Leads a SNARK proof file. A `vadcop_final` file is the flat stream, whose
+/// first word is the 0/1 minimal flag, so it never starts with this.
+const SNARK_FILE_MAGIC: &[u8; 8] = b"ZISKPLNK";
+/// `[seed(4)][b"ZISKSEED"]`, appended to a `vadcop_final` file whose proof
+/// carries the execution's random seed. The aggregator guest refuses it.
+const SEED_TRAILER_TAG: u64 = u64::from_le_bytes(*b"ZISKSEED");
+const SEED_TRAILER_WORDS: usize = 4 + 1;
+/// How long a cancelled `cargo-zisk` gets to act on SIGINT before it is
+/// killed. A remote prove spends it cancelling its coordinator job, which
+/// would otherwise keep the worker's GPU busy after the daemon gave up on it.
+const CANCEL_GRACE: Duration = Duration::from_secs(20);
 
 #[derive(Debug)]
 pub struct ZiskSnarkOutput {
@@ -77,7 +88,7 @@ pub enum ProvingBackend {
 #[derive(Debug)]
 pub struct SpawnBackend {
     pub proving_key: PathBuf,
-    pub proving_key_plonk: PathBuf,
+    pub proving_key_snark: PathBuf,
     pub gpu: bool,
     /// Select the ASM emulator for witness generation. It is faster than the
     /// standard emulator, but it needs a high memlock limit that containers
@@ -176,7 +187,7 @@ impl ZiskProver {
         Ok(done)
     }
 
-    /// Generate a per-batch ZiSK SNARK proof (PLONK wrap). Returns
+    /// Generate a per-batch ZiSK SNARK proof (pilfflonk wrap). Returns
     /// `Ok(None)` if cancelled.
     ///
     /// This is an async function — subprocesses are managed with `tokio::process`
@@ -196,7 +207,7 @@ impl ZiskProver {
             let input_path = work_dir.join("input.bin");
             write_zisk_input(&input_path, zisk_bincode)?;
             let proof_path = work_dir.join("proof.bin");
-            tracing::info!(batch_number, "proving (STARK + PLONK wrap) starting");
+            tracing::info!(batch_number, "proving (STARK + pilfflonk wrap) starting");
             if !self
                 .run_prove(
                     Job::Batch,
@@ -224,7 +235,7 @@ impl ZiskProver {
         .await
     }
 
-    /// Generate a per-batch `vadcop_final` proof stream (no PLONK wrap) —
+    /// Generate a per-batch `vadcop_final` proof stream (no SNARK wrap) —
     /// the per-batch flow of AGGREGATED mode. The returned bytes are the
     /// exact `get_proof_bytes()` stream the aggregator guest verifies.
     /// Returns `Ok(None)` if cancelled.
@@ -272,8 +283,8 @@ impl ZiskProver {
     }
 
     /// Prove an aggregation range: verify the N per-batch `vadcop_final`
-    /// streams in the aggregator guest and wrap the result in a PLONK SNARK
-    /// for L1. `streams` must be in batch order; they are validated and
+    /// streams in the aggregator guest and wrap the result in a pilfflonk
+    /// SNARK for L1. `streams` must be in batch order; they are validated and
     /// framed by the input assembler before proving. Returns `Ok(None)` if
     /// cancelled.
     pub async fn generate_aggregated_proof(
@@ -302,7 +313,7 @@ impl ZiskProver {
                 from_batch,
                 to_batch,
                 proofs = streams.len(),
-                "proving aggregation range (in-zkVM verification + PLONK wrap) starting"
+                "proving aggregation range (in-zkVM verification + pilfflonk wrap) starting"
             );
             if !self
                 .run_prove(
@@ -331,19 +342,19 @@ impl ZiskProver {
         .await
     }
 
-    /// Shared prove invocation. The `plonk` flag adds the BN254 PLONK wrap
-    /// (`--plonk`); without it the run keeps the `vadcop_final` proof.
-    /// Returns `Ok(false)` if cancelled.
+    /// Shared prove invocation. The `snark` flag adds the BN254 pilfflonk
+    /// wrap (`--pilfflonk`); without it the run keeps the `vadcop_final`
+    /// proof. Returns `Ok(false)` if cancelled.
     async fn run_prove(
         &self,
         job: Job,
         elf: &Path,
         input_path: &Path,
         proof_path: &Path,
-        plonk: bool,
+        snark: bool,
         cancel: &CancellationToken,
     ) -> anyhow::Result<bool> {
-        let args = prove_args(&self.backend, elf, input_path, proof_path, plonk);
+        let args = prove_args(&self.backend, elf, input_path, proof_path, snark);
         let prove_start = Instant::now();
         let mut attempt = run_cancellable(&self.binary, &args, cancel).await;
         if let (Err(e), ProvingBackend::Coordinator { .. }) = (&attempt, &self.backend) {
@@ -449,17 +460,17 @@ fn setup_args(backend: &ProvingBackend, elf: &Path) -> Vec<String> {
     }
 }
 
-/// Build the prove argument vector. `plonk` adds the BN254 wrap (per-batch
-/// and aggregation-range modes); without it the run keeps the `vadcop_final`
-/// proof (aggregated per-batch mode). The spawn backend also passes the key
-/// paths and the hardware choices, which the coordinator backend leaves to
-/// the worker.
+/// Build the prove argument vector. `snark` adds the BN254 pilfflonk wrap
+/// (per-batch and aggregation-range modes); without it the run keeps the
+/// `vadcop_final` proof (aggregated per-batch mode). The spawn backend also
+/// passes the key paths and the hardware choices, which the coordinator
+/// backend leaves to the worker.
 fn prove_args(
     backend: &ProvingBackend,
     elf: &Path,
     input_path: &Path,
     proof_path: &Path,
-    plonk: bool,
+    snark: bool,
 ) -> Vec<String> {
     match backend {
         ProvingBackend::Spawn(spawn) => {
@@ -472,10 +483,10 @@ fn prove_args(
                 "-k".into(),
                 p(&spawn.proving_key),
             ];
-            if plonk {
+            if snark {
                 args.push("-w".into());
-                args.push(p(&spawn.proving_key_plonk));
-                args.push("--plonk".into());
+                args.push(p(&spawn.proving_key_snark));
+                args.push("--pilfflonk".into());
             }
             args.push("-y".into());
             args.push("-o".into());
@@ -489,13 +500,13 @@ fn prove_args(
             args
         }
         ProvingBackend::Coordinator { url } => {
-            // Without `--plonk` the remote run returns the vadcop_final
-            // proof; `--plonk` adds the BN254 wrap on the worker. The ELF
+            // Without `--pilfflonk` the remote run returns the vadcop_final
+            // proof; `--pilfflonk` adds the BN254 wrap on the worker. The ELF
             // path identifies the program: the client hashes it and the
             // coordinator resolves the setup registered at startup. This path
             // has no verify flag, and none is wanted: the toolchain verifies a
-            // wrapped proof through the external `snarkjs` executable, which
-            // the images do not carry.
+            // pilfflonk proof by running its JavaScript verifier under `node`,
+            // which the images do not carry.
             let mut args = vec![
                 "remote".to_string(),
                 "--coordinator".into(),
@@ -510,8 +521,8 @@ fn prove_args(
                 "--timeout".into(),
                 "0".into(),
             ];
-            if plonk {
-                args.push("--plonk".into());
+            if snark {
+                args.push("--pilfflonk".into());
             }
             args
         }
@@ -557,71 +568,68 @@ async fn run_cancellable(
             }
         }
         _ = cancel.cancelled() => {
-            tracing::info!("shutdown requested, killing subprocess");
-            child.kill().await.ok();
+            tracing::info!("shutdown requested, interrupting subprocess");
+            interrupt(&child);
+            if tokio::time::timeout(CANCEL_GRACE, child.wait()).await.is_err() {
+                tracing::warn!("subprocess still running {CANCEL_GRACE:?} after SIGINT, killing it");
+                child.kill().await.ok();
+            }
             Ok(false)
         }
+    }
+}
+
+/// Send SIGINT, which `cargo-zisk remote` answers by cancelling its
+/// coordinator job before it exits.
+fn interrupt(child: &tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        // SAFETY: `kill` has no memory-safety preconditions. `id()` is `None`
+        // once the child has been reaped, so `pid` is still our child and
+        // cannot have been reused by another process.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) };
     }
 }
 
 // ---------------------------------------------------------------------------
 // Proof-file parsing.
 //
-// `cargo-zisk prove -o <file>` writes bincode-2 (standard config) of
-// zisk-common's `Proof` struct. Rather than depending on zisk-common (which
-// pulls in the whole proofman stack), we mirror the exact struct shapes and
-// deserialize with serde + bincode 2. Shapes must match
-// zisk@v1.3.2-alpha `common/src/proof.rs` field-for-field (unchanged since
-// v1.2.0-alpha; that release changed only the serialized `get_proof_bytes()`
-// stream, which gained the trailing hash-family tag).
+// Since ZiSK 1.4.0, `cargo-zisk prove -o <file>` writes one of two formats
+// (zisk@v1.4.0-alpha `common/src/proof.rs`, `Proof::to_bytes`):
+// - a `vadcop_final` proof as the flat `get_proof_bytes()` stream, plus a
+//   seed trailer when the proof carries the execution's random seed;
+// - a SNARK proof as `SNARK_FILE_MAGIC` followed by bincode-2 (standard
+//   config) of zisk-common's `Proof { body, program_vk, random_seed }`.
 //
-// The encoding carries no version tag, and the 0.18 and 1.2.0 streams share a
-// prefix, so an older file decodes part-way before it diverges. The daemon
-// therefore selects the shape by the pinned toolchain version rather than by
-// probing the bytes.
+// Rather than depending on zisk-common (which pulls in the whole proofman
+// stack), the daemon mirrors the shapes it reads and deserializes with
+// serde + bincode 2.
 // ---------------------------------------------------------------------------
 
-#[cfg_attr(test, derive(serde::Serialize))]
-#[derive(serde::Deserialize)]
-struct ZiskProofFile {
-    body: ZiskProofBody,
-    program_vk: ZiskProgramVk,
-}
+/// zisk-common's `ProofBody` variant indices, in declaration order.
+const PROOF_BODY_PLONK: u32 = 1;
+const PROOF_BODY_PILFFLONK: u32 = 2;
 
+/// A SNARK file after its magic and the `ProofBody::Pilfflonk` variant index:
+/// the variant's fields, then the rest of `Proof`. bincode writes an enum as
+/// its variant index (a u32) followed by the variant's fields, and a struct as
+/// its fields in order, so this reads the same bytes without mirroring the
+/// variants the daemon never accepts.
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
-enum ZiskProofBody {
+struct ZiskPilfflonkFile {
+    proof_bytes: Vec<u8>,
+    // The wrap key, the u32 publics view and the seed are decoded only to
+    // advance the deserializer; the wire values come from `publics_full` and
+    // `rootc`.
     #[allow(dead_code)]
-    Vadcop {
-        proof: Vec<u64>,
-        zisk_vk: Vec<u64>,
-        kind: ZiskVadcopKind,
-        hash: String,
-        publics_full: Vec<u64>,
-    },
-    Plonk {
-        proof_bytes: Vec<u8>,
-        // The wrap key and the u32 publics view are decoded only to advance
-        // the deserializer; the wire values come from `publics_full` and
-        // `rootc`.
-        #[allow(dead_code)]
-        plonk_vk: Box<ZiskPlonkVkBlob>,
-        #[allow(dead_code)]
-        publics: ZiskPublicValues,
-        publics_full: Vec<u64>,
-        rootc: Vec<u64>,
-    },
-}
-
-/// Which vadcop flavor a proof carries. The variant owns the
-/// `is_vadcop_final_proof` public: 1 for a leaf, 0 for a recurser fold, absent
-/// for a compressed proof.
-#[cfg_attr(test, derive(serde::Serialize))]
-#[derive(serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
-enum ZiskVadcopKind {
-    Final,
-    Recurser,
-    Minimal,
+    vkey_json: String,
+    #[allow(dead_code)]
+    publics: Vec<u8>,
+    publics_full: Vec<u64>,
+    rootc: Vec<u64>,
+    program_vk: ZiskProgramVk,
+    #[allow(dead_code)]
+    random_seed: Option<[u8; 32]>,
 }
 
 /// Hash family a verification key was produced under. A verification key is
@@ -637,49 +645,8 @@ enum ZiskHashMode {
 
 #[cfg_attr(test, derive(serde::Serialize))]
 #[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct ZiskPlonkVkBlob {
-    vadcop_vk: Vec<u64>,
-    plonk_vkey: ZiskPlonkVkey,
-}
-
-/// snarkJS Plonk verification key (decoded only to advance the deserializer).
-#[cfg_attr(test, derive(serde::Serialize))]
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct ZiskPlonkVkey {
-    protocol: String,
-    curve: String,
-    n_public: u32,
-    power: u32,
-    k1: String,
-    k2: String,
-    qm: [String; 3],
-    ql: [String; 3],
-    qr: [String; 3],
-    qo: [String; 3],
-    qc: [String; 3],
-    s1: [String; 3],
-    s2: [String; 3],
-    s3: [String; 3],
-    x_2: [[String; 2]; 3],
-    w: String,
-}
-
-/// Mirror of `PublicValues { data, #[serde(skip)] ptr }` — skipped fields are
-/// absent from the bincode stream, so only `data` is mirrored.
-#[cfg_attr(test, derive(serde::Serialize))]
-#[derive(serde::Deserialize)]
-#[allow(dead_code)]
-struct ZiskPublicValues {
-    data: Vec<u8>,
-}
-
-#[cfg_attr(test, derive(serde::Serialize))]
-#[derive(serde::Deserialize)]
 struct ZiskProgramVk {
     vk: Vec<u64>,
-    #[allow(dead_code)]
     hash_mode: ZiskHashMode,
 }
 
@@ -691,7 +658,7 @@ fn extend_be(out: &mut Vec<u8>, words: &[u64]) {
 }
 
 /// Extract `(proof, public_values)` in the server's wire format:
-/// - proof: the 768-byte BN254 PLONK SNARK.
+/// - proof: the 2,208-byte pilfflonk SNARK.
 /// - public_values (576 bytes): `program_vk (32B, u64 BE) ‖ guest publics
 ///   (512B, 64 words of 8 LE bytes) ‖ rootCVadcopFinal (32B, u64 BE)` — the
 ///   exact preimage of the circuit's single public signal
@@ -703,67 +670,72 @@ fn extend_be(out: &mut Vec<u8>, words: &[u64]) {
 /// It is read from the file rather than derived, because the two differ.
 pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
     let data = std::fs::read(path)?;
-    let (proof_file, consumed): (ZiskProofFile, usize) =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard())
+    let Some(rest) = data.strip_prefix(SNARK_FILE_MAGIC) else {
+        anyhow::bail!(
+            "proof file holds a vadcop_final proof, expected a pilfflonk SNARK (missing --pilfflonk?)"
+        );
+    };
+    let config = bincode::config::standard();
+    let (variant, head): (u32, usize) = bincode::serde::decode_from_slice(rest, config)
+        .map_err(|e| anyhow::anyhow!("failed to decode proof file: {e}"))?;
+    match variant {
+        PROOF_BODY_PILFFLONK => {}
+        PROOF_BODY_PLONK => {
+            anyhow::bail!(
+                "proof file holds a PLONK SNARK, expected pilfflonk (--plonk instead of --pilfflonk?)"
+            )
+        }
+        other => anyhow::bail!("proof file holds proof body variant {other}, expected pilfflonk"),
+    }
+    let rest = &rest[head..];
+    let (file, consumed): (ZiskPilfflonkFile, usize) =
+        bincode::serde::decode_from_slice(rest, config)
             .map_err(|e| anyhow::anyhow!("failed to decode proof file: {e}"))?;
     anyhow::ensure!(
-        consumed == data.len(),
+        consumed == rest.len(),
         "trailing bytes in proof file: decoded {consumed} of {}",
-        data.len()
+        rest.len()
     );
 
-    let ZiskProofBody::Plonk {
-        proof_bytes,
-        publics_full,
-        rootc,
-        ..
-    } = proof_file.body
-    else {
-        anyhow::bail!("proof file contains a Vadcop proof, expected Plonk (missing --plonk?)");
-    };
     anyhow::ensure!(
-        proof_bytes.len() == ZISK_SNARK_PROOF_BYTES,
+        file.program_vk.hash_mode == ZISK_PROOF_HASH_MODE,
+        "proof is of hash family {:?}, expected {ZISK_PROOF_HASH_MODE:?}",
+        file.program_vk.hash_mode
+    );
+    anyhow::ensure!(
+        file.proof_bytes.len() == ZISK_SNARK_PROOF_BYTES,
         "proof length {} != {ZISK_SNARK_PROOF_BYTES}",
-        proof_bytes.len()
+        file.proof_bytes.len()
     );
     anyhow::ensure!(
-        proof_file.program_vk.vk.len() == PROGRAM_VK_LEN,
+        file.program_vk.vk.len() == PROGRAM_VK_LEN,
         "program VK has {} words, expected {PROGRAM_VK_LEN}",
-        proof_file.program_vk.vk.len()
+        file.program_vk.vk.len()
     );
     anyhow::ensure!(
-        rootc.len() == PROGRAM_VK_LEN,
+        file.rootc.len() == PROGRAM_VK_LEN,
         "rootC has {} words, expected {PROGRAM_VK_LEN}",
-        rootc.len()
+        file.rootc.len()
     );
-    // Plonk files can retain the recursion-layer flag that Vadcop files
-    // normalize away. Match upstream snark_publics_hash before slicing inputs.
-    let publics_full = match publics_full.as_slice() {
-        [0 | 1, program_publics @ ..]
-            if program_publics.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS =>
-        {
-            program_publics
-        }
-        program_publics => program_publics,
-    };
+    // ZiSK saves the flag-free `[program VK | inputs]` view; the recursion
+    // layer's leaf flag is not part of the digest.
     anyhow::ensure!(
-        publics_full.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS,
+        file.publics_full.len() == PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS,
         "publics_full has {} words, expected {}",
-        publics_full.len(),
+        file.publics_full.len(),
         PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS
     );
-
     anyhow::ensure!(
-        publics_full[..PROGRAM_VK_LEN] == proof_file.program_vk.vk,
+        file.publics_full[..PROGRAM_VK_LEN] == file.program_vk.vk,
         "publics_full program VK differs from the proof file's program VK"
     );
 
     let mut public_values = Vec::with_capacity(ZISK_PUBLIC_VALUES_BYTES);
-    extend_be(&mut public_values, &proof_file.program_vk.vk);
-    for word in &publics_full[PROGRAM_VK_LEN..] {
+    extend_be(&mut public_values, &file.program_vk.vk);
+    for word in &file.publics_full[PROGRAM_VK_LEN..] {
         public_values.extend_from_slice(&word.to_le_bytes());
     }
-    extend_be(&mut public_values, &rootc);
+    extend_be(&mut public_values, &file.rootc);
     anyhow::ensure!(
         public_values.len() == ZISK_PUBLIC_VALUES_BYTES,
         "public values length {} != {ZISK_PUBLIC_VALUES_BYTES}",
@@ -771,7 +743,7 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
     );
 
     Ok(ZiskSnarkOutput {
-        proof: proof_bytes,
+        proof: file.proof_bytes,
         public_values,
     })
 }
@@ -779,8 +751,10 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
 /// Extract the serialized `vadcop_final` proof stream — the exact byte
 /// layout of `zisk_common::Proof::get_proof_bytes()`, which is what the
 /// aggregator guest verifies in-zkVM — from a `cargo-zisk prove` output
-/// file with a **Vadcop** body (a run WITHOUT `--plonk`; with `--plonk`
-/// the file holds only the BN254 wrap and the vadcop_final proof is gone).
+/// file of a run WITHOUT `--pilfflonk` (with it, the file holds only the
+/// BN254 wrap and the vadcop_final proof is gone). The file is the stream,
+/// plus the seed trailer, which is cut off here; a raw stream without a
+/// trailer is accepted as is.
 ///
 /// Stream layout (u64 LE words):
 /// `[minimal=0][n_publics=69][is_vadcop_final_proof=1][program_vk(4)]
@@ -788,191 +762,108 @@ pub fn parse_proof_file(path: &Path) -> anyhow::Result<ZiskSnarkOutput> {
 pub fn vadcop_stream_from_proof_file(path: &Path) -> anyhow::Result<Vec<u8>> {
     use zksync_os_zisk_guest_aggregator as agg;
 
-    let data = std::fs::read(path)?;
-    let (proof_file, consumed): (ZiskProofFile, usize) =
-        bincode::serde::decode_from_slice(&data, bincode::config::standard())
-            .map_err(|e| anyhow::anyhow!("failed to decode proof file: {e}"))?;
+    let mut data = std::fs::read(path)?;
     anyhow::ensure!(
-        consumed == data.len(),
-        "trailing bytes in proof file: decoded {consumed} of {}",
-        data.len()
+        !data.starts_with(SNARK_FILE_MAGIC),
+        "proof file holds a SNARK proof, expected a vadcop_final stream \
+         (run cargo-zisk prove WITHOUT --pilfflonk to keep the vadcop_final proof)"
     );
-
-    let ZiskProofBody::Vadcop {
-        proof,
-        zisk_vk,
-        kind,
-        hash,
-        publics_full,
-    } = proof_file.body
-    else {
-        anyhow::bail!(
-            "proof file contains a Plonk proof, expected a vadcop_final body \
-             (run cargo-zisk prove WITHOUT --plonk to keep the vadcop_final proof)"
-        );
-    };
-    anyhow::ensure!(
-        kind == ZiskVadcopKind::Final,
-        "proof file carries a {kind:?} vadcop proof; the aggregator accepts \
-         only a non-minimal leaf proof"
-    );
-    // The stream's tag below is derived from this family; the aggregator
-    // rejects any other tag, so refuse here with a diagnosis.
-    anyhow::ensure!(
-        hash == ZISK_PROOF_HASH_FAMILY,
-        "proof file uses hash family {hash}, expected {ZISK_PROOF_HASH_FAMILY}"
-    );
-    anyhow::ensure!(
-        proof.len() == agg::VADCOP_FINAL_BODY_WORDS,
-        "vadcop_final body has {} words, expected {} — pil2-proofman pin mismatch?",
-        proof.len(),
-        agg::VADCOP_FINAL_BODY_WORDS
-    );
-    anyhow::ensure!(
-        proof_file.program_vk.vk.len() == PROGRAM_VK_LEN,
-        "program VK has {} words, expected {PROGRAM_VK_LEN}",
-        proof_file.program_vk.vk.len()
-    );
-    anyhow::ensure!(
-        zisk_vk.len() == PROGRAM_VK_LEN,
-        "vadcop VK has {} words, expected {PROGRAM_VK_LEN}",
-        zisk_vk.len()
-    );
-    // `publics_full` is the canonical flag-free `[program VK | inputs]` view
-    // at full u64 width; the leaf flag lives in `kind`.
-    anyhow::ensure!(
-        publics_full.len() == PROGRAM_VK_LEN + agg::PUBLICS_WORDS,
-        "publics_full has {} words, expected {}",
-        publics_full.len(),
-        PROGRAM_VK_LEN + agg::PUBLICS_WORDS
-    );
-
-    // The stream carries the program VK inside `publics_full`. The aggregator
-    // reads it from there, so it must agree with the file's own field.
-    anyhow::ensure!(
-        publics_full[..PROGRAM_VK_LEN] == proof_file.program_vk.vk[..],
-        "publics_full program VK differs from the proof file's program VK"
-    );
-
-    let mut words: Vec<u64> = Vec::with_capacity(agg::PROOF_STREAM_WORDS);
-    words.push(0); // non-minimal
-    words.push(agg::EXPECTED_N_PUBLICS);
-    words.push(agg::IS_VADCOP_FINAL_PROOF);
-    words.extend_from_slice(&publics_full);
-    words.extend_from_slice(&proof);
-    words.extend_from_slice(&zisk_vk);
-    words.push(agg::EXPECTED_HASH_TAG);
-    debug_assert_eq!(words.len(), agg::PROOF_STREAM_WORDS);
-
-    let mut bytes = Vec::with_capacity(words.len() * 8);
-    for w in &words {
-        bytes.extend_from_slice(&w.to_le_bytes());
+    // The stream ends with the hash tag, never with the trailer's tag, so a
+    // trailing tag word can only be a trailer.
+    let trailer_bytes = SEED_TRAILER_WORDS * 8;
+    if data.len() >= trailer_bytes && data.ends_with(&SEED_TRAILER_TAG.to_le_bytes()) {
+        data.truncate(data.len() - trailer_bytes);
     }
-    Ok(bytes)
+    let words = agg::words_from_bytes(&data).map_err(|e| anyhow::anyhow!("{e}"))?;
+    agg::ProofFrame::parse(words).map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(data)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn fe() -> String {
-        "12539294771426046350380723674544937632432364684958450364901655716930754226695".into()
+    /// The hash family of this lane's proving key, as ZiSK's verifier crate
+    /// names it.
+    const ZISK_PROOF_HASH_FAMILY: &str = "Poseidon1";
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zisk_prover_{name}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    fn sample_vkey() -> ZiskPlonkVkey {
-        ZiskPlonkVkey {
-            protocol: "plonk".into(),
-            curve: "bn128".into(),
-            n_public: 1,
-            power: 24,
-            k1: "2".into(),
-            k2: "3".into(),
-            qm: [fe(), fe(), "1".into()],
-            ql: [fe(), fe(), "1".into()],
-            qr: [fe(), fe(), "1".into()],
-            qo: [fe(), fe(), "1".into()],
-            qc: [fe(), fe(), "1".into()],
-            s1: [fe(), fe(), "1".into()],
-            s2: [fe(), fe(), "1".into()],
-            s3: [fe(), fe(), "1".into()],
-            x_2: [[fe(), fe()], [fe(), fe()], [fe(), fe()]],
-            w: fe(),
-        }
+    /// A SNARK file as `cargo-zisk` writes it: the magic, then the bincode
+    /// `Proof` whose body is variant `variant`.
+    fn snark_file(variant: u32, file: &ZiskPilfflonkFile) -> Vec<u8> {
+        let config = bincode::config::standard();
+        let mut bytes = SNARK_FILE_MAGIC.to_vec();
+        bytes.extend(bincode::serde::encode_to_vec(variant, config).unwrap());
+        bytes.extend(bincode::serde::encode_to_vec(file, config).unwrap());
+        bytes
     }
 
-    /// The specimens are ZiSK v1.2.0-alpha PLONK files. The bincode `Proof`
-    /// shape is unchanged in v1.3.2-alpha (only the serialized vadcop stream
-    /// changed), so they stay valid shape regressions until v1.3.2-alpha
-    /// specimens from a fixture session replace them.
-    #[test]
-    fn parses_real_alpha_plonk_files_with_recursion_flag() {
-        for (file, program_vk) in [
-            (
-                "real_proof_zisk_v1.2.0-alpha.bin",
-                "189d6b11c50ef1db9885fed376479ed97dde719a59574a7946d8d612e25da97a",
-            ),
-            (
-                "real_plonk_aggregate_zisk_v1.2.0-alpha.bin",
-                "10f0e91f54ad66e4e95713a1b4b9fda44ea3b06e51ed3430ef775ba8bef4a7c8",
-            ),
-        ] {
-            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/data")
-                .join(file);
-            let output = parse_proof_file(&path).unwrap();
-            assert_eq!(output.proof.len(), ZISK_SNARK_PROOF_BYTES);
-            assert_eq!(output.public_values.len(), ZISK_PUBLIC_VALUES_BYTES);
-            assert_eq!(
-                output.public_values[..32]
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-                program_vk
-            );
-            let bytes = std::fs::read(&path).unwrap();
-            let (proof, _): (ZiskProofFile, usize) =
-                bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
-            let ZiskProofBody::Plonk { publics_full, .. } = &proof.body else {
-                panic!("expected Plonk")
-            };
-            assert_eq!(publics_full.len(), 1 + PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS);
-            assert_eq!(publics_full[0], 1);
-        }
-    }
-
-    #[test]
-    fn parse_proof_file_roundtrip() {
-        let program_vk = vec![0x1111_2222_3333_4444u64; PROGRAM_VK_LEN];
-        let rootc = vec![0xaaaa_bbbb_cccc_ddddu64; PROGRAM_VK_LEN];
-        let mut publics_full = program_vk.clone();
+    fn pilfflonk_file(program_vk: &[u64], rootc: &[u64]) -> ZiskPilfflonkFile {
+        let mut publics_full = program_vk.to_vec();
         publics_full.extend(std::iter::repeat_n(
             0x4242_4242_4242_4242u64,
             ZISK_PUBLICS_WORDS,
         ));
-        let proof = ZiskProofFile {
-            body: ZiskProofBody::Plonk {
-                proof_bytes: vec![7u8; ZISK_SNARK_PROOF_BYTES],
-                plonk_vk: Box::new(ZiskPlonkVkBlob {
-                    vadcop_vk: rootc.clone(),
-                    plonk_vkey: sample_vkey(),
-                }),
-                publics: ZiskPublicValues {
-                    data: vec![0u8; 256],
-                },
-                publics_full: publics_full.clone(),
-                rootc: rootc.clone(),
-            },
+        ZiskPilfflonkFile {
+            proof_bytes: vec![7u8; ZISK_SNARK_PROOF_BYTES],
+            vkey_json: r#"{"protocol":"pilfflonk"}"#.into(),
+            publics: vec![0u8; 256],
+            publics_full,
+            rootc: rootc.to_vec(),
             program_vk: ZiskProgramVk {
-                vk: program_vk.clone(),
+                vk: program_vk.to_vec(),
                 hash_mode: ZiskHashMode::Poseidon1,
             },
-        };
+            random_seed: Some([9u8; 32]),
+        }
+    }
 
-        let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
-        let dir = std::env::temp_dir().join(format!("zisk_prover_test_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+    /// `ZiskPilfflonkFile` reads a `Pilfflonk` body without mirroring the
+    /// other variants, which relies on bincode writing a variant as its
+    /// index followed by its fields.
+    #[test]
+    fn bincode_writes_a_variant_as_its_index_then_its_fields() {
+        #[derive(serde::Serialize)]
+        #[allow(dead_code)]
+        enum Body {
+            A(u8),
+            B { x: Vec<u8> },
+            C { x: Vec<u8>, y: String },
+        }
+        let config = bincode::config::standard();
+        let mut expected = bincode::serde::encode_to_vec(2u32, config).unwrap();
+        expected.extend(bincode::serde::encode_to_vec((vec![1u8, 2], "z"), config).unwrap());
+        let body = Body::C {
+            x: vec![1, 2],
+            y: "z".into(),
+        };
+        assert_eq!(
+            bincode::serde::encode_to_vec(&body, config).unwrap(),
+            expected
+        );
+    }
+
+    #[test]
+    fn parse_proof_file_roundtrip() {
+        let program_vk = [0x1111_2222_3333_4444u64; PROGRAM_VK_LEN];
+        let rootc = [0xaaaa_bbbb_cccc_ddddu64; PROGRAM_VK_LEN];
+        let dir = temp_dir("parse");
         let path = dir.join("proof.bin");
-        std::fs::write(&path, &bytes).unwrap();
+        std::fs::write(
+            &path,
+            snark_file(PROOF_BODY_PILFFLONK, &pilfflonk_file(&program_vk, &rootc)),
+        )
+        .unwrap();
 
         let out = parse_proof_file(&path).unwrap();
         std::fs::remove_dir_all(&dir).ok();
@@ -984,10 +875,6 @@ mod tests {
         assert_eq!(
             &out.public_values[..8],
             0x1111_2222_3333_4444u64.to_be_bytes().as_slice()
-        );
-        assert_eq!(
-            &out.public_values[32..40],
-            0x4242_4242_4242_4242u64.to_le_bytes().as_slice()
         );
         assert!(
             out.public_values[32..544]
@@ -1003,133 +890,111 @@ mod tests {
     }
 
     #[test]
-    fn vadcop_stream_extraction_roundtrip() {
+    fn parse_rejects_what_l1_cannot_verify() {
+        let vk = [1u64; PROGRAM_VK_LEN];
+        let dir = temp_dir("parse_reject");
+        let path = dir.join("proof.bin");
+        let err = |bytes: Vec<u8>| {
+            std::fs::write(&path, bytes).unwrap();
+            parse_proof_file(&path).unwrap_err().to_string()
+        };
+
+        // A vadcop_final stream: the run had no wrap.
+        let e = err(crate::aggregator_input::synthetic_stream(0));
+        assert!(e.contains("--pilfflonk"), "unexpected error: {e}");
+
+        // A PLONK body (variant 1).
+        let e = err(snark_file(PROOF_BODY_PLONK, &pilfflonk_file(&vk, &vk)));
+        assert!(e.contains("PLONK"), "unexpected error: {e}");
+
+        // A pilfflonk proof of another hash family: L1 holds the Poseidon1 key.
+        let mut blake3 = pilfflonk_file(&vk, &vk);
+        blake3.program_vk.hash_mode = ZiskHashMode::Blake3;
+        let e = err(snark_file(PROOF_BODY_PILFFLONK, &blake3));
+        assert!(e.contains("Blake3"), "unexpected error: {e}");
+
+        // Publics that still carry the recursion layer's leaf flag.
+        let mut flagged = pilfflonk_file(&vk, &vk);
+        flagged.publics_full.insert(0, 1);
+        let e = err(snark_file(PROOF_BODY_PILFFLONK, &flagged));
+        assert!(e.contains("publics_full"), "unexpected error: {e}");
+
+        // Trailing bytes.
+        let mut long = snark_file(PROOF_BODY_PILFFLONK, &pilfflonk_file(&vk, &vk));
+        long.push(0);
+        let e = err(long);
+        assert!(e.contains("trailing"), "unexpected error: {e}");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vadcop_stream_strips_the_seed_trailer() {
         use zksync_os_zisk_guest_aggregator as agg;
 
-        let program_vk = vec![1u64, 2, 3, 4];
-        let zisk_vk = vec![5u64, 6, 7, 8];
-        let body = vec![7u64; agg::VADCOP_FINAL_BODY_WORDS];
-        // `[program VK | inputs]`: the first 8 input words carry 0x11111111,
-        // which is the STF guest's commitment.
-        let mut publics_full = program_vk.clone();
-        publics_full.extend(std::iter::repeat_n(0u64, agg::PUBLICS_WORDS));
-        for word in publics_full[PROGRAM_VK_LEN..PROGRAM_VK_LEN + 8].iter_mut() {
-            *word = 0x1111_1111;
+        let stream = crate::aggregator_input::synthetic_stream(3);
+        let mut file = stream.clone();
+        for word in [11u64, 12, 13, 14, SEED_TRAILER_TAG] {
+            file.extend_from_slice(&word.to_le_bytes());
         }
-
-        let proof = ZiskProofFile {
-            body: ZiskProofBody::Vadcop {
-                proof: body.clone(),
-                zisk_vk: zisk_vk.clone(),
-                kind: ZiskVadcopKind::Final,
-                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
-                publics_full,
-            },
-            program_vk: ZiskProgramVk {
-                vk: program_vk.clone(),
-                hash_mode: ZiskHashMode::Poseidon1,
-            },
-        };
-        let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
-        let dir = std::env::temp_dir().join(format!("zisk_agg_stream_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("vadcop_stream");
         let path = dir.join("vadcop_final_proof.bin");
-        std::fs::write(&path, &bytes).unwrap();
 
-        let stream = vadcop_stream_from_proof_file(&path).unwrap();
+        std::fs::write(&path, &file).unwrap();
+        assert_eq!(vadcop_stream_from_proof_file(&path).unwrap(), stream);
+        // A raw stream, as an operator may hand to `aggregator_input`.
+        std::fs::write(&path, &stream).unwrap();
+        assert_eq!(vadcop_stream_from_proof_file(&path).unwrap(), stream);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(stream.len(), agg::PROOF_STREAM_BYTES);
-        // Validate with the guest's own parser: the two implementations
-        // must agree on the layout by construction.
-        let words = agg::words_from_bytes(&stream).unwrap();
-        let frame = agg::ProofFrame::parse(words).unwrap();
-        assert_eq!(frame.program_vk(), program_vk.as_slice());
-        assert_eq!(frame.vadcop_vk(), zisk_vk.as_slice());
-        assert_eq!(frame.hash_tag(), agg::EXPECTED_HASH_TAG);
-        assert_eq!(frame.commitment(), [0x11u8; 32]);
-        let body_start =
-            agg::HEADER_WORDS + agg::LEAF_FLAG_WORDS + agg::PROGRAM_VK_WORDS + agg::PUBLICS_WORDS;
-        assert_eq!(
-            &words[body_start..body_start + agg::VADCOP_FINAL_BODY_WORDS],
-            body.as_slice()
-        );
     }
 
     #[test]
-    fn vadcop_stream_rejects_plonk_and_minimal() {
+    fn vadcop_stream_rejects_snark_and_minimal() {
         use zksync_os_zisk_guest_aggregator as agg;
 
-        let dir = std::env::temp_dir().join(format!("zisk_agg_reject_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("vadcop_reject");
+        let path = dir.join("proof.bin");
 
-        // Plonk body — the file the daemon submits to the server.
-        let plonk = ZiskProofFile {
-            body: ZiskProofBody::Plonk {
-                proof_bytes: vec![7u8; ZISK_SNARK_PROOF_BYTES],
-                plonk_vk: Box::new(ZiskPlonkVkBlob {
-                    vadcop_vk: vec![0; 4],
-                    plonk_vkey: sample_vkey(),
-                }),
-                publics: ZiskPublicValues { data: vec![0; 256] },
-                publics_full: vec![0u64; PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS],
-                rootc: vec![0; 4],
-            },
-            program_vk: ZiskProgramVk {
-                vk: vec![0; 4],
-                hash_mode: ZiskHashMode::Poseidon1,
-            },
-        };
-        let path = dir.join("plonk.bin");
+        // A SNARK file — the file the daemon submits in per-batch mode.
+        let vk = [0u64; PROGRAM_VK_LEN];
         std::fs::write(
             &path,
-            bincode::serde::encode_to_vec(&plonk, bincode::config::standard()).unwrap(),
+            snark_file(PROOF_BODY_PILFFLONK, &pilfflonk_file(&vk, &vk)),
         )
         .unwrap();
         let err = vadcop_stream_from_proof_file(&path)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("Plonk"), "unexpected error: {err}");
+        assert!(err.contains("SNARK"), "unexpected error: {err}");
 
-        // Minimal (compressed) vadcop body: refused.
-        let minimal = ZiskProofFile {
-            body: ZiskProofBody::Vadcop {
-                proof: vec![7u64; agg::VADCOP_FINAL_BODY_WORDS],
-                zisk_vk: vec![0; 4],
-                kind: ZiskVadcopKind::Minimal,
-                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
-                publics_full: vec![0u64; PROGRAM_VK_LEN + agg::PUBLICS_WORDS],
-            },
-            program_vk: ZiskProgramVk {
-                vk: vec![0; 4],
-                hash_mode: ZiskHashMode::Poseidon1,
-            },
-        };
-        let path = dir.join("minimal.bin");
-        std::fs::write(
-            &path,
-            bincode::serde::encode_to_vec(&minimal, bincode::config::standard()).unwrap(),
-        )
-        .unwrap();
+        // A minimal (compressed) proof: refused.
+        let mut minimal = crate::aggregator_input::synthetic_stream(0);
+        minimal[..8].copy_from_slice(&1u64.to_le_bytes());
+        std::fs::write(&path, &minimal).unwrap();
         let err = vadcop_stream_from_proof_file(&path)
             .unwrap_err()
             .to_string();
         std::fs::remove_dir_all(&dir).ok();
-        assert!(err.contains("Minimal"), "unexpected error: {err}");
+        assert_eq!(err, agg::AggError::MinimalProof { flag: 1 }.to_string());
     }
 
-    /// The guest-side body-size constant and hash tag must match ZiSK's own
-    /// verifier crate at the pinned version exactly — this is the only place
-    /// the pin is checked mechanically (see `VADCOP_FINAL_BODY_WORDS` docs).
-    /// The aggregator verifies through `ziskos::zisklib::verify_zisk_proof`,
-    /// which selects the verifier from the stream's tag; this lane's proving
-    /// key is Poseidon1.
+    /// The guest-side stream constants and the daemon's file constants must
+    /// match ZiSK's own verifier crate at the pinned version exactly — this
+    /// is the only place the pin is checked mechanically (see
+    /// `VADCOP_FINAL_BODY_WORDS` docs). The aggregator verifies through
+    /// `ziskos::zisklib::verify_zisk_proof`, which selects the verifier from
+    /// the stream's tag; this lane's proving key is Poseidon1.
     #[test]
-    fn vadcop_body_words_matches_pinned_verifier() {
+    fn stream_constants_match_the_pinned_verifier() {
         use zksync_os_zisk_guest_aggregator as agg;
+        assert_eq!(format!("{ZISK_PROOF_HASH_MODE:?}"), ZISK_PROOF_HASH_FAMILY);
         assert_eq!(
-            zisk_verifier::expected_proof_bytes(ZISK_PROOF_HASH_FAMILY, false),
-            Some(agg::VADCOP_FINAL_BODY_WORDS * 8),
+            zisk_verifier::proof_size(ZISK_PROOF_HASH_FAMILY, false),
+            Some(zisk_verifier::ProofSize::Exact(
+                agg::VADCOP_FINAL_BODY_WORDS * 8
+            )),
         );
         assert_eq!(
             zisk_verifier::hash_tag(ZISK_PROOF_HASH_FAMILY),
@@ -1141,38 +1006,58 @@ mod tests {
         );
         assert_eq!(zisk_verifier::HASH_TAG_LEN_WORDS, agg::HASH_TAG_WORDS);
         assert_eq!(zisk_verifier::VADCOP_VK_LEN_WORDS, agg::VADCOP_VK_WORDS);
+        assert_eq!(zisk_verifier::SEED_TRAILER_TAG, SEED_TRAILER_TAG);
+        assert_eq!(zisk_verifier::SEED_LEN_WORDS + 1, SEED_TRAILER_WORDS);
     }
 
-    #[test]
-    fn parse_rejects_vadcop_body() {
-        let proof = ZiskProofFile {
-            body: ZiskProofBody::Vadcop {
-                proof: vec![1, 2, 3],
-                zisk_vk: vec![0; 4],
-                kind: ZiskVadcopKind::Final,
-                hash: ZISK_PROOF_HASH_FAMILY.to_string(),
-                publics_full: vec![0u64; PROGRAM_VK_LEN + ZISK_PUBLICS_WORDS],
-            },
-            program_vk: ZiskProgramVk {
-                vk: vec![0; 4],
-                hash_mode: ZiskHashMode::Poseidon1,
-            },
-        };
-        let bytes = bincode::serde::encode_to_vec(&proof, bincode::config::standard()).unwrap();
-        let dir =
-            std::env::temp_dir().join(format!("zisk_prover_test_vadcop_{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("proof.bin");
-        std::fs::write(&path, &bytes).unwrap();
-        let err = parse_proof_file(&path).unwrap_err().to_string();
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(err.contains("Vadcop"), "unexpected error: {err}");
+    /// Cancelling a proof sends SIGINT and waits for the subprocess, so a
+    /// remote prove can cancel its coordinator job before it exits.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_interrupts_the_subprocess() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = temp_dir("interrupt");
+        let ready = base.join("ready");
+        let interrupted = base.join("interrupted");
+        let fake = base.join("fake-cargo-zisk");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\n\
+                 trap 'touch \"{interrupted}\"; exit 130' INT\n\
+                 touch \"{ready}\"\n\
+                 while :; do sleep 0.05; done\n",
+                interrupted = interrupted.display(),
+                ready = ready.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cancel = CancellationToken::new();
+        let run = tokio::spawn({
+            let cancel = cancel.clone();
+            async move { run_cancellable(&fake, &[], &cancel).await }
+        });
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        cancel.cancel();
+        let done = tokio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the subprocess exits on SIGINT, well inside the grace period")
+            .unwrap()
+            .unwrap();
+        assert!(!done);
+        assert!(interrupted.exists(), "the subprocess saw SIGINT");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     fn spawn_backend() -> ProvingBackend {
         ProvingBackend::Spawn(SpawnBackend {
             proving_key: PathBuf::from("/keys/provingKey"),
-            proving_key_plonk: PathBuf::from("/keys/provingKeySnark"),
+            proving_key_snark: PathBuf::from("/keys/provingKeySnark"),
             gpu: true,
             asm_emulator: false,
         })
@@ -1210,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_prove_args_per_batch_wrap_plonk_on_the_emulator() {
+    fn spawn_prove_args_per_batch_wrap_pilfflonk_on_the_emulator() {
         let args = prove_args(
             &spawn_backend(),
             Path::new("/elf/guest"),
@@ -1230,7 +1115,7 @@ mod tests {
                 "/keys/provingKey",
                 "-w",
                 "/keys/provingKeySnark",
-                "--plonk",
+                "--pilfflonk",
                 "-y",
                 "-o",
                 "/wd/proof.bin",
@@ -1246,7 +1131,7 @@ mod tests {
     fn spawn_prove_args_select_the_asm_emulator_on_request() {
         let backend = ProvingBackend::Spawn(SpawnBackend {
             proving_key: PathBuf::from("/keys/provingKey"),
-            proving_key_plonk: PathBuf::from("/keys/provingKeySnark"),
+            proving_key_snark: PathBuf::from("/keys/provingKeySnark"),
             gpu: true,
             asm_emulator: true,
         });
@@ -1261,9 +1146,9 @@ mod tests {
     }
 
     /// Aggregated per-batch mode keeps the vadcop_final proof, so it must not
-    /// pass the PLONK key or the wrap flag.
+    /// pass the SNARK key or the wrap flag.
     #[test]
-    fn spawn_prove_args_aggregated_omits_plonk() {
+    fn spawn_prove_args_aggregated_omits_the_wrap() {
         let args = prove_args(
             &spawn_backend(),
             Path::new("/elf/guest"),
@@ -1271,7 +1156,7 @@ mod tests {
             Path::new("/wd/proof.bin"),
             false,
         );
-        assert!(!args.iter().any(|a| a == "--plonk" || a == "-w"));
+        assert!(!args.iter().any(|a| a == "--pilfflonk" || a == "-w"));
         assert!(!args.iter().any(|a| a == "/keys/provingKeySnark"));
     }
 
@@ -1297,7 +1182,7 @@ mod tests {
     }
 
     #[test]
-    fn coordinator_prove_args_per_batch_wraps_plonk() {
+    fn coordinator_prove_args_per_batch_wraps_pilfflonk() {
         let args = prove_args(
             &coordinator_backend(),
             Path::new("/elf/guest"),
@@ -1320,12 +1205,12 @@ mod tests {
                 "/wd/proof.bin",
                 "--timeout",
                 "0",
-                "--plonk",
+                "--pilfflonk",
             ]
         );
         // No key, GPU, verify, or emulator flags reach the client. `-y` in
-        // particular would make the toolchain shell out to `snarkjs`, which
-        // the images do not ship.
+        // particular would make the toolchain run pilfflonk's JavaScript
+        // verifier under `node`, which the images do not ship.
         assert!(!args.iter().any(|a| a == "-k"
             || a == "-w"
             || a == "-g"
@@ -1337,7 +1222,7 @@ mod tests {
     /// path too: no wrap flag, and never the minimal (compressed) variant the
     /// aggregator guest rejects.
     #[test]
-    fn coordinator_prove_args_aggregated_omits_plonk() {
+    fn coordinator_prove_args_aggregated_omits_the_wrap() {
         let args = prove_args(
             &coordinator_backend(),
             Path::new("/elf/guest"),
@@ -1348,7 +1233,7 @@ mod tests {
         assert!(
             !args
                 .iter()
-                .any(|a| a == "--plonk" || a == "-c" || a == "--minimal")
+                .any(|a| a == "--pilfflonk" || a == "-c" || a == "--minimal")
         );
         assert_eq!(
             args[..4],

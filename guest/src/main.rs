@@ -37,7 +37,7 @@ fn main() {
     // (`zksync_os_zisk_lib::wire`).
     //
     // Streaming read path: instead of decoding the whole `BatchInput`
-    // (which materialises EVERY merkle sibling on the 507.75 MiB heap before
+    // (which materialises EVERY merkle sibling on the ~507.5 MiB heap before
     // verification — the read-spam OOM floor), stream the storage proofs: each
     // is verified against the pre-state root and dropped before the next is
     // read, so the siblings are never all resident. The wire format is the same

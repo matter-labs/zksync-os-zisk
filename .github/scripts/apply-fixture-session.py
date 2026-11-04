@@ -11,6 +11,8 @@ from pathlib import Path
 
 
 HEX32 = re.compile(r"^0x[0-9a-f]{64}$")
+VADCOP_FIXTURE = "prover/tests/data/real_vadcop_final_zisk_v1.4.0-alpha.bin"
+SNARK_FIXTURE = "prover/tests/data/real_pilfflonk_aggregate_zisk_v1.4.0-alpha.bin"
 
 
 def replace_once(source: str, pattern: str, replacement: str, label: str) -> str:
@@ -87,6 +89,24 @@ def update_rust_vector(path: Path, values: dict, include_range: bool) -> None:
     path.write_text(source)
 
 
+def update_snark_vector(path: Path, values: dict) -> None:
+    source = path.read_text()
+    metadata = values["metadata"]
+    scalar = {
+        "AGGREGATOR_PROGRAM_VK": metadata["aggregator_program_vk"],
+        "DIGEST": values["binding_digest"],
+        "ROOT_C_VADCOP_FINAL": metadata["root_c_vadcop_final"],
+    }
+    for name, value in scalar.items():
+        source = replace_once(
+            source,
+            rf'(const {name}: &str =\s*)"[0-9a-f]{{64}}"',
+            rf'\g<1>"{unprefixed(value, name)}"',
+            f"{path}:{name}",
+        )
+    path.write_text(source)
+
+
 def render_binding_vector(values: dict) -> str:
     metadata = values["metadata"]
     manifest = values["input_manifest"]
@@ -101,7 +121,7 @@ def render_binding_vector(values: dict) -> str:
         f"commitment_{index} = {value}" for index, value in enumerate(commitments, 1)
     )
     preimage = " ‖ ".join(f"commitment_{index}" for index in range(1, len(commitments) + 1))
-    return f"""## Inputs (real 4-batch aggregation session, ZiSK v1.3.2-alpha, {date})
+    return f"""## Inputs (real 4-batch aggregation session, ZiSK v{metadata['zisk_version']}, {date})
 
 This vector was produced by [fixture-session run]({run_url}) from
 `{metadata['selected_ref']}` at `{metadata['selected_sha']}`. The inputs are
@@ -113,7 +133,7 @@ contracts. The proofs use the current guest ELF and current inner programVK.
 
 Native commitments from `input-manifest.json` were automatically compared,
 in batch order, with the commitments extracted from all four guest proofs
-before PLONK wrapping or recursive proving. All four pairs were equal.
+before the SNARK wrap or recursive proving. All four pairs were equal.
 
 Session data: inner ELF SHA-256
 `{metadata['inner_elf_sha256']}`, aggregator ELF SHA-256
@@ -157,18 +177,28 @@ digest           = {values['binding_digest']}
 ```
 
 The real aggregated proof of this range commits the same digest: the
-PLONK-wrapped aggregate has wire public-values bytes `[32..96]` equal to
-`digest`, bytes `[0..32]` equal to the aggregator programVK
-`{metadata['aggregator_program_vk']}`, and bytes `[544..576]` equal to
-`rootCVadcopFinal`.
+pilfflonk-wrapped aggregate carries `digest` in its guest publics (wire
+public-values bytes `[32..96]`, one u32 per eight-byte slot), the aggregator
+programVK `{metadata['aggregator_program_vk']}` in bytes `[0..32]`, and
+`rootCVadcopFinal` in bytes `[544..576]`.
 
 The fixture publisher automatically updates this document,
-`guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`, and
-`prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin` in a separate PR.
+`guest-aggregator/src/lib.rs`, `prover/tests/real_aggregation_vector.rs`,
+`prover/tests/real_proof_parse.rs`, `{VADCOP_FIXTURE}`, and
+`{SNARK_FIXTURE}` in a separate PR.
 """
 
 
-def update_repository(root: Path, values: dict, vadcop: Path) -> None:
+def copy_fixture(source: Path, destination: Path) -> None:
+    if not source.is_file() or source.stat().st_size == 0:
+        raise ValueError(f"{source}: missing proof fixture")
+    # A toolchain bump removes the previous release's fixtures, and with them
+    # the directory, before its first session publishes the new ones.
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+
+
+def update_repository(root: Path, values: dict, vadcop: Path, snark: Path) -> None:
     doc = root / "guest-aggregator/BINDING_VECTOR.md"
     source = doc.read_text()
     prefix = source.split("## Inputs", 1)[0]
@@ -180,20 +210,20 @@ def update_repository(root: Path, values: dict, vadcop: Path) -> None:
     update_rust_vector(
         root / "prover/tests/real_aggregation_vector.rs", values, include_range=False
     )
-    destination = root / "prover/tests/data/real_vadcop_final_zisk_v1.3.2-alpha.bin"
-    if not vadcop.is_file() or vadcop.stat().st_size == 0:
-        raise ValueError(f"{vadcop}: missing vadcop_final fixture")
-    shutil.copyfile(vadcop, destination)
+    update_snark_vector(root / "prover/tests/real_proof_parse.rs", values)
+    copy_fixture(vadcop, root / VADCOP_FIXTURE)
+    copy_fixture(snark, root / SNARK_FIXTURE)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--values", type=Path, required=True)
     parser.add_argument("--vadcop", type=Path, required=True)
+    parser.add_argument("--snark", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, required=True)
     args = parser.parse_args()
     values = load_values(args.values)
-    update_repository(args.repo_root, values, args.vadcop)
+    update_repository(args.repo_root, values, args.vadcop, args.snark)
 
 
 if __name__ == "__main__":

@@ -24,14 +24,14 @@
 # The tarball is x86_64 only, so the image is linux/amd64. The GPU binaries
 # link only the driver's libcuda.so.1, which the NVIDIA container toolkit
 # mounts at run time, so the base is plain Ubuntu. The proving keys are NOT
-# in the image (27 GB compressed); see README.md next to this file.
+# in the image (7 GB compressed); see README.md next to this file.
 
-ARG ZISK_VERSION=1.3.2-alpha
-# sha256 of the v1.3.2-alpha cargo_zisk_linux_amd64.tar.gz release asset
-# (released 2026-10-13, from two full downloads). The toolchain stage refuses to
-# build while this reads PENDING, and `sha256sum -c` rejects a tarball whose
-# digest differs, so a stale value cannot ship silently.
-ARG ZISK_TARBALL_SHA256=abb779427f6c6924c7482f943356f60c6577499432bb806af349669b2a729bd7
+ARG ZISK_VERSION=1.4.0-alpha
+# sha256 of the v1.4.0-alpha cargo_zisk_linux_amd64.tar.gz release asset
+# (released 2026-10-29; a full download matched GitHub's asset digest). The
+# toolchain stage refuses to build while this reads PENDING, and `sha256sum -c`
+# rejects a tarball whose digest differs, so a stale value cannot ship silently.
+ARG ZISK_TARBALL_SHA256=10ebf127e7cb40d46f9c4c5b380cf7a36c6970b4b22ade1118078047ffc97433
 ARG UBUNTU_TAG=24.04
 
 # ---------------------------------------------------------------------------

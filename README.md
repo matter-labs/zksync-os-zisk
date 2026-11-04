@@ -32,12 +32,12 @@ and the off-chain verification helpers the server calls.
 The Solidity verifiers live in
 [era-contracts](https://github.com/antoniolocascio-bot/era-contracts):
 `ZiskVerifier.sol` in
-`l1-contracts/contracts/state-transition/verifiers/` and the generated
-`ZiskSnarkPlonkVerifier.sol` in
-`l1-contracts/contracts/dev-contracts/generated/`. Regenerate both from
-`era-contracts/tools/` with `cargo run -- --variant zisk`; that repository's
-`l1-contracts/contracts/state-transition/verifiers/README.md` holds the full
-procedure.
+`l1-contracts/contracts/state-transition/verifiers/`, and ZiSK's own
+pilfflonk SNARK verifier, vendored from the ZiSK release's
+`zisk-contracts/poseidon1/PilfflonkVerifier.sol`. Regenerate `ZiskVerifier.sol`
+from `era-contracts/tools/` with `cargo run -- --variant zisk`; that
+repository's `l1-contracts/contracts/state-transition/verifiers/README.md`
+holds the full procedure.
 
 ## Reproducible guest builds
 
@@ -45,8 +45,8 @@ Each `programVK` pinned on L1 and in the server's drift tripwires is the ROM
 merkle root of a guest ELF, so a given source revision must map to exactly
 one binary. `docker/guest-builder.Dockerfile` and
 `docker/aggregator-builder.Dockerfile` pin everything that influences the
-build: the base image, the cargo-zisk release (v1.3.2-alpha) and the ZiSK
-Rust toolchain it installs (zisk-4.0.0, sha256-pinned, with the cargo that
+build: the base image, the cargo-zisk release (v1.4.0-alpha) and the ZiSK
+Rust toolchain it installs (zisk-4.1.0, sha256-pinned, with the cargo that
 orchestrates the build), the committed `Cargo.lock`, and a fixed `/build`
 source path.
 
@@ -117,8 +117,9 @@ in the server's compiled release registry and in the L1 verifier.
 
 ## Development
 
-The ZiSK toolchain is pinned at v1.3.2-alpha. Install it with
-`ziskup -v 1.3.2-alpha`.
+The ZiSK toolchain is pinned at v1.4.0-alpha. Install it with
+`ziskup -v 1.4.0-alpha --provingkey --poseidon1`: the lane proves under the
+Poseidon1 key, and ziskup installs the blake3 key by default.
 
 ```bash
 # Run lib tests (includes the proven-path end-to-end tests)
@@ -146,7 +147,7 @@ tools/run-eest-native.py \
 # Prove one batch end to end (needs a GPU and both proving keys)
 cargo-zisk setup -e out/zksync-os-zisk-guest -k ~/.zisk/provingKey
 cargo-zisk prove -e out/zksync-os-zisk-guest -i /tmp/proven_input.bin \
-    -k ~/.zisk/provingKey -w ~/.zisk/provingKeySnark --plonk \
+    -k ~/.zisk/provingKey -w ~/.zisk/provingKeySnark --pilfflonk \
     -y -o /tmp/proof.bin -g
 ```
 

@@ -1,6 +1,6 @@
 //! Peak-heap benchmark harness for the two ZiSK guest-memory fixes.
 //!
-//! Read path (read-spam): `bincode::deserialize::<BatchInput>` + `build_proven_db`
+//! Read path (read-spam): `wire::decode_batch_input` + `build_proven_db`
 //! (via `execute_and_commit_from_bincode`, the collecting path) vs the streaming
 //! `execute_and_commit_streaming`, over N distinct cold storage slots at tree
 //! depth D.
@@ -11,7 +11,7 @@
 //!
 //! Metric: peak heap high-water via a tracking global allocator (sum of live
 //! allocations) — an allocator-independent proxy for the guest dlmalloc wall
-//! (507.75 MiB). Also reports wall time so the memory fix's throughput impact is
+//! (507.5625 MiB). Also reports wall time so the memory fix's throughput impact is
 //! visible. Runs the REAL library code paths (no mocks, no GPU, no guest ELF).
 //!
 //! Metric semantics per fix (annotated in the tables):
@@ -33,7 +33,7 @@ use zksync_os_zisk_lib::merkle::{
     self, BatchTreeUpdate, SlotProofEntry, StorageProof, TreeLeaf, WriteOp,
 };
 use zksync_os_zisk_lib::types::*;
-use zksync_os_zisk_lib::{commitment, executor};
+use zksync_os_zisk_lib::{commitment, executor, wire};
 
 // --------------------------------------------------------------------------
 // Tracking global allocator (peak live bytes).
@@ -74,7 +74,8 @@ unsafe impl GlobalAlloc for Tracking {
 static A: Tracking = Tracking;
 
 const MIB: f64 = 1_048_576.0;
-const BUDGET_MIB: f64 = 507.75;
+// The ZiSK 1.4.0 linker script's heap: 192 KiB below 1.3.x's, for zisklib scratch.
+const BUDGET_MIB: f64 = 507.5625;
 
 fn mib(b: usize) -> f64 {
     b as f64 / MIB
@@ -445,7 +446,7 @@ fn run_fix_a(ns: &[usize], ds: &[usize]) -> Vec<RowA> {
     for &n in ns {
         for &d in ds {
             let input = build_read_spam(n, d);
-            let bytes = bincode::serialize(&input).unwrap();
+            let bytes = wire::encode(&input).unwrap();
             let ser = bytes.len();
             drop(input); // only the serialized witness (RO region) stays resident
 

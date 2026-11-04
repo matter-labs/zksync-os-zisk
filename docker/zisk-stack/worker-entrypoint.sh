@@ -4,7 +4,7 @@
 #
 # `zisk-prepare-keys` is a no-op once its marker for the image's ZISK_VERSION
 # exists, so a restarted worker starts at once. A fresh key volume costs the
-# 27 GB download and the constant-tree generation first; the worker is not
+# key download and the constant-tree generation first; the worker is not
 # registered with the coordinator until then, and the prover daemon retries
 # its setup until it is. The key-preparation knobs (ZISK_KEYS_*,
 # ZISK_SETUP_BUCKET_URL) are read from the environment as usual.

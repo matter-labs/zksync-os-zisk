@@ -33,7 +33,7 @@
 //!   not one), 2 and above = validation error (any error halts the
 //!   precompile, exactly like the reference's parse errors).
 
-use ziskos::syscalls::{syscall_blake2sf, SyscallBlake2sfParams};
+use ziskos::syscalls::syscall_blake2sf;
 use ziskos::zisklib;
 
 /// BN254 base-field modulus p, big-endian:
@@ -206,8 +206,7 @@ pub fn blake2b_compress(rounds: u32, h: &mut [u64; 8], m: &[u64; 16], t: &[u64; 
 /// eight u64 (word `2i` in the low half, `2i + 1` in the high half).
 #[inline]
 pub fn blake2sf(v: &mut [u64; 8], m: &[u64; 8]) {
-    let mut params = SyscallBlake2sfParams { state: v, input: m };
-    syscall_blake2sf(&mut params);
+    syscall_blake2sf(v, m);
 }
 
 /// EIP-4844 KZG point evaluation for the `pointEvaluation` precompile (0x0a).

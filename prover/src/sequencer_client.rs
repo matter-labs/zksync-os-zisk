@@ -2,8 +2,8 @@
 //!
 //! Uses the same pick/submit model as the Airbender prover:
 //! - `POST /ZiSK/pick` — get assigned batch with ZiSK data
-//! - `POST /ZiSK/submit` — submit the per-batch proof (PLONK-wrapped SNARK
-//!   in per-batch mode, raw `vadcop_final` stream in aggregated mode)
+//! - `POST /ZiSK/submit` — submit the per-batch proof (pilfflonk SNARK in
+//!   per-batch mode, raw `vadcop_final` stream in aggregated mode)
 //! - `POST /ZiSK-AGG/pick` — get an assigned aggregation range with its
 //!   buffered per-batch `vadcop_final` streams
 //! - `POST /ZiSK-AGG/submit` — submit the aggregated range proof
@@ -219,7 +219,7 @@ impl SequencerClient {
     }
 
     /// Submit a per-batch ZiSK proof. In per-batch mode `proof` is the
-    /// PLONK-wrapped SNARK and `public_values` the 320-byte wire layout;
+    /// pilfflonk SNARK and `public_values` the 576-byte wire layout;
     /// in aggregated mode `proof` is the raw `vadcop_final` stream and
     /// `public_values` must be empty.
     ///
