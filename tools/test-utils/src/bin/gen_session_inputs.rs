@@ -6,8 +6,8 @@
 //! The forced-fail deposit exercises the priority-operation commitment without
 //! adding execution writes, keeping the authenticated state fixture minimal.
 //!
-//! These are wire-v5 protocol-v32 AtlasV4 inputs. They include the v5 chain
-//! config, authenticated interop-boundary reads, the authenticated EIP-2935
+//! These are wire-v6 protocol-v32 AtlasV4 inputs. They include the v6 chain
+//! config (both ZKsync OS 0.6.0 flags off), authenticated interop-boundary reads, the authenticated EIP-2935
 //! no-contract case and a sealed AtlasV4 block header. Every encoded batch is
 //! decoded and executed through the version-dispatching bincode entry point
 //! before it is written, so a schema or execution regression fails here
@@ -408,7 +408,7 @@ fn main() -> anyhow::Result<()> {
         let decoded: BatchInput = wire::decode(&wire_bytes)?;
         anyhow::ensure!(
             wire::encode(&decoded)? == wire_bytes,
-            "batch {n}: wire-v5 round trip changed the bytes"
+            "batch {n}: wire-v6 round trip changed the bytes"
         );
         let (_output, commitment) =
             executor::execute_and_commit_from_bincode(&wire_bytes).map_err(anyhow::Error::msg)?;
@@ -446,7 +446,7 @@ fn main() -> anyhow::Result<()> {
     manifest.push(b'\n');
     std::fs::write(out_dir.join("input-manifest.json"), manifest)?;
     println!(
-        "wrote 4 framed wire-v5 inputs and input-manifest.json to {}",
+        "wrote 4 framed wire-v6 inputs and input-manifest.json to {}",
         out_dir.display()
     );
     Ok(())

@@ -1,8 +1,8 @@
 //! Assemble an input file for the ZiSK aggregator guest.
 //!
 //! Inputs are per-batch `vadcop_final` proofs, given either as `cargo-zisk
-//! prove` output files with a Vadcop body (runs WITHOUT `--plonk`) or as
-//! raw `get_proof_bytes()` streams. `--synthetic N` instead generates N
+//! prove` output files (runs WITHOUT `--pilfflonk`) or as raw
+//! `get_proof_bytes()` streams. `--synthetic N` instead generates N
 //! structurally exact but cryptographically invalid streams to validate
 //! the ziskemu plumbing before real specimens exist (the guest will parse
 //! them and fail inside `verify_zisk_proof`).
@@ -30,7 +30,7 @@ struct Args {
     #[arg(long, conflicts_with = "proofs")]
     synthetic: Option<u32>,
 
-    /// Per-batch proof files (cargo-zisk Vadcop proof files or raw
+    /// Per-batch proof files (cargo-zisk vadcop_final proof files or raw
     /// get_proof_bytes streams), in batch order.
     proofs: Vec<PathBuf>,
 }

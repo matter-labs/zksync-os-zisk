@@ -1,24 +1,24 @@
 //! Off-chain verification helpers for ZKsync OS ZiSK proofs.
 //!
-//! The server produces a ZiSK proof for each batch (the final BN254 PLONK
-//! wrap, 768 bytes) with 576 bytes of public values, then submits both to L1.
-//! This crate lets the server check the proof off-chain BEFORE it submits, so a
-//! bad proof fails fast on the box instead of on-chain.
+//! The server produces a ZiSK proof for each batch range (the final BN254
+//! pilfflonk wrap, 2208 bytes) with 576 bytes of public values, then submits
+//! both to L1. This crate lets the server check the proof off-chain BEFORE it
+//! submits, so a bad proof fails fast on the box instead of on-chain.
 //!
 //! # What this crate verifies, and what it does NOT
 //!
-//! The pinned ZiSK toolchain does NOT expose a pure-Rust verifier for
-//! the final BN254 PLONK proof. `cargo-zisk verify` and `zisk_common::Proof::
-//! verify` both check the PLONK wrap by shelling out to the external `snarkjs`
-//! Node.js CLI (see `proofman::verify_snark_proof`). So a dependency-light,
-//! native BN254 PLONK pairing check is not available today.
+//! The pinned ZiSK toolchain does NOT expose a pure-Rust verifier for the
+//! final pilfflonk proof. `cargo-zisk verify` checks the wrap with pilfflonk's
+//! JavaScript verifier (`PILFFLONK_JS`), and the Rust side of pil2-proofman's
+//! pilfflonk crate needs its C++ library. So a dependency-light, native BN254
+//! pairing check is not available today.
 //!
 //! Because of that, this crate splits into two layers:
 //!
-//! - [`verify_plonk`] / [`verify_aggregated_range`] (base, only SHA-256 +
+//! - [`verify_snark`] / [`verify_aggregated_range`] (base, only SHA-256 +
 //!   256-bit integer): they reproduce every check the on-chain `ZiskVerifier`
 //!   runs BEFORE the pairing — the wire lengths, the `programVK` / `rootC
-//!   VadcopFinal` binding (with [`verify_plonk_bound`]), and the single public
+//!   VadcopFinal` binding (with [`verify_snark_bound`]), and the single public
 //!   signal `sha256(public_values) mod r`. These catch the common fail-fast
 //!   cases (a wrong guest program, a wrong SNARK setup, a malformed or
 //!   truncated wire artifact) cheaply and natively. They do NOT run the BN254
@@ -30,10 +30,10 @@
 //!   pure-Rust verifier for the intermediate `vadcop_final` STARK proof, via
 //!   ZiSK's `zisk-verifier` crate (its generated Poseidon1 verifier over
 //!   pil2-proofman's `proofman-verifier`). This IS a full cryptographic check,
-//!   but of the STARK layer, not the PLONK wrap. It applies to the aggregated
-//!   lane's per-batch streams (the prover holds these before it aggregates
-//!   them). The final per-batch PLONK the server submits does not carry the
-//!   STARK proof, so this does not cover the per-batch submit path.
+//!   but of the STARK layer, not the pilfflonk wrap. It applies to the
+//!   aggregated lane's per-batch streams (the prover holds these before it
+//!   aggregates them). The final SNARK the server submits does not carry the
+//!   STARK proof, so this does not cover the SNARK submit path.
 //!
 //! # On-chain layout (mirrored here)
 //!
@@ -47,8 +47,11 @@ use sha2::{Digest, Sha256};
 /// BN254 scalar-field integer (256 bits, 4 limbs).
 type U256 = ruint::Uint<256, 4>;
 
-/// The final BN254 PLONK proof size: 24 field elements, 32 bytes each.
-pub const PLONK_PROOF_BYTES: usize = 768;
+/// The final pilfflonk proof size for the Poseidon1 setup: the 69 big-endian
+/// 32-byte words of the on-chain verifier's `bytes32[69]` argument. They are
+/// the proof's raw bytes: pilfflonk's calldata adds words only for
+/// `firstRow`/`lastRow` boundaries, which compiled PIL2 programs never emit.
+pub const SNARK_PROOF_BYTES: usize = 69 * 32;
 
 /// The ZiSK public-values size: `programVK(32) ‖ guest publics(512) ‖
 /// rootCVadcopFinal(32)`.
@@ -73,7 +76,7 @@ pub const BN254_FR_MODULUS_BE: [u8; 32] = [
 ];
 
 /// The pinned `programVK` and `rootCVadcopFinal` a proof must bind. Pass this to
-/// [`verify_plonk_bound`] / [`verify_aggregated_range_bound`] to reject a proof
+/// [`verify_snark_bound`] / [`verify_aggregated_range_bound`] to reject a proof
 /// that attests to a different guest program or a different SNARK setup.
 ///
 /// Both values rotate every time the guest ELF or the recursive setup changes,
@@ -90,7 +93,7 @@ pub struct ExpectedProgram {
 /// A verification failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VerifyError {
-    /// The PLONK proof is not [`PLONK_PROOF_BYTES`] long.
+    /// The SNARK proof is not [`SNARK_PROOF_BYTES`] long.
     ProofLength { got: usize },
     /// The public values are not [`PUBLIC_VALUES_BYTES`] long.
     PublicValuesLength { got: usize },
@@ -113,7 +116,7 @@ impl core::fmt::Display for VerifyError {
             VerifyError::ProofLength { got } => {
                 write!(
                     f,
-                    "PLONK proof must be {PLONK_PROOF_BYTES} bytes, got {got}"
+                    "SNARK proof must be {SNARK_PROOF_BYTES} bytes, got {got}"
                 )
             }
             VerifyError::PublicValuesLength { got } => write!(
@@ -134,10 +137,10 @@ impl core::fmt::Display for VerifyError {
 
 impl std::error::Error for VerifyError {}
 
-/// Check the wire form of a final PLONK artifact: the proof length and the
+/// Check the wire form of a final SNARK artifact: the proof length and the
 /// public-values length.
 fn check_wire_form(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError> {
-    if proof.len() != PLONK_PROOF_BYTES {
+    if proof.len() != SNARK_PROOF_BYTES {
         return Err(VerifyError::ProofLength { got: proof.len() });
     }
     if public_values.len() != PUBLIC_VALUES_BYTES {
@@ -150,9 +153,9 @@ fn check_wire_form(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError
 
 /// Compute the circuit's single public signal, `uint256(sha256(public_values))
 /// mod r`, exactly as the on-chain `ZiskVerifier` does before it calls the
-/// PLONK verifier. Returns the 32-byte big-endian value.
+/// SNARK verifier. Returns the 32-byte big-endian value.
 ///
-/// This is the value the on-chain PLONK verifier consumes. The server can log
+/// This is the value the on-chain SNARK verifier consumes. The server can log
 /// it, compare it, or feed it to an external verifier.
 pub fn public_signal(public_values: &[u8]) -> Result<[u8; 32], VerifyError> {
     if public_values.len() != PUBLIC_VALUES_BYTES {
@@ -187,34 +190,34 @@ pub fn root_c_vadcop_final(public_values: &[u8]) -> Result<[u8; 32], VerifyError
     Ok(public_values[ROOT_C_VADCOP_FINAL_RANGE].try_into().unwrap())
 }
 
-/// Check a per-batch final PLONK proof's wire form.
+/// Check a final SNARK proof's wire form.
 ///
 /// This validates the proof length and the public-values length and confirms
 /// the public signal is derivable. It reproduces the on-chain `ZiskVerifier`
 /// decode UP TO the BN254 pairing. It does NOT run the pairing (no native
-/// pure-Rust BN254 PLONK verifier is available; see the crate docs), so a
+/// pure-Rust pilfflonk verifier is available; see the crate docs), so a
 /// success means the artifact is on-chain-decodable, NOT that the SNARK is
-/// valid. Use [`verify_plonk_bound`] to also bind the expected keys.
-pub fn verify_plonk(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError> {
+/// valid. Use [`verify_snark_bound`] to also bind the expected keys.
+pub fn verify_snark(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError> {
     check_wire_form(proof, public_values)?;
     // Confirm the public signal is derivable (it is, for a valid length).
     let _ = public_signal(public_values)?;
     Ok(())
 }
 
-/// Check a per-batch final PLONK proof AND bind it to the expected program.
+/// Check a final SNARK proof AND bind it to the expected program.
 ///
-/// In addition to [`verify_plonk`], this asserts the public values open with
+/// In addition to [`verify_snark`], this asserts the public values open with
 /// `expected.program_vk` and close with `expected.root_c_vadcop_final` — the
-/// on-chain `_proof[24] == programVK()` and `_proof[33] == rootCVadcopFinal()`
-/// checks. It rejects a proof that attests to a different guest program or a
+/// pins the on-chain `ZiskVerifier` rebuilds the public values from. It
+/// rejects a proof that attests to a different guest program or a
 /// different SNARK setup. It still does NOT run the BN254 pairing.
-pub fn verify_plonk_bound(
+pub fn verify_snark_bound(
     proof: &[u8],
     public_values: &[u8],
     expected: &ExpectedProgram,
 ) -> Result<(), VerifyError> {
-    verify_plonk(proof, public_values)?;
+    verify_snark(proof, public_values)?;
     if public_values[PROGRAM_VK_RANGE] != expected.program_vk {
         return Err(VerifyError::ProgramVkMismatch);
     }
@@ -224,24 +227,24 @@ pub fn verify_plonk_bound(
     Ok(())
 }
 
-/// Check an aggregated-range final PLONK proof's wire form.
+/// Check an aggregated-range final SNARK proof's wire form.
 ///
 /// The aggregated-range proof (the aggregator guest over N per-batch streams,
-/// with the PLONK wrap) has the same 768/576 wire shape as a per-batch proof,
-/// so the same checks apply. As with [`verify_plonk`], this does NOT run the
-/// BN254 pairing.
+/// with the pilfflonk wrap) has the [`SNARK_PROOF_BYTES`] /
+/// [`PUBLIC_VALUES_BYTES`] wire shape [`verify_snark`] checks. Like it, this
+/// does NOT run the BN254 pairing.
 pub fn verify_aggregated_range(proof: &[u8], public_values: &[u8]) -> Result<(), VerifyError> {
-    verify_plonk(proof, public_values)
+    verify_snark(proof, public_values)
 }
 
-/// Check an aggregated-range final PLONK proof AND bind it to the expected
-/// program. See [`verify_plonk_bound`].
+/// Check an aggregated-range final SNARK proof AND bind it to the expected
+/// program. See [`verify_snark_bound`].
 pub fn verify_aggregated_range_bound(
     proof: &[u8],
     public_values: &[u8],
     expected: &ExpectedProgram,
 ) -> Result<(), VerifyError> {
-    verify_plonk_bound(proof, public_values, expected)
+    verify_snark_bound(proof, public_values, expected)
 }
 
 #[cfg(feature = "stark-native")]
@@ -288,41 +291,43 @@ mod tests {
         "cf2a309856f107b143836ada112806da71ae11567fa3f2d2050baba5381c7b7d";
 
     #[test]
-    fn verify_plonk_accepts_well_shaped_artifact() {
-        let proof = vec![7u8; PLONK_PROOF_BYTES];
+    fn verify_snark_accepts_well_shaped_artifact() {
+        let proof = vec![7u8; SNARK_PROOF_BYTES];
         let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
-        assert_eq!(verify_plonk(&proof, &pv), Ok(()));
+        assert_eq!(verify_snark(&proof, &pv), Ok(()));
         assert_eq!(verify_aggregated_range(&proof, &pv), Ok(()));
     }
 
     #[test]
-    fn verify_plonk_rejects_wrong_lengths() {
+    fn verify_snark_rejects_wrong_lengths() {
         let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         assert_eq!(
-            verify_plonk(&[0u8; 767], &pv),
-            Err(VerifyError::ProofLength { got: 767 })
+            verify_snark(&[0u8; SNARK_PROOF_BYTES - 1], &pv),
+            Err(VerifyError::ProofLength {
+                got: SNARK_PROOF_BYTES - 1
+            })
         );
         assert_eq!(
-            verify_plonk(&[0u8; PLONK_PROOF_BYTES], &[0u8; 319]),
+            verify_snark(&[0u8; SNARK_PROOF_BYTES], &[0u8; 319]),
             Err(VerifyError::PublicValuesLength { got: 319 })
         );
     }
 
     #[test]
-    fn verify_plonk_bound_binds_the_expected_keys() {
-        let proof = vec![7u8; PLONK_PROOF_BYTES];
+    fn verify_snark_bound_binds_the_expected_keys() {
+        let proof = vec![7u8; SNARK_PROOF_BYTES];
         let pv = make_public_values(SAMPLE_PROGRAM_VK, SAMPLE_COMMITMENT, SAMPLE_VADCOP_VK);
         let expected = ExpectedProgram {
             program_vk: unhex(SAMPLE_PROGRAM_VK),
             root_c_vadcop_final: unhex(SAMPLE_VADCOP_VK),
         };
-        assert_eq!(verify_plonk_bound(&proof, &pv, &expected), Ok(()));
+        assert_eq!(verify_snark_bound(&proof, &pv, &expected), Ok(()));
 
         // A proof under a different guest program is rejected.
         let mut wrong_program = expected;
         wrong_program.program_vk[0] ^= 0xFF;
         assert_eq!(
-            verify_plonk_bound(&proof, &pv, &wrong_program),
+            verify_snark_bound(&proof, &pv, &wrong_program),
             Err(VerifyError::ProgramVkMismatch)
         );
 
@@ -330,7 +335,7 @@ mod tests {
         let mut wrong_setup = expected;
         wrong_setup.root_c_vadcop_final[31] ^= 0x01;
         assert_eq!(
-            verify_plonk_bound(&proof, &pv, &wrong_setup),
+            verify_snark_bound(&proof, &pv, &wrong_setup),
             Err(VerifyError::RootCVadcopFinalMismatch)
         );
     }

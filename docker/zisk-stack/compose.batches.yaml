@@ -1,0 +1,28 @@
+# Override for a stack that proves batches only, on a GPU that never wraps:
+# the range proofs run in a second stack, on another machine, started with
+# ZISK_JOBS=ranges. Each stack needs its own coordinator, since one
+# coordinator's workers must share a SNARK key setup.
+#
+#   docker compose -f compose.yaml -f compose.batches.yaml up -d
+#
+# The worker drops --snark and --preload-snark, so the pilfflonk key never
+# takes GPU memory here, and the headroom falls back to proofman's default:
+# it was raised only for the allocation the wrap makes after the prover's
+# buffers.
+
+services:
+  worker:
+    command:
+      - zisk-worker-entrypoint
+      - --config
+      - /etc/zisk/worker.toml
+      - --proving-key
+      - /opt/zisk/keys/provingKey
+      - --gpu
+      - --emulator
+    environment:
+      PROOFMAN_GPU_HEADROOM_MB: ${PROOFMAN_GPU_HEADROOM_MB:-756}
+
+  prover:
+    environment:
+      ZISK_JOBS: batches

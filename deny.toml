@@ -16,6 +16,12 @@ ignore = [
     # server's input generator and the guest; it is pinned, not floating,
     # and migrating the wire format is tracked separately.
     "RUSTSEC-2025-0141",
+    # crypto-bigint 0.5 timing variability, reached through k256/p256 0.13
+    # (lib's ecrecover and REVM's precompiles). The fix is only in 0.7, which
+    # those curves do not take. The lane verifies public data only: lib signs
+    # nothing outside tests, which use fixed keys, so no secret reaches the
+    # affected operations. Drop this once k256/p256 move to crypto-bigint 0.7.
+    "RUSTSEC-2026-0387",
 ]
 
 [licenses]

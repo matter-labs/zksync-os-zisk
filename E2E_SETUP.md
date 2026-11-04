@@ -19,19 +19,22 @@ proof generation on a GPU, and the on-chain verification in era-contracts.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 source ~/.cargo/env
 
-# ZiSK toolchain, pinned at v1.3.2-alpha
+# ZiSK toolchain, pinned at v1.4.0-alpha, with the Poseidon1 proving key
+# (the lane's family; ziskup installs the blake3 key by default)
 curl -L https://raw.githubusercontent.com/0xPolygonHermez/zisk/main/ziskup/install.sh | bash
 source ~/.bashrc
-ziskup -v 1.3.2-alpha
+ziskup -v 1.4.0-alpha --provingkey --poseidon1
 
-# PLONK proving key (a separate, multi-gigabyte download)
+# pilfflonk SNARK proving key of the same family (a separate download)
 ziskup setup_snark
 ```
 
 `ziskup` installs `cargo-zisk`, `ziskemu`, `zisk-coordinator` and
 `zisk-worker` into `~/.zisk/bin`, the STARK proving key into
-`~/.zisk/provingKey`, and the PLONK proving key into
-`~/.zisk/provingKeySnark`.
+`~/.zisk/provingKey`, and the pilfflonk proving key into
+`~/.zisk/provingKeySnark`. It also exports `PILFFLONK_JS`, the bundled
+JavaScript verifier `cargo-zisk prove -y` runs under Node.js to check a
+pilfflonk proof.
 
 The resident-prover backend (`--coordinator-url`) needs nothing more: the
 daemon drives `cargo-zisk remote`, and `ziskup` has installed the coordinator
@@ -81,7 +84,7 @@ both the limbs and the 32-byte big-endian value the wire format uses.
 
 ## Step 5: Prove one batch
 
-Export a sample input and prove it with the PLONK wrap:
+Export a sample input and prove it with the pilfflonk wrap:
 
 ```bash
 cd lib && cargo test export_proven_input_for_emulator && cd ..
@@ -90,7 +93,7 @@ cargo-zisk prove \
     -e out/zksync-os-zisk-guest \
     -i /tmp/proven_input.bin \
     -k ~/.zisk/provingKey \
-    -w ~/.zisk/provingKeySnark --plonk \
+    -w ~/.zisk/provingKeySnark --pilfflonk \
     -y -o /tmp/proof.bin -g
 ```
 
@@ -98,9 +101,10 @@ The standard emulator runs anywhere and is the default. `-a` selects the ASM
 emulator, which is faster and needs a high memlock ulimit, so containers with
 an 8 MB memlock limit leave it off.
 
-The output file is bincode of ZiSK's `Proof` struct. It carries the
-768-byte BN254 PLONK proof, the 256-byte publics region, the program VK and
-the vadcop-final VK. Decode it with the daemon's inspector:
+The output file is the magic `ZISKPLNK` followed by bincode of ZiSK's
+`Proof` struct. It carries the 2208-byte BN254 pilfflonk proof, the
+pilfflonk verification key, the publics, the program VK and the vadcop-final
+VK. Decode it with the daemon's inspector:
 
 ```bash
 cd prover && cargo run --bin inspect_proof -- /tmp/proof.bin
@@ -112,8 +116,9 @@ at bytes `[32..96]`.
 
 To keep the intermediate `vadcop_final` STARK stream instead — the artifact
 the aggregator guest verifies, and the artifact the server accepts per
-batch — run the same command without `-w` and `--plonk`. The stream is
-336168 bytes.
+batch — run the same command without `-w` and `--pilfflonk`. The file is
+the 369736-byte stream, followed by a 40-byte seed trailer when the proof
+carries its execution's random seed.
 
 ## Step 6: Run the prover daemon against a sequencer
 
@@ -135,7 +140,7 @@ cargo run --release -- \
   --elf-path ../out/zksync-os-zisk-guest \
   --aggregation --aggregator-elf ../out/zksync-os-zisk-guest-aggregator \
   --proving-key ~/.zisk/provingKey \
-  --proving-key-plonk ~/.zisk/provingKeySnark
+  --proving-key-snark ~/.zisk/provingKeySnark
 ```
 
 `prover/README.md` covers the two proving backends, every CLI flag, the
@@ -147,24 +152,16 @@ container image with a compose file.
 ## Step 7: Verify on-chain
 
 Update the ZiSK verifier in era-contracts with the pins from Step 4, then
-regenerate and test it:
+test it:
 
 ```bash
-cd ~/zksync-os-second-proof-system/era-contracts/tools
-
-# Put the ROM root limbs of both guests, and rootCVadcopFinal, into
-# data/ZiSK_vk.json, then regenerate the verifier.
-npm ci
-node render_plonk_verifier.js data/ZiSK_plonk_verification_key.json \
-    data/PlonkVerifier.sol
-cargo run -- --variant zisk
-
-cd ../l1-contracts && forge test --match-contract ZiskVerifier
+cd ~/zksync-os-second-proof-system/era-contracts/l1-contracts
+forge test --match-contract ZiskVerifier
 ```
 
 `era-contracts/l1-contracts/contracts/state-transition/verifiers/README.md`
 holds the full generation and deployment procedure, including the exact
-paths of the generated contracts.
+paths of the generated contracts and of ZiSK's pilfflonk verifier.
 
 ## What to check at each step
 
@@ -172,7 +169,7 @@ paths of the generated contracts.
 - **Step 4**: the printed root-hash limbs match the committed
   `GUEST_PROGRAM_VK` files.
 - **Step 5**: `/tmp/proof.bin` exists, and `inspect_proof` reports a
-  768-byte proof with 320 bytes of public values.
+  2208-byte proof with 576 bytes of public values.
 - **Step 6**: the daemon logs `proof submitted`, and the server accepts the
   submission without a VK-drift error.
 - **Step 7**: the era-contracts foundry suite passes.

@@ -4,7 +4,7 @@
 # image; the command picks the process.
 #
 #   cp .env.example .env      # set ZISK_SEQUENCER_URL, image tag, GPU
-#   docker compose up -d      # first start downloads 27 GB of keys
+#   docker compose up -d      # first start downloads about 7 GB of keys
 #   docker compose logs -f prover
 #
 # Start order: the worker's entrypoint installs the proving keys (a no-op
@@ -14,8 +14,10 @@
 # several minutes on a cold start.
 #
 # Requirements on the host: the NVIDIA container toolkit, a GPU with 16 GB or
-# more of VRAM, 64 GB or more of RAM for the resident PLONK key, and about
-# 80 GB free for the key volume.
+# more of VRAM, 64 GB or more of RAM, and about 80 GB free for the key volume.
+#
+# Moving to a new ZiSK version: remove the worker-cache volume, so the program
+# setups and ASM emulators it holds are regenerated for the new release.
 
 name: zisk-stack
 
@@ -62,8 +64,10 @@ services:
     # The entrypoint fetches, verifies and installs the proving keys into the
     # key volume and generates the constant trees on the first start (a no-op
     # once the volume holds keys for the image's ZiSK version), then runs
-    # zisk-worker with the arguments below. --preload-plonk keeps the PLONK
-    # key resident: that is the point of the coordinator mode. --emulator
+    # zisk-worker with the arguments below. --snark wires the pilfflonk key
+    # (without it the worker registers with no final SNARK and the wrap jobs
+    # fail) and --preload-snark keeps it resident: that is the point of the
+    # coordinator mode. --emulator
     # selects the standard emulator; drop it to use the ASM emulator (faster
     # witness generation, needs the memlock ulimit below and the build
     # toolchain the image carries).
@@ -75,13 +79,17 @@ services:
       - /opt/zisk/keys/provingKey
       - --proving-key-snark
       - /opt/zisk/keys/provingKeySnark
-      - --plonk
-      - --preload-plonk
+      - --snark
+      - --preload-snark
       - --gpu
       - --emulator
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      # GPU memory proofman leaves free after its buffers. The pilfflonk wrap
+      # allocates about 0.7 GB there; ZiSK's own release proving raises the
+      # 756 MB default to this for the same reason.
+      PROOFMAN_GPU_HEADROOM_MB: ${PROOFMAN_GPU_HEADROOM_MB:-1536}
       # Key installation on the first start.
       ZISK_KEYS_ALLOW_UNPINNED: ${ZISK_KEYS_ALLOW_UNPINNED:-0}
       ZISK_KEYS_GPU: ${ZISK_KEYS_GPU:-1}
@@ -120,6 +128,8 @@ services:
       - ${ZISK_PROVER_ID:-zisk-stack}
     environment:
       RUST_LOG: ${RUST_LOG:-info}
+      # all, batches or ranges; see compose.batches.yaml for the split.
+      ZISK_JOBS: ${ZISK_JOBS:-all}
     ports:
       - "127.0.0.1:3313:3313"
     volumes:
@@ -132,7 +142,7 @@ services:
       retries: 3
 
 volumes:
-  # 27 GB of tarballs during installation, plus the unpacked keys after.
+  # About 7 GB of tarballs during installation, plus the unpacked keys after.
   zisk-keys:
   worker-cache:
   coordinator-cache:

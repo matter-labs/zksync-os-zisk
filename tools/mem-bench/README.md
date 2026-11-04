@@ -16,7 +16,7 @@ guest ELF.
 
 Peak heap high-water via a tracking global allocator (sum of live allocation
 sizes) — an allocator-independent first-order proxy for the guest dlmalloc wall
-(**507.75 MiB**). Wall time is also reported so the memory fix's throughput
+(**507.5625 MiB**). Wall time is also reported so the memory fix's throughput
 impact is visible. The eventual box-side validation is the guest `BUMP_PTR`
 high-water under `ziskemu`.
 
