@@ -2,8 +2,14 @@ name: Release-please
 
 # Maintains the release PR from conventional commits on main and publishes the GitHub release when it merges.
 
+# A reusable workflow cannot elevate GITHUB_TOKEN, so the caller grants what
+# the shared workflow's jobs may use.
 permissions:
-  contents: read
+  contents: write
+  pull-requests: write
+  id-token: write
+  attestations: write
+  issues: write # release-please labels
 
 on:
   push:
@@ -11,27 +17,25 @@ on:
       - main
   workflow_dispatch:
 
+# Run release-please for every commit, in order.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   release-please:
-    runs-on: ubuntu-latest
-    steps:
-      # As in zksync-ci-common's release-please workflow: GitHub signs the
-      # commits an App installation token creates through the API, which is how
-      # release-please commits, and `main` requires signed commits. Events from
-      # an App token, unlike github.token's, trigger workflows, so the published
-      # release fires release-assets.
-      - name: Generate the bot App token
-        id: app_token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
-          private-key: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-
-      - name: Run release-please
-        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-        with:
-          token: ${{ steps.app_token.outputs.token }}
-          config-file: .github/release-please/config.json
-          manifest-file: .github/release-please/manifest.json
+    uses: matter-labs/zksync-ci-common/.github/workflows/release-please.yaml@861e435968531a7699cb7f644107f89a2b7734e0 # main
+    secrets:
+      # Org-level secrets of the GitHub App used to mint installation tokens.
+      # API commits are auto-signed, which `main` requires, and the App token's
+      # published release fires release-assets.
+      MATTERLABS_BOTS_APP_ID: ${{ secrets.MATTERLABS_BOTS_APP_ID }}
+      MATTERLABS_BOTS_PRIVATE_KEY: ${{ secrets.MATTERLABS_BOTS_PRIVATE_KEY }}
+    with:
+      config: '.github/release-please/config.json'
+      manifest: '.github/release-please/manifest.json'
+      # A release PR touches only CHANGELOG.md and the manifest, and the
+      # repository root holds no Cargo workspace for `cargo update` to run in.
+      update-cargo-lock: 'false'
+      # No release webhook is shared with this repository.
+      notify-slack: 'false'
