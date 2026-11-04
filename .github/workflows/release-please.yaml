@@ -27,21 +27,44 @@ jobs:
           manifest-file: .github/release-please/manifest.json
 
       # `main` requires signed commits, and GitHub does not sign the commits the
-      # action creates with a PAT. `pr` is set when the action created or
-      # updated the release PR.
+      # action creates with a PAT. The open release PR is looked up rather than
+      # taken from the action's `pr` output: that is unset when a run leaves
+      # the PR unchanged, as a push of hidden commit types (ci, chore) does,
+      # which would leave an unsigned PR from an earlier run unsigned.
+      - name: Find the open release PR
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="$(gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100" \
+            --jq '[.[] | select(.head.ref | startswith("release-please--branches--main"))][0].head.ref // ""')"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
       - name: Check out the release PR branch
-        if: steps.release.outputs.pr
+        if: steps.release-pr.outputs.branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          ref: ${{ steps.release-pr.outputs.branch }}
           fetch-depth: 2
           persist-credentials: false
 
+      # From this run's commit: the release PR branch can predate the script.
+      - name: Check out the signing script
+        if: steps.release-pr.outputs.branch
+        uses: actions/checkout@v4
+        with:
+          path: .signing-tooling
+          sparse-checkout: |
+            .github/scripts/push-signed-commit.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       - name: Re-create the release PR commit signed
-        if: steps.release.outputs.pr
+        if: steps.release-pr.outputs.branch
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-          BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+          BRANCH: ${{ steps.release-pr.outputs.branch }}
         run: |
           set -euo pipefail
           head="$(git rev-parse HEAD)"
@@ -53,6 +76,6 @@ jobs:
           git log -1 --format=%B "$head" > "$RUNNER_TEMP/release-commit.txt"
           # Both sides of a rename, so the script deletes the old path.
           mapfile -t paths < <(git diff --name-only --no-renames HEAD^ HEAD)
-          .github/scripts/push-signed-commit.sh \
+          .signing-tooling/.github/scripts/push-signed-commit.sh \
             "$BRANCH" "$(git rev-parse HEAD^)" "$RUNNER_TEMP/release-commit.txt" "$head" \
             "${paths[@]}"
