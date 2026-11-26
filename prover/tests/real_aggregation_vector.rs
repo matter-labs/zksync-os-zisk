@@ -21,7 +21,7 @@
 use zksync_os_zisk_guest_aggregator as agg;
 use zksync_os_zisk_prover_service::aggregator_input::load_proof_stream;
 
-const INNER_PROGRAM_VK: &str = "747be84de38d60d9b5816ddad433d41c9771825b630bddbc90cb1585dda69a6c";
+const INNER_PROGRAM_VK: &str = "2ec490cc1239f924eddc97fa13db1e4eee4124cdd85a15a1f518990d54f652d8";
 const ROOT_C_VADCOP_FINAL: &str =
     "e9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66";
 const COMMITMENTS: [&str; 4] = [
@@ -30,7 +30,7 @@ const COMMITMENTS: [&str; 4] = [
     "d5a7b4485d1aece18348655132e73c86b23fa0f251adb173f80123d05a914f15",
     "c5ed165443011bac65df4d0f4240de3429c033996e9fce630a631e117537cd61",
 ];
-const DIGEST: &str = "5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0";
+const DIGEST: &str = "b1449f75ebc58ce20243dd3774c8f1a617b4e06df533c7e74c2e8cedc7bfb0b0";
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

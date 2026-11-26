@@ -19,6 +19,9 @@
 use alloy_primitives::{Address, B256, U256};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use zksync_os_revm::constants::{
+    BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS,
+};
 use zksync_os_zisk_lib::block_header::compute_block_header_hash;
 use zksync_os_zisk_lib::block_roots::{block_tx_tree_root, receipt_leaf};
 use zksync_os_zisk_lib::commitment::block_hashes_blake;
@@ -289,6 +292,21 @@ fn build_batch_input(value: U256) -> BatchInput {
         .parse()
         .expect("fixture history address is valid");
     let history_key = derive_account_properties_key(&history_address.into_array());
+    // From AtlasV4 on, the L1 flow reads the treasury and the L2 base token,
+    // and the asset tracker's account and L1_CHAIN_ID slot (154), before the
+    // body, as native ZKsync OS does. None of them is in the fixture tree, so
+    // the batch proves their absence.
+    let l1_flow_keys = [
+        BASE_TOKEN_HOLDER_ADDRESS,
+        L2_ASSET_TRACKER_ADDRESS,
+        L2_BASE_TOKEN_ADDRESS,
+    ]
+    .map(|address| derive_account_properties_key(&address.into_array()))
+    .into_iter()
+    .chain([derive_flat_storage_key(
+        &L2_ASSET_TRACKER_ADDRESS.into_array(),
+        &B256::with_last_byte(154),
+    )]);
     let block_header_hash = compute_block_header_hash(
         &parent_hash,
         &sender.into_array(),
@@ -337,13 +355,16 @@ fn build_batch_input(value: U256) -> BatchInput {
             coinbase: sender, // coinbase = sender so no extra account proof is needed
             prev_randao: B256::from([1u8; 32]),
             block_header_hash,
-            storage_proofs: vec![
+            storage_proofs: [
                 (sender_flat_key, proof),
                 (
                     history_key,
                     non_existence_proof(&leaves, &siblings, &history_key),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(l1_flow_keys.map(|key| (key, non_existence_proof(&leaves, &siblings, &key))))
+            .collect(),
             account_preimages: vec![(sender, sender_props)],
             transactions: vec![TxInput {
                 chain_id: Some(270),

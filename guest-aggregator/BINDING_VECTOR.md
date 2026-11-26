@@ -43,10 +43,10 @@ digest = keccak256(innerProgramVK ‖ rootCVadcopFinal ‖ rangePublicInput)
 The settlement layer rejects a non-zero carried hash, so a range carries
 no continuation input.
 
-## Inputs (real 4-batch aggregation session, ZiSK v1.4.0-alpha, 2026-11-03)
+## Inputs (real 4-batch aggregation session, ZiSK v1.4.0-alpha, 2026-11-26)
 
-This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/41671348755) from
-`alo/zisk-1.4.0-alpha` at `ade1ce58ab3164821267bc7e2bf15cc382b83d04`. The inputs are
+This vector was produced by [fixture-session run](https://github.com/matter-labs/zksync-os-zisk/actions/runs/45818119218) from
+`alocascio/zksync-os-revm-v0.5.1` at `606d3c2ece8ab00c2cb52e81ff614dc63654a007`. The inputs are
 deterministic wire-v6 protocol-v32 AtlasV4 fixtures (wire version 6, spec ID 3,
 protocol minor 32), encoded by `tools/test-utils` and executed natively through
 the version-dispatching bincode entry point. They carry the four-word public
@@ -58,18 +58,18 @@ in batch order, with the commitments extracted from all four guest proofs
 before the SNARK wrap or recursive proving. All four pairs were equal.
 
 Session data: inner ELF SHA-256
-`ed7a53e344a183f9b6660896a477eede76c907c3bd62fe9a466521b538372c59`, aggregator ELF SHA-256
+`0918218a4380ccaa91d28cb22e35cd20568554bc3e47a07d181621de389ea058`, aggregator ELF SHA-256
 `a438ea097e2ef18f9328a7d7e087c261cf6261813ae8f71cb0e586420c4f4065`.
 
 Framed inputs:
 
-- `batch-1.bin`: framed SHA-256 `ea6d4b2b850978515ce8f211de84d320e7ef11bedc9d8f6f21ca627c2f4c5ff4`
-- `batch-2.bin`: framed SHA-256 `d45789841e4aa3ca3b0ff9c5a8115eb8f81381ae9518662139972dd239c0742a`
-- `batch-3.bin`: framed SHA-256 `bca6e66286ee742f21e772029034c3b16f3bbe124f5cb6c7a514514b1e583704`
-- `batch-4.bin`: framed SHA-256 `7fecab39d8986e976d53ec78333d687546bd0a8485617877bef8caa979d71ea5`
+- `batch-1.bin`: framed SHA-256 `178c98bf0ac93d41766c7d6df63da6a5ec8e920850c65a1eed170968d86db787`
+- `batch-2.bin`: framed SHA-256 `a690abaab5ffc293d1572ef1646aa368900f785927e8366761ef68eaea0abc13`
+- `batch-3.bin`: framed SHA-256 `80af931073c9398d4b30a5de9b9090fce160795806fb68ef2e1df8eec2cfe60a`
+- `batch-4.bin`: framed SHA-256 `4f693bc7fd5e9ce642fc9f27670c18ef546695407bf1689e7d646ef5aab67900`
 
 ```text
-innerProgramVK   = 0x747be84de38d60d9b5816ddad433d41c9771825b630bddbc90cb1585dda69a6c
+innerProgramVK   = 0x2ec490cc1239f924eddc97fa13db1e4eee4124cdd85a15a1f518990d54f652d8
 rootCVadcopFinal = 0xe9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66
 ```
 
@@ -101,7 +101,7 @@ formula.
 
 ```text
 rangePublicInput = 0x00000000108311cf154dafcd8fbeb3d29ff924941d60db59f523d33baa5d2ca5
-digest           = 0x5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0
+digest           = 0xb1449f75ebc58ce20243dd3774c8f1a617b4e06df533c7e74c2e8cedc7bfb0b0
 ```
 
 The real aggregated proof of this range commits the same digest: the
