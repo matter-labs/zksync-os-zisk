@@ -15,7 +15,7 @@ use zksync_os_zisk_prover_service::prover::parse_proof_file;
 
 const AGGREGATOR_PROGRAM_VK: &str =
     "e7f72bf4c1825a6f852e65fc872c810320218c63ed41cf9bb4345737a4ac31ec";
-const DIGEST: &str = "5afe2e89a27ddd841b343cff7fb3a9f3c0dc18b0d6bc7d685fbfa55af59c9bd0";
+const DIGEST: &str = "b1449f75ebc58ce20243dd3774c8f1a617b4e06df533c7e74c2e8cedc7bfb0b0";
 const ROOT_C_VADCOP_FINAL: &str =
     "e9414e134bb6945a148a79d44c8e850e5ef582a2b0e8dbfb2428ff0a515a6e66";
 
