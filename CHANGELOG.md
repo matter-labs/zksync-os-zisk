@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.0.11](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.10...0.0.11) (2026-11-26)
+
+
+### Bug Fixes
+
+* **lib:** execute with zksync-os-revm v0.5.1 (L1 pre-execution warming) ([#70](https://github.com/matter-labs/zksync-os-zisk/issues/70)) ([5e20c3c](https://github.com/matter-labs/zksync-os-zisk/commit/5e20c3c8ad845ea8ff787e6030e4719036eb7e77))
+
 ## [0.0.10](https://github.com/matter-labs/zksync-os-zisk/compare/0.0.9...0.0.10) (2026-11-04)
 
 
