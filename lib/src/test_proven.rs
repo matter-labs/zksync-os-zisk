@@ -4147,7 +4147,9 @@ mod tests {
     /// commit the same balances.
     #[test]
     fn atlas_v5_filtered_priority_tx_is_charged_its_full_gas_limit() {
-        use zksync_os_revm::constants::{BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS};
+        use zksync_os_revm::constants::{
+            BASE_TOKEN_HOLDER_ADDRESS, L2_ASSET_TRACKER_ADDRESS, L2_BASE_TOKEN_ADDRESS,
+        };
         const GAS_LIMIT: u64 = 200_000;
         const MAX_FEE_PER_GAS: u64 = 1_000;
         const EXTRA_DEPOSIT: u64 = 5_000;
@@ -4196,6 +4198,9 @@ mod tests {
                 AccountChange { address: to, before: None, after: None },
                 // The L1 flow loads the asset tracker; this chain has none.
                 AccountChange { address: L2_ASSET_TRACKER_ADDRESS, before: None, after: None },
+                // It also loads the L2 base token, the caller of every tracker
+                // notification, as native does.
+                AccountChange { address: L2_BASE_TOKEN_ADDRESS, before: None, after: None },
             ],
             SingleTx {
                 input: TxInput {
